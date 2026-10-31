@@ -264,33 +264,61 @@ class OData:
         return res
 
     def prices(self, price_type_key):
-        """{номенклатура: цена} — последние действующие цены указанного вида.
-        Пробует несколько способов чтения регистра цен; рабочий запоминает."""
+        """{номенклатура: цена} — последняя действующая цена указанного вида.
+        Собирает цены из ВСЕХ источников (оба регистра цен + документы «Установка цен
+        номенклатуры») и по каждому товару берёт самую позднюю."""
         flt = {"$filter": f"ВидЦены_Key eq guid'{price_type_key}'"}
-        methods = []
+        all_rows, info = [], []
+
+        # 1. регистры цен (у каждого — первый рабочий способ чтения)
         for reg in PRICE_REGS:
-            methods += [(reg + "_RecordType", flt, 2000),   # плоский список записей
-                        (reg + "/SliceLast", None, 2000),     # срез последних
-                        (reg, None, 200)]                     # наборы записей по регистратору
-        if getattr(self, "_price_method", None):
-            methods.insert(0, self._price_method)
-        errors = []
-        for path, params, page in methods:
-            if path.split("/")[0] not in self.sets:
-                continue
+            for path, params, page in ((reg + "_RecordType", flt, 2000),
+                                       (reg + "/SliceLast", None, 2000),
+                                       (reg, None, 200)):
+                if path.split("/")[0] not in self.sets:
+                    continue
+                try:
+                    rows = self.get_all(path, params, page=page, label="Цены")
+                except RuntimeError as e:
+                    log(f"Цены: {path} не подошёл — {e}")
+                    continue
+                n = len(self._latest_prices(rows, price_type_key))
+                info.append(f"{reg.split('_', 1)[1]}: {n}")
+                all_rows += rows
+                break
+
+        # 2. документы «Установка цен номенклатуры» (проведённые)
+        doc = "Document_УстановкаЦенНоменклатуры"
+        tab = doc + "_Товары"
+        if doc in self.sets and tab in self.sets:
             try:
-                rows = self.get_all(path, params, page=page, label="Цены")
+                docs = self.get_all(doc, {"$select": "Ref_Key,Date,Posted,DeletionMark"},
+                                    page=2000, label="Установки цен", order="Ref_Key")
+                dates = {d["Ref_Key"]: d.get("Date") for d in docs
+                         if d.get("Posted") and not d.get("DeletionMark")}
+                params = flt if self.has(tab + "_RowType", "ВидЦены_Key") or \
+                    not self.props.get(tab + "_RowType") else None
+                rows = self.get_all(tab, params, page=2000, label="Строки установок цен")
+                conv = []
+                for r in rows:
+                    d = dates.get(r.get("Ref_Key"))
+                    if not d:
+                        continue
+                    conv.append({"ВидЦены_Key": r.get("ВидЦены_Key", price_type_key),
+                                 "Номенклатура_Key": r.get("Номенклатура_Key"),
+                                 "Характеристика_Key": r.get("Характеристика_Key"),
+                                 "Цена": r.get("Цена"), "Period": d})
+                info.append(f"документы установки цен: {len(self._latest_prices(conv, price_type_key))}")
+                all_rows += conv
             except RuntimeError as e:
-                errors.append(str(e)[:200])
-                log("Цены: способ не подошёл — " + str(e))
-                continue
-            res = self._latest_prices(rows, price_type_key)
-            if res:
-                self._price_method = (path, params, page)
-                return res
-        if errors:
-            raise RuntimeError("Не удалось прочитать закупочные цены из 1С:\n" + "\n".join(errors))
-        return {}
+                log("Цены из документов не прочитаны — " + str(e))
+                info.append("документы установки цен: ошибка чтения")
+        else:
+            info.append("документы установки цен: не опубликованы в OData")
+
+        self.price_info = "; ".join(info)
+        log("Источники закупочных цен — " + self.price_info)
+        return self._latest_prices(all_rows, price_type_key)
 
     @staticmethod
     def _latest_prices(rows, price_type_key):
@@ -673,6 +701,8 @@ class App(tk.Tk):
                 "checked": prev.get("checked", False) if ok else False,
             }
         no_price = sum(1 for i in self.items.values() if i["pair"] and not i["price"])
+        if getattr(self.od, "price_info", ""):
+            self.say("Закупочные цены найдены — " + self.od.price_info + ".")
         msg = f"Остатки обновлены: к передаче доступно {len(self.items)} позиций"
         if no_pair:
             msg += f" (ещё {no_pair} без карточки {config.SUFFIX} скрыты)"
