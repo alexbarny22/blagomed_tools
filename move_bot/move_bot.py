@@ -653,11 +653,15 @@ class App(tk.Tk):
             self.say(f"Догружено карточек, которых не было в сохранённом списке: {len(extra)}.")
         src, dst = self.settings["src_key"], self.settings["dst_key"]
         old, self.items = self.items, {}
+        no_pair = 0
         for key, name in self.noms.items():
             st = stock.get((key, src))
             if not st or st[0] <= 0:
                 continue
             pair = self.pairs.get(mg_base(norm(name)))
+            if not pair:            # нет карточки (МГ) — в списке не показываем
+                no_pair += 1
+                continue
             price = prices.get(key)
             ok = bool(pair and price)
             prev = old.get(key, {})
@@ -668,11 +672,10 @@ class App(tk.Tk):
                 "qty": prev.get("qty", 0.0) if ok else 0.0,
                 "checked": prev.get("checked", False) if ok else False,
             }
-        no_pair = sum(1 for i in self.items.values() if not i["pair"])
         no_price = sum(1 for i in self.items.values() if i["pair"] and not i["price"])
-        msg = f"Остатки обновлены: на общем складе {len(self.items)} позиций"
+        msg = f"Остатки обновлены: к передаче доступно {len(self.items)} позиций"
         if no_pair:
-            msg += f", без карточки {config.SUFFIX}: {no_pair}"
+            msg += f" (ещё {no_pair} без карточки {config.SUFFIX} скрыты)"
         if no_price:
             msg += f", без закупочной цены: {no_price}"
         self.say(msg + ".")
