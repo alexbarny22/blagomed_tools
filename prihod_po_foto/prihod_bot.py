@@ -8,6 +8,7 @@
 Запуск: start.bat
 """
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import time
 import datetime as dt
 import html
@@ -720,14 +721,23 @@ async def cb_post(c: CallbackQuery):
     steps.EXPECT = dict(steps.EXPECT, onec=10)
     msg = await c.message.answer(render(steps, "📦 Провожу поступление в 1С"), parse_mode="HTML")
     live = Live(msg, steps, "📦 Провожу поступление в 1С")
-    st1 = steps.add("onec", "Беру настройки из прошлого поступления")
     try:
         def job():
-            if s.get("orders") is not None or getattr(config, "USE_ORDERS", True):
-                try:      # заказы могли закрыться/появиться, пока смотрели итог
-                    s["orders"] = c1.orders_context(s["ka"])
+            if getattr(config, "USE_ORDERS", True):
+                # заказы могли закрыться/появиться, пока смотрели итог — перечитываем, но не дольше ORDERS_TIMEOUT
+                sto = steps.add("onec", "Перечитываю открытые заказы поставщику")
+                ex_ = ThreadPoolExecutor(max_workers=1)
+                fut = ex_.submit(c1.orders_context, s["ka"])
+                try:
+                    s["orders"] = fut.result(timeout=getattr(config, "ORDERS_TIMEOUT", 90))
+                    oc = s["orders"]
+                    steps.finish(sto, "ok", f"открытых: {len(oc['orders'])}" if oc else "открытых заказов нет")
                 except Exception as ex:
                     log.warning("Заказы не перечитаны перед проведением: %s", ex)
+                    steps.finish(sto, "warn", "1С долго отвечает — беру заказы, прочитанные при распознавании")
+                finally:
+                    ex_.shutdown(wait=False)
+            st1 = steps.add("onec", "Беру настройки из прошлого поступления")
             tpl, own = c1.template(s["ka"])
             steps.finish(st1, "ok", "от этого поставщика" if own else "поставщик новый — образец от другого")
             st2 = steps.add("onec", f"Записываю документ ({len(use)} строк) и провожу")
@@ -802,6 +812,7 @@ async def warm_orders_loop():
                 if ka:
                     oc = await asyncio.to_thread(c1.orders_context, ka)
                     WARM[inn] = {"t": time.time(), "ka": ka, "orders": oc}
+                    await asyncio.to_thread(c1.template, ka, 0)     # образец шапки — тоже заранее
                     log.info("Заготовка заказов %s: %s открытых, %.0f с", ka["Description"],
                              len(oc["orders"]) if oc else 0, time.time() - t0)
             except Exception as ex:

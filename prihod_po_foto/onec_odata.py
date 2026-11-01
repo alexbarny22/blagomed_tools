@@ -126,6 +126,7 @@ class OneC:
         self._choices = {}
         self._by_key = {}
         self._refs = {}
+        self._tpl_cache = {}
 
     # ---------- номенклатура (кэш в файле, как в move_bot)
     def load_items(self, force=False):
@@ -257,17 +258,15 @@ class OneC:
 
     # ---------- шаблон шапки: последнее поступление от этого поставщика (или любое)
     def _last_doc(self, flt):
-        try:
-            rows = self.od.get(DOC, **{"$filter": flt, "$orderby": "Date desc", "$top": "1"})
-            return rows[0] if rows else None
-        except ODataError as e:
-            if "404" in str(e) and "Приобретение" in str(e):
-                raise
-            heads = self.od.get(DOC, **{"$filter": flt, "$select": "Ref_Key,Date"})
-            if not heads:
-                return None
-            k = max(heads, key=lambda r: r.get("Date", ""))["Ref_Key"]
-            return self.od.get(f"{DOC}(guid'{k}')")
+        """Последний документ: ищем сначала за 2 месяца, потом за год, потом везде — без тяжёлой сортировки в 1С."""
+        now = dt.datetime.now()
+        for days in (60, 365, None):
+            f = flt if days is None else f"{flt} and Date ge datetime'{odt(now - dt.timedelta(days=days))}'"
+            heads = self.od.get(DOC, **{"$filter": f, "$select": "Ref_Key,Date"})
+            if heads:
+                k = max(heads, key=lambda r: r.get("Date", ""))["Ref_Key"]
+                return self.od.get(f"{DOC}(guid'{k}')")
+        return None
 
     def _ref(self, entity, name):
         if not name:
@@ -280,7 +279,16 @@ class OneC:
             self._refs[k] = (exact or rows or [None])[0]
         return self._refs[k]
 
-    def template(self, ka):
+    def template(self, ka, max_age=3600):
+        """Образец шапки; для одного поставщика запоминается на час (Гаврюшкин готовится заранее в фоне)."""
+        hit = self._tpl_cache.get(ka["Ref_Key"])
+        if hit and time.time() - hit[0] < max_age:
+            return hit[1], hit[2]
+        tpl, own = self._template(ka)
+        self._tpl_cache[ka["Ref_Key"]] = (time.time(), tpl, own)
+        return tpl, own
+
+    def _template(self, ka):
         flt = "DeletionMark eq false and Posted eq true"
         try:
             tpl = self._last_doc(f"Контрагент_Key eq guid'{ka['Ref_Key']}' and {flt}")
