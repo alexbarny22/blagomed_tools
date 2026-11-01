@@ -30,11 +30,16 @@ def p(s=""):
 
 def list_models():
     m = next((x for x in config.MODELS if x.get("type", "openai") == "openai"), None)
-    if not m:
-        print("В MODELS нет агрегатора")
+    if not m or "ЗАМЕНИТЬ" in m.get("base_url", "") or not m.get("api_key"):
+        print("Агрегатор (vsellm) ещё не настроен: в config.py заполните VSELLM_URL и VSELLM_KEY.\n"
+              "Чтобы проверить GigaChat, запустите test_models.bat ещё раз и выберите пункт 1.")
         return
-    r = requests.get(m["base_url"].rstrip("/") + "/models", headers={"Authorization": "Bearer " + m["api_key"]},
-                     timeout=60)
+    try:
+        r = requests.get(m["base_url"].rstrip("/") + "/models",
+                         headers={"Authorization": "Bearer " + m["api_key"]}, timeout=60)
+    except requests.RequestException as e:
+        print(f"Не удалось связаться с {m['base_url']}: {e}\nПроверьте адрес VSELLM_URL в config.py.")
+        return
     if r.status_code != 200:
         print(f"HTTP {r.status_code}: {r.text[:500]}")
         return
@@ -69,7 +74,11 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "list":
         list_models()
         return
-    models = [m for m in config.MODELS if m.get("enabled", True)]
+    models = [m for m in config.MODELS if m.get("enabled", True)
+              and "ЗАМЕНИТЬ" not in m.get("base_url", "") + m.get("model", "") and m.get("api_key")]
+    if not models:
+        print("Нет ни одной настроенной нейросети: в config.py у нужной модели заполните ключ и \"enabled\": True.")
+        return
     found = docs()
     if not found:
         return
