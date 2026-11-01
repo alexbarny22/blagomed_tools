@@ -6,6 +6,7 @@ config.py, settings.json, кэш и журнал никогда не трога�
 Если интернета/GitHub нет — просто запускается текущая версия.
 """
 import os
+import time
 import sys
 import urllib.request
 
@@ -34,7 +35,8 @@ def fetch(name, tok):
             "Accept": "application/vnd.github.raw",
             "User-Agent": "prihod-updater"})
     else:     # публичный репозиторий
-        url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{FOLDER}/{name}"
+        # метка времени в адресе — чтобы GitHub не отдавал старую копию из кэша (до 5 минут)
+        url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{FOLDER}/{name}?t={int(time.time())}"
         req = urllib.request.Request(url, headers={"User-Agent": "prihod-updater",
                                                    "Cache-Control": "no-cache"})
     with urllib.request.urlopen(req, timeout=20) as r:
