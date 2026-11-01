@@ -16,6 +16,7 @@ from rapidfuzz import fuzz, process
 HERE = os.path.dirname(os.path.abspath(__file__))
 EMPTY = "00000000-0000-0000-0000-000000000000"
 DOC = "Document_ПриобретениеТоваровУслуг"
+ORDER_DOC = "Document_ЗаказПоставщику"
 CACHE_FILE = os.path.join(HERE, "nomenclature.json")
 
 
@@ -295,7 +296,98 @@ class OneC:
         return tpl, own
 
     # ---------- сборка и проведение
-    def build(self, ka, rec, lines, tpl, own_tpl):
+    # ---------- заказы поставщику: куда разложить поступление
+    @staticmethod
+    def _order_ref_field(row):
+        """Поле строки поступления со ссылкой на заказ (ЗаказПоставщику_Key или составное ЗаказПоставщику)."""
+        for k in row:
+            if "ЗаказПоставщику" in k and not k.endswith("_Type") and "@" not in k:
+                return k
+        return None
+
+    def orders_context(self, ka, tpl=None):
+        """
+        Открытые заказы поставщику и сколько по ним ещё не поступило.
+        Не поступило = заказано − уже оприходовано проведёнными поступлениями со ссылкой на этот заказ.
+        """
+        od = self.od
+        flt = f"Контрагент_Key eq guid'{ka['Ref_Key']}' and Posted eq true and DeletionMark eq false"
+        try:
+            orders = od.get(ORDER_DOC, **{"$filter": flt, "$orderby": "Date asc"})
+        except ODataError:
+            orders = od.get(ORDER_DOC, **{"$filter": flt})
+            orders.sort(key=lambda r: r.get("Date", ""))
+        orders = [o for o in orders if "закрыт" not in str(o.get("Статус", "")).lower()]
+        if not orders:
+            return None
+        okeys = {o["Ref_Key"] for o in orders}
+        since = min(o["Date"] for o in orders)[:19]
+        try:
+            recs = od.get(DOC, **{"$filter": f"{flt} and Date ge datetime'{since}'"})
+        except ODataError:
+            recs = [r for r in od.get(DOC, **{"$filter": flt}) if r.get("Date", "") >= since]
+        # как в этой базе строка поступления ссылается на заказ — узнаём по прошлым поступлениям/образцу
+        sample = [ln for r in recs + ([tpl] if tpl else []) for ln in (r.get("Товары") or [])]
+        field = next((self._order_ref_field(ln) for ln in sample if self._order_ref_field(ln)), "ЗаказПоставщику_Key")
+        got_code, got_item = {}, {}
+        for r in recs:
+            for ln in r.get("Товары") or []:
+                ok = ln.get(field)
+                if ok not in okeys:
+                    continue
+                q_ = to_num(ln.get("Количество"))
+                code = ln.get("КодСтроки")
+                if code:
+                    got_code[(ok, code)] = got_code.get((ok, code), 0) + q_
+                got_item[(ok, ln.get("Номенклатура_Key"))] = got_item.get((ok, ln.get("Номенклатура_Key")), 0) + q_
+        # совпадают ли коды строк поступлений с кодами строк заказов (тогда связь построчная)
+        order_codes = {(o["Ref_Key"], ln.get("КодСтроки")) for o in orders for ln in o.get("Товары") or []}
+        use_code = bool(got_code) and all(k in order_codes for k in got_code)
+        rem = []
+        for o in orders:
+            left_item = {}
+            for ln in o.get("Товары") or []:
+                if ln.get("Отменено"):
+                    continue
+                item = ln.get("Номенклатура_Key")
+                qty = to_num(ln.get("Количество"))
+                if use_code:
+                    qty -= got_code.get((o["Ref_Key"], ln.get("КодСтроки")), 0)
+                else:              # поступило по товару — списываем со строк заказа по порядку
+                    k = (o["Ref_Key"], item)
+                    left_item.setdefault(k, got_item.get(k, 0))
+                    take = min(qty, left_item[k])
+                    left_item[k] -= take
+                    qty -= take
+                if qty > 0.0001:
+                    rem.append({"order": o["Ref_Key"], "number": str(o.get("Number", "")).strip(),
+                                "date": o.get("Date", "")[:10], "item": item, "code": ln.get("КодСтроки"),
+                                "left": qty})
+        return {"orders": orders, "rem": rem, "field": field, "use_code": use_code}
+
+    @staticmethod
+    def allocate(ctx, lines):
+        """Раскладывает строки по заказам, от старых к новым. -> [[(rem или None, кол-во), ...] на каждую строку]."""
+        left = [dict(r) for r in (ctx or {}).get("rem", [])]
+        out = []
+        for it in lines:
+            need = float(it["line"]["qty"])
+            parts = []
+            for r in left:
+                if need <= 0.0001:
+                    break
+                if r["item"] != it["key"] or r["left"] <= 0.0001:
+                    continue
+                take = min(need, r["left"])
+                r["left"] -= take
+                need -= take
+                parts.append((r, take))
+            if need > 0.0001 or not parts:
+                parts.append((None, need if parts else float(it["line"]["qty"])))
+            out.append(parts)
+        return out
+
+    def build(self, ka, rec, lines, tpl, own_tpl, orders=None):
         """
         rec — распознанный документ; lines — [{line, key}] (только сопоставленные).
         Суммы берутся из документа поставщика (что заплатили), цена = сумма / количество.
@@ -357,11 +449,25 @@ class OneC:
                               f"от {rec.get('date', '')}").strip()
 
         incl = bool(doc.get("ЦенаВключаетНДС", True))
-        pattern = (tpl.get("Товары") or [None])[0]
+        tlines = tpl.get("Товары") or []
+        pattern = next((ln for ln in tlines if self._order_ref_field(ln) and
+                        ln.get(self._order_ref_field(ln)) not in (None, EMPTY)), tlines[0] if tlines else None)
+        alloc = self.allocate(orders, lines) if orders else [[(None, float(it["line"]["qty"]))] for it in lines]
+        ofield = (orders or {}).get("field", "ЗаказПоставщику_Key")
+        obase = ofield[:-4] if ofield.endswith("_Key") else ofield
         track_vat = bool(pattern and to_num(pattern.get("СуммаНДС")) > 0)
 
-        out, total = [], 0.0
-        for n, it in enumerate(lines, 1):
+        out, total, used_orders = [], 0.0, set()
+        n = 0
+        for it, parts in zip(lines, alloc):
+          src = it["line"]
+          full_qty = float(src["qty"]) or 1.0
+          full_sum = round(float(src["sum"]), 2)
+          full_vat = round(float(src.get("vat_sum") or 0), 2)
+          done_sum = done_vat = 0.0
+          for pi, (r, part_qty) in enumerate(parts):
+            n += 1
+            last = pi == len(parts) - 1
             ln = {}
             if pattern:
                 for k, v in pattern.items():
@@ -372,10 +478,13 @@ class OneC:
                              "ПроцентАвтоматическойСкидки"):
                         continue
                     ln[k] = v
-            src = it["line"]
-            qty = float(src["qty"])
-            with_vat = round(float(src["sum"]), 2)
-            vat = round(float(src.get("vat_sum") or 0), 2) if track_vat else 0.0
+            qty = part_qty
+            # сумма делится пропорционально количеству; последней части — остаток, чтобы копейки сошлись
+            with_vat = round(full_sum - done_sum, 2) if last else round(full_sum * qty / full_qty, 2)
+            vat_all = round(full_vat - done_vat, 2) if last else round(full_vat * qty / full_qty, 2)
+            done_sum += with_vat
+            done_vat += vat_all
+            vat = vat_all if track_vat else 0.0
             summa = with_vat if incl else round(with_vat - vat, 2)
             ln.update({
                 "LineNumber": str(n),
@@ -391,10 +500,24 @@ class OneC:
             })
             if doc.get("Склад_Key"):
                 ln["Склад_Key"] = doc["Склад_Key"]
+            if orders:
+                ln[ofield] = r["order"] if r else EMPTY
+                if pattern and f"{obase}_Type" in pattern:
+                    ln[f"{obase}_Type"] = pattern[f"{obase}_Type"]
+                if r and orders.get("use_code") and r.get("code"):
+                    ln["КодСтроки"] = r["code"]
+                if r:
+                    used_orders.add(r["order"])
             out.append(ln)
             total += with_vat
         doc["Товары"] = out
         doc["СуммаДокумента"] = round(total, 2)
+        if orders:      # шапка: один заказ — ссылка на него, несколько — пусто (заказы в строках)
+            hfield = self._order_ref_field({k: v for k, v in tpl.items() if not isinstance(v, list)}) or ofield
+            hbase = hfield[:-4] if hfield.endswith("_Key") else hfield
+            doc[hfield] = next(iter(used_orders)) if len(used_orders) == 1 else EMPTY
+            if f"{hbase}_Type" in tpl:
+                doc[f"{hbase}_Type"] = tpl[f"{hbase}_Type"]
 
         stages = tpl.get("ЭтапыГрафикаОплаты") or []
         if stages:

@@ -288,10 +288,18 @@ async def prepare(uid, chat_id):
         if not c1.items:
             await asyncio.to_thread(c1.load_items)
         ka = await asyncio.to_thread(c1.find_supplier, inn, d["supplier"].get("name", ""))
+        s["orders"] = None
+        if ka and getattr(config, "USE_ORDERS", True):
+            try:
+                s["orders"] = await asyncio.to_thread(c1.orders_context, ka)
+            except Exception as ex:
+                log.warning("Заказы поставщику не прочитаны: %s", ex)
         if step:
             known = sum(1 for ln in d["lines"] if c1.match_line(inn, ln)["key"])
+            oc = s.get("orders")
             live.steps.finish(step, "ok" if ka else "warn",
-                              (f"поставщик найден, знакомых товаров {known} из {len(d['lines'])}" if ka
+                              (f"поставщик найден, знакомых товаров {known} из {len(d['lines'])}"
+                               + (f", открытых заказов {len(oc['orders'])}" if oc else "") if ka
                                else "поставщик не найден"))
             await live.close(f"✅ Накладная прочитана за {int(live.steps.elapsed())} с")
     except Exception as ex:
@@ -419,17 +427,37 @@ async def summary(uid, chat_id):
     use = [L for L in s["lines"] if L["key"] and not L["skip"]]
     total = sum(L["line"]["sum"] for L in use)
     doc_total = d["total"].get("sum")
+    oc = s.get("orders")
+    alloc = c1.allocate(oc, [{"line": L["line"], "key": L["key"]} for L in use]) if oc else []
+    where = {id(L["line"]): a for L, a in zip(use, alloc)}
+    over = []
     lines_txt = []
     for L in s["lines"]:
         ln = L["line"]
         mark = "⏭" if L["skip"] else ("⚠️" if ln["n"] in chk["bad_lines"] else "✅")
         tail = "не приходуется" if L["skip"] else e(L["name1c"])
-        lines_txt.append(f"{mark} {ln['n']}. {e(ln['name'][:60])}\n"
-                         f"     {ln['qty']:g} × {money(ln['price'])} = <b>{money(ln['sum'])}</b> → {tail}")
+        txt = (f"{mark} {ln['n']}. {e(ln['name'][:60])}\n"
+               f"     {ln['qty']:g} × {money(ln['price'])} = <b>{money(ln['sum'])}</b> → {tail}")
+        parts = where.get(id(ln))
+        if parts:
+            got = [f"№ {r['number']} ({q:g})" for r, q in parts if r]
+            free = sum(q for r, q in parts if not r)
+            if got:
+                txt += "\n     📦 заказ " + ", ".join(got)
+            if free > 0.0001:
+                txt += f"\n     ⚠️ {free:g} шт нет в открытых заказах"
+                over.append(ln["n"])
+        lines_txt.append(txt)
     head = (f"📄 <b>{e(d.get('doc_type', 'Документ'))} № {e(d.get('number', '?'))} от {e(d.get('date', '?'))}</b>\n"
             f"Поставщик: {e(ka['Description'])} (ИНН {e(ka.get('ИНН') or s['inn'])})\n"
             f"Склад: {e(getattr(config, 'WAREHOUSE', '') or 'как в прошлом поступлении')}\n"
             f"Распознал: {e(r['model'])}\n")
+    if oc:
+        head += f"Открытых заказов поставщику: {len(oc['orders'])} — строки разложены по ним, от старых к новым\n"
+    if over:
+        head += (f"\n⚠️ <b>{'Строка' if len(over) == 1 else 'Строки'} {', '.join(map(str, over))}</b> — "
+                 "товара нет в открытых заказах (или привезли больше). "
+                 "Без заказа 1С может не провести поступление: создайте или поправьте заказ, затем «🔁 Пересчитать заказы».\n")
     if chk["issues"]:
         head += "\n⚠️ <b>Проверьте:</b>\n" + "\n".join("• " + e(x) for x in chk["issues"][:10]) + "\n"
     else:
@@ -439,10 +467,28 @@ async def summary(uid, chat_id):
             "\n\nНашли ошибку — «✏️ Исправить строку».")
     s["ready"] = True
     await send_long(chat_id, head + "\n" + "\n".join(lines_txt) + "\n" + foot,
-                    kb([Btn(text="✅ Провести в 1С", callback_data="post")],
-                       [Btn(text="✏️ Исправить строку", callback_data="fix")],
-                       [Btn(text="🔁 Другой нейросетью", callback_data="other_model"),
-                        Btn(text="✖ Отмена", callback_data="cancel")]))
+                    kb(*([[Btn(text="✅ Провести в 1С", callback_data="post")],
+                          [Btn(text="✏️ Исправить строку", callback_data="fix")]]
+                         + ([[Btn(text="🔁 Пересчитать заказы", callback_data="reorders")]]
+                            if getattr(config, "USE_ORDERS", True) else [])
+                         + [[Btn(text="🔁 Другой нейросетью", callback_data="other_model"),
+                             Btn(text="✖ Отмена", callback_data="cancel")]])))
+
+
+@dp.callback_query(F.data == "reorders")
+async def cb_reorders(c: CallbackQuery):
+    """Перечитать заказы поставщику из 1С (после того как завели/поправили заказ)."""
+    s = st(c.from_user.id)
+    if not s.get("ka"):
+        await c.answer("Устарело", show_alert=True)
+        return
+    await c.answer("Читаю заказы из 1С…")
+    try:
+        s["orders"] = await asyncio.to_thread(c1.orders_context, s["ka"])
+    except Exception as ex:
+        await c.message.answer(f"Заказы не прочитаны: {e(ex)}", parse_mode="HTML")
+        return
+    await summary(c.from_user.id, c.message.chat.id)
 
 
 # ------------------------------------------------------------------ правка строки кнопками
@@ -646,7 +692,7 @@ async def cb_post(c: CallbackQuery):
             tpl, own = c1.template(s["ka"])
             steps.finish(st1, "ok", "от этого поставщика" if own else "поставщик новый — образец от другого")
             st2 = steps.add("onec", f"Записываю документ ({len(use)} строк) и провожу")
-            doc = c1.build(s["ka"], d, use, tpl, own)
+            doc = c1.build(s["ka"], d, use, tpl, own, s.get("orders"))
             res = c1.create(doc, getattr(config, "POST", True))
             steps.finish(st2, "ok" if res["posted"] or not getattr(config, "POST", True) else "warn",
                          f"№ {res['number']}")
