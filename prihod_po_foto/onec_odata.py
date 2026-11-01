@@ -389,7 +389,12 @@ class OneC:
 
     @staticmethod
     def allocate(ctx, lines):
-        """Раскладывает строки по заказам, от старых к новым. -> [[(rem или None, кол-во), ...] на каждую строку]."""
+        """
+        Раскладывает строки по заказам, от старых к новым. -> [[(rem, кол-во), ...] на каждую строку].
+        Товар, которого нет в открытых заказах (или сверх заказанного), привязывается к открытому заказу,
+        куда легла большая часть этой поставки (если такого нет — к самому свежему); у такой части
+        rem["extra"] = True. rem = None только если открытых заказов нет совсем.
+        """
         left = [dict(r) for r in (ctx or {}).get("rem", [])]
         out = []
         for it in lines:
@@ -407,6 +412,19 @@ class OneC:
             if need > 0.0001 or not parts:
                 parts.append((None, need if parts else float(it["line"]["qty"])))
             out.append(parts)
+        # остаток без заказа — в «основной» заказ этой поставки
+        orders = (ctx or {}).get("orders") or []
+        if orders:
+            weight = {}
+            for parts in out:
+                for r, q in parts:
+                    if r:
+                        weight[r["order"]] = weight.get(r["order"], 0) + q
+            main = max(weight, key=weight.get) if weight else orders[-1]["Ref_Key"]
+            o = next(x for x in orders if x["Ref_Key"] == main)
+            home = {"order": main, "number": str(o.get("Number", "")).strip(), "date": o.get("Date", "")[:10],
+                    "item": None, "code": None, "left": 0, "extra": True}
+            out = [[(r if r else home, q) for r, q in parts] for parts in out]
         return out
 
     def build(self, ka, rec, lines, tpl, own_tpl, orders=None):

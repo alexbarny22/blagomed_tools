@@ -454,13 +454,13 @@ async def summary(uid, chat_id):
                f"     {ln['qty']:g} × {money(ln['price'])} = <b>{money(ln['sum'])}</b> → {tail}")
         parts = where.get(id(ln))
         if parts:
-            got = [f"№ {r['number']} ({q:g})" for r, q in parts if r]
+            got = [f"№ {r['number']} ({q:g}{', сверх заказа' if r.get('extra') else ''})" for r, q in parts if r]
             free = sum(q for r, q in parts if not r)
             if got:
                 txt += "\n     📦 заказ " + ", ".join(got)
             # сверка цены: накладная против заказа
             inv_price = ln["sum"] / ln["qty"] if ln["qty"] else 0
-            diffs = sorted({r["price"] for r, q in parts if r and r.get("price") and
+            diffs = sorted({r["price"] for r, q in parts if r and not r.get("extra") and r.get("price") and
                             abs(inv_price - r["price"]) > max(0.5, r["price"] * 0.005)})
             if diffs:
                 pct = (inv_price - diffs[0]) / diffs[0] * 100
@@ -481,8 +481,8 @@ async def summary(uid, chat_id):
         head += f"Открытых заказов поставщику: {len(oc['orders'])} — строки разложены по ним, от старых к новым\n"
     if over:
         head += (f"\n⚠️ <b>{'Строка' if len(over) == 1 else 'Строки'} {', '.join(map(str, over))}</b> — "
-                 "товара нет в открытых заказах (или привезли больше). "
-                 "Без заказа 1С может не провести поступление: создайте или поправьте заказ, затем «🔁 Пересчитать заказы».\n")
+                 "открытых заказов у поставщика нет, привязать не к чему. "
+                 "1С может не провести поступление: заведите заказ, затем «🔁 Пересчитать заказы».\n")
     if pricey:
         head += (f"\n💰 <b>Цена не как в заказе: {'строка' if len(pricey) == 1 else 'строки'} "
                  f"{', '.join(map(str, pricey))}</b> — проверьте, прежде чем проводить.\n")
