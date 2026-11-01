@@ -2,6 +2,7 @@
 prihod_bot.py
 recognize.py
 onec_odata.py
+mapping.py
 test_models.py
 deps.py
 test_models.bat

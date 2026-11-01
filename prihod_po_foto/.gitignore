@@ -6,3 +6,5 @@ test_photos/
 test_result.txt
 *.log
 __pycache__/
+Сопоставления.xlsx
+mapping_pending.json

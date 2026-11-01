@@ -17,7 +17,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 EMPTY = "00000000-0000-0000-0000-000000000000"
 DOC = "Document_ПриобретениеТоваровУслуг"
 CACHE_FILE = os.path.join(HERE, "nomenclature.json")
-MAP_FILE = os.path.join(HERE, "mapping.json")
 
 
 class ODataError(Exception):
@@ -93,39 +92,17 @@ class OData:
         return r.json() if r.content else {}
 
 
-# ------------------------------------------------------------------ сопоставления (запоминаются)
-def load_map():
-    try:
-        with open(MAP_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+# ------------------------------------------------------------------ сопоставления — таблица Excel (mapping.py)
+import mapping  # noqa: E402
 
 
-def save_map(mp):
-    tmp = MAP_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(mp, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, MAP_FILE)
-
-
-def remember(inn, line, key, name):
-    """Запомнить: «так называется у поставщика» -> наша позиция."""
-    mp = load_map()
-    sup = mp.setdefault(inn or "без_инн", {})
-    sup["n:" + norm(line["name"])] = {"key": key, "name": name}
-    if line.get("article"):
-        sup["a:" + norm(line["article"])] = {"key": key, "name": name}
-    save_map(mp)
+def remember(supplier, inn, line, item):
+    """Запомнить: «так называется у поставщика» -> наш товар (строка в Сопоставления.xlsx)."""
+    mapping.add(supplier, inn, line, item["name"], item.get("code", ""))
 
 
 def forget(inn, line):
-    mp = load_map()
-    sup = mp.get(inn or "без_инн", {})
-    sup.pop("n:" + norm(line["name"]), None)
-    if line.get("article"):
-        sup.pop("a:" + norm(line["article"]), None)
-    save_map(mp)
+    mapping.remove(inn, line)
 
 
 # ------------------------------------------------------------------ основной класс
@@ -152,23 +129,40 @@ class OneC:
     # ---------- номенклатура (кэш в файле, как в move_bot)
     def load_items(self, force=False):
         days = getattr(self.cfg, "CACHE_DAYS", 7)
+        fresh = None
         if not force and os.path.exists(CACHE_FILE) and time.time() - os.path.getmtime(CACHE_FILE) < days * 86400:
             with open(CACHE_FILE, encoding="utf-8") as f:
-                self.items = json.load(f)
+                fresh = json.load(f)
+            if not fresh or "code" not in fresh[0]:          # старый кэш без кодов — перезагрузить
+                fresh = None
+        if fresh is not None:
+            self.items = fresh
         else:
             self.log("Загружаю номенклатуру из 1С…")
             rows = self.od.get("Catalog_Номенклатура", **{
                 "$filter": "IsFolder eq false and DeletionMark eq false",
-                "$select": "Ref_Key,Description,Артикул"})
+                "$select": "Ref_Key,Description,Артикул,Code"})
             skip = [s.lower() for s in getattr(self.cfg, "EXCLUDE_NAME_PARTS", ["(МГ)"]) if s]
-            self.items = [{"key": r["Ref_Key"], "name": r["Description"], "art": (r.get("Артикул") or "").strip()}
+            self.items = [{"key": r["Ref_Key"], "name": r["Description"], "art": (r.get("Артикул") or "").strip(),
+                           "code": (r.get("Code") or "").strip()}
                           for r in rows if not any(s in r["Description"].lower() for s in skip)]
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.items, f, ensure_ascii=False)
             self.log(f"  позиций: {len(self.items)}")
         self._choices = {i: norm(it["name"]) for i, it in enumerate(self.items)}
         self._by_key = {it["key"]: it for it in self.items}
+        self._by_code = {norm(it["code"]): it for it in self.items if it.get("code")}
+        self._by_name = {}
+        for it in self.items:
+            self._by_name.setdefault(norm(it["name"]), []).append(it)
         return len(self.items)
+
+    def resolve(self, our_name, our_code=""):
+        """Наш товар по строке таблицы: по коду 1С, иначе по точному названию."""
+        if our_code and norm(our_code) in self._by_code:
+            return self._by_code[norm(our_code)]
+        hits = self._by_name.get(norm(our_name), [])
+        return hits[0] if len(hits) == 1 else None
 
     def search(self, text, limit=5):
         """Похожие позиции нашей номенклатуры: [(item, score)]."""
@@ -182,18 +176,51 @@ class OneC:
         -> {'key','name1c','how','cands'}; how: 'запомнено' | 'точно' | '' (нужен выбор).
         Автоматически принимаем только запомненное или полное совпадение названия.
         """
-        sup = load_map().get(inn or "без_инн", {})
-        hit = sup.get("n:" + norm(line["name"]))
-        if not hit and line.get("article"):
-            hit = sup.get("a:" + norm(line["article"]))
-        if hit and hit["key"] in self._by_key:
-            return {"key": hit["key"], "name1c": self._by_key[hit["key"]]["name"], "how": "запомнено", "cands": []}
+        row = mapping.lookup(inn, line)
+        if row:
+            it = self.resolve(row.get("Наш товар в 1С"), row.get("Код в 1С"))
+            if it:
+                return {"key": it["key"], "name1c": it["name"], "how": "по таблице", "cands": []}
+            self.log(f"В таблице сопоставлений товар «{row.get('Наш товар в 1С')}» не найден в 1С — спрошу заново")
         nn = norm(line["name"])
         exact = [it for it in self.items if norm(it["name"]) == nn]
         if len(exact) == 1:
             return {"key": exact[0]["key"], "name1c": exact[0]["name"], "how": "точно", "cands": []}
         cands = self.search(line["name"], 4)
         return {"key": None, "name1c": "", "how": "", "cands": cands}
+
+    def ai_suggest(self, lines, model, ask):
+        """
+        Подсказки нейросети для несопоставленных строк, когда названия не похожи по буквам.
+        lines: [{'line', 'cands'}]; ask(model, prompt) -> текст. Ставит выбранный вариант первым с пометкой 🤖.
+        """
+        if not lines:
+            return
+        blocks, pools = [], []
+        for k, L in enumerate(lines, 1):
+            pool = [it for it, _ in self.search(L["line"]["name"], 25)]
+            pools.append(pool)
+            opts = "\n".join(f"  {j}. {it['name']}" for j, it in enumerate(pool, 1))
+            blocks.append(f"{k}) У поставщика: «{L['line']['name']}»\n{opts}")
+        prompt = ("Сопоставь товары из накладной поставщика с нашим справочником. Названия могут сильно "
+                  "отличаться (другие слова, сокращения, порядок). Для каждого пункта выбери номер подходящего "
+                  "варианта из его списка или 0, если подходящего нет. Ответ — только JSON вида "
+                  '{"1": 3, "2": 0}.\n\n' + "\n\n".join(blocks))
+        try:
+            txt = ask(model, prompt)
+            ans = json.loads(txt[txt.find("{"):txt.rfind("}") + 1])
+        except Exception as e:
+            self.log(f"Подсказки нейросети не получены: {e}")
+            return
+        for k, L in enumerate(lines, 1):
+            try:
+                j = int(ans.get(str(k), 0))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= j <= len(pools[k - 1]):
+                pick = pools[k - 1][j - 1]
+                rest = [(it, sc) for it, sc in L["cands"] if it["key"] != pick["key"]]
+                L["cands"] = [(dict(pick, ai=True), 100)] + rest[:3]
 
     # ---------- поставщик
     def find_supplier(self, inn, name=""):

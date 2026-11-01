@@ -167,6 +167,18 @@ def _ask_gigachat(m: dict, images: list) -> str:
     return r.json()["choices"][0]["message"]["content"]
 
 
+def ask_text(m: dict, prompt: str) -> str:
+    """Короткий текстовый запрос (без фото) — для подсказок при сопоставлении товаров."""
+    r = _post_retry(m["base_url"].rstrip("/") + "/chat/completions",
+                    headers={"Authorization": "Bearer " + m["api_key"]},
+                    json={"model": m["model"], "temperature": 0, "max_tokens": 2000,
+                          "messages": [{"role": "user", "content": prompt}], **m.get("extra", {})},
+                    timeout=120)
+    if r.status_code != 200:
+        raise ModelError(f"{m['name']}: HTTP {r.status_code} {r.text[:200]}")
+    return r.json()["choices"][0]["message"]["content"]
+
+
 def ask_model(m: dict, images: list, raw_images: list = None) -> dict:
     """raw_images — исходные фото: если связь рвётся на больших файлах, пробуем уменьшенные."""
     ask = _ask_gigachat if m.get("type", "openai") == "gigachat" else _ask_openai_compatible

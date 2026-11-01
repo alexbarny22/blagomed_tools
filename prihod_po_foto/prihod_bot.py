@@ -19,11 +19,12 @@ import sys
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton as Btn, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton as Btn, InlineKeyboardMarkup, Message
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import config  # noqa: E402
+import mapping  # noqa: E402
 import onec_odata as onec  # noqa: E402
 import recognize as rec_mod  # noqa: E402
 
@@ -94,6 +95,7 @@ async def cmd_start(m: Message):
     reset(m.from_user.id)
     await m.answer("Пришлите фото накладной — все страницы (можно альбомом).\n"
                    "Лучше отправлять «как файл» — без сжатия Telegram, так цифры читаются точнее.\n\n"
+                   "/sopost — таблица сопоставлений товаров (прислать, исправить, вернуть)\n"
                    "/refresh — перезагрузить номенклатуру из 1С\n/cancel — начать заново")
 
 
@@ -101,6 +103,28 @@ async def cmd_start(m: Message):
 async def cmd_cancel(m: Message):
     reset(m.from_user.id)
     await m.answer("Сброшено. Присылайте фото новой накладной.")
+
+
+@dp.message(Command("sopost"))
+async def cmd_sopost(m: Message):
+    if not allowed(m.from_user.id):
+        return
+    try:
+        rows = await asyncio.to_thread(mapping.load)
+    except Exception as ex:
+        await m.answer(f"Не открылась таблица: {e(ex)}", parse_mode="HTML")
+        return
+    sup = {}
+    for r in rows:
+        sup[r.get("Поставщик") or r.get("ИНН поставщика") or "?"] = sup.get(r.get("Поставщик") or
+                                                                             r.get("ИНН поставщика") or "?", 0) + 1
+    by = "\n".join(f"• {e(k)}: {v}" for k, v in sorted(sup.items(), key=lambda kv: -kv[1])) or "пока пусто"
+    pend = mapping.pending_count()
+    await m.answer_document(
+        FSInputFile(mapping.FILE, filename="Сопоставления.xlsx"), parse_mode="HTML",
+        caption=(f"Таблица сопоставлений — {len(rows)} строк:\n{by}\n\n"
+                 + (f"⚠️ Ещё {pend} строк ждут записи — файл открыт в Excel на компьютере бота.\n\n" if pend else "")
+                 + "Исправьте в Excel и пришлите файл обратно — бот заменит таблицу.")[:1000])
 
 
 @dp.message(Command("refresh"))
@@ -134,8 +158,16 @@ async def on_photo(m: Message):
     uid = m.from_user.id
     if not allowed(uid):
         return
+    if m.document and (m.document.file_name or "").lower().endswith(".xlsx"):
+        buf = await bot.download(m.document)
+        try:
+            n = await asyncio.to_thread(mapping.replace_file, buf.read())
+            await m.answer(f"✅ Таблица сопоставлений заменена: {n} строк.")
+        except Exception as ex:
+            await m.answer(f"❌ Таблица не заменена: {e(ex)}", parse_mode="HTML")
+        return
     if m.document and not (m.document.mime_type or "").startswith("image/"):
-        await m.answer("Принимаю только фотографии (jpg, png, heic).")
+        await m.answer("Принимаю фотографии накладных (jpg, png, heic) и таблицу сопоставлений (.xlsx).")
         return
     s = st(uid)
     if s.get("rec"):                    # дослали забытую страницу — распознаем всё заново вместе с ней
@@ -269,6 +301,15 @@ async def prepare(uid, chat_id):
     for ln in d["lines"]:
         mt = c1.match_line(inn, ln)
         s["lines"].append({"line": ln, **mt, "skip": False})
+    unknown = [L for L in s["lines"] if not L["key"]]
+    ai_model = next((m for m in MODELS if m.get("type", "openai") == "openai"), None)
+    if unknown and ai_model and getattr(config, "AI_MATCH", True):
+        note = await bot.send_message(chat_id, f"🤖 Подбираю наши товары для {len(unknown)} новых позиций…")
+        await asyncio.to_thread(c1.ai_suggest, unknown, ai_model, rec_mod.ask_text)
+        try:
+            await note.delete()
+        except Exception:
+            pass
     await next_step(uid, chat_id)
 
 
@@ -297,7 +338,8 @@ async def ask_line(uid, chat_id, i, cands=None):
     cands = cands if cands is not None else L["cands"]
     s["shown"] = [it for it, _ in cands]
     left = sum(1 for x in s["lines"] if not x["key"] and not x["skip"])
-    rows = [[Btn(text=f"{it['name'][:55]} ({sc}%)", callback_data=f"pick:{i}:{k}")] for k, (it, sc) in enumerate(cands)]
+    rows = [[Btn(text=(f"🤖 {it['name'][:55]}" if it.get("ai") else f"{it['name'][:55]} ({sc}%)"),
+                 callback_data=f"pick:{i}:{k}")] for k, (it, sc) in enumerate(cands)]
     rows.append([Btn(text="🔎 Найти по слову", callback_data=f"find:{i}"),
                  Btn(text="⏭ Не приходовать", callback_data=f"skip:{i}")])
     ln = L["line"]
@@ -306,7 +348,8 @@ async def ask_line(uid, chat_id, i, cands=None):
         chat_id,
         f"❓ Строка {ln['n']} (осталось неясных: {left})\n<b>{e(ln['name'])}</b>{art}\n"
         f"{ln['qty']:g} {e(ln['unit'])} × {money(ln['price'])} = {money(ln['sum'])}\n\n"
-        f"Что это у нас в 1С? Выбор запомнится — в следующий раз не спрошу.",
+        f"Что это у нас в 1С? Выбор запишется в таблицу сопоставлений — в следующий раз не спрошу."
+        + ("\n🤖 — вариант, который предложила нейросеть." if any(it.get("ai") for it, _ in cands) else ""),
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
@@ -322,8 +365,11 @@ async def cb_pick(c: CallbackQuery):
     it = s["shown"][k]
     L = s["lines"][i]
     L.update(key=it["key"], name1c=it["name"], how="выбрано", skip=False)
-    onec.remember(s["inn"], L["line"], it["key"], it["name"])
-    await c.answer("Запомнил")
+    try:
+        await asyncio.to_thread(onec.remember, s["ka"]["Description"], s["inn"], L["line"], it)
+        await c.answer("Записал в таблицу")
+    except Exception as ex:
+        await c.answer(f"Не записалось в таблицу: {ex}"[:190], show_alert=True)
     await c.message.edit_text(f"✅ Строка {L['line']['n']}: {e(L['line']['name'])}\n→ <b>{e(it['name'])}</b>",
                               parse_mode="HTML")
     await next_step(uid, c.message.chat.id)
@@ -440,7 +486,10 @@ async def on_text(m: Message):
         elif kind == "del":
             L["skip"] = True
         elif kind == "ask":
-            onec.forget(s["inn"], ln)
+            try:
+                await asyncio.to_thread(onec.forget, s["inn"], ln)
+            except mapping.Locked as ex:
+                await m.answer(f"⚠️ {ex}")
             L.update(key=None, name1c="", how="", skip=False, cands=c1.search(ln["name"], 4))
             await ask_line(uid, m.chat.id, i)
             return

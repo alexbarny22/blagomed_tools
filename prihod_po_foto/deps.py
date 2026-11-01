@@ -4,7 +4,8 @@ import importlib
 import subprocess
 import sys
 
-NEED = {"aiogram": "aiogram", "rapidfuzz": "rapidfuzz", "PIL": "pillow", "requests": "requests"}
+NEED = {"aiogram": "aiogram", "rapidfuzz": "rapidfuzz", "PIL": "pillow", "requests": "requests",
+        "openpyxl": "openpyxl"}
 if len(sys.argv) > 1 and sys.argv[1] == "config":
     # первый запуск: создаём config.py из образца и открываем в Блокноте
     import os
