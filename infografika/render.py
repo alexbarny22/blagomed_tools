@@ -42,10 +42,10 @@ DEFAULT_STYLE = {"font": "Montserrat", "ink": "#15232d", "accent": "#2a9d8f", "p
 HEADS = ["classic", "hero", "duo", "weight", "ribbon", "number", "bottom"]
 LOOK_DEFAULTS = {
     "cover": {"head": "hero", "photo": "full", "feats": "column"},
-    "problem": {"head": "classic", "photo": "bands", "feats": "cards"},
+    "problem": {"head": "classic", "photo": "full", "feats": "grid"},
     "specs": {"head": "classic", "photo": "bands", "feats": "cards"},
     "usage": {"head": "bottom", "photo": "full", "feats": "cards"},
-    "trust": {"head": "classic", "photo": "bands", "feats": "cards"},
+    "trust": {"head": "classic", "photo": "full", "feats": "grid"},
 }
 LOOK_COMMON = {"align": "left", "case": "sentence", "tracking": 0, "italic": False, "stroke": False,
                "shadow": False, "fill": "gradient", "sub": "plain", "feat_style": "filled", "badge": "circle",
@@ -358,27 +358,36 @@ def place_photo(src, w, h, box, bgc):
         b = [max(0.0, min(1.0, float(v))) for v in box]
         bpx = (b[0] * iw, b[1] * ih, b[2] * iw, b[3] * ih)
         cx, cy = (bpx[0] + bpx[2]) / 2, (bpx[1] + bpx[3]) / 2
-        pw, ph = (bpx[2] - bpx[0]) * 1.1, (bpx[3] - bpx[1]) * 1.1
+        pw, ph = (bpx[2] - bpx[0]) * 1.04, (bpx[3] - bpx[1]) * 1.04
         fits = pw <= cw and ph <= ch
     if fits:
         x0 = max(0, min(iw - cw, cx - cw / 2))
         y0 = max(0, min(ih - ch, cy - ch / 2))
         rw, rh = cw, ch
         img = src.crop((int(x0), int(y0), int(x0 + cw), int(y0 + ch))).resize((w, h), Image.LANCZOS)
-    else:      # товар крупнее кадра — кадр вокруг товара, недостающие края — размытое продолжение
+    else:      # товар крупнее кадра: кадр вокруг товара, недостающие края — ровный фон цвета краёв картинки
         rw = max(pw, ph * tr)
         rh = rw / tr
         x0, y0 = cx - rw / 2, cy - rh / 2
         pl, pt = int(max(0, -x0)), int(max(0, -y0))
         pr, pb = int(max(0, x0 + rw - iw)), int(max(0, y0 + rh - ih))
-        ext = ImageOps.fit(src, (iw + pl + pr, ih + pt + pb), Image.LANCZOS).filter(ImageFilter.GaussianBlur(30))
-        ext.paste(src, (pl, pt), fade_mask(src.size, 40, top=pt > 0, bottom=pb > 0, sides=pl > 0 or pr > 0))
+        edge = edge_color(src)
+        ext = Image.new("RGB", (iw + pl + pr, ih + pt + pb), edge)
+        ext.paste(src, (pl, pt), fade_mask(src.size, 60, top=pt > 0, bottom=pb > 0, sides=pl > 0 or pr > 0))
         img = ext.crop((int(x0 + pl), int(y0 + pt), int(x0 + pl + rw), int(y0 + pt + rh))).resize((w, h), Image.LANCZOS)
     pbox = None
     if bpx:
         s = w / rw
         pbox = ((bpx[0] - x0) * s, (bpx[1] - y0) * s, (bpx[2] - x0) * s, (bpx[3] - y0) * s)
     return img, pbox
+
+
+def edge_color(im):
+    """Средний цвет краёв картинки — для ровного продолжения фона."""
+    sm = im.convert("RGB").resize((60, 80))
+    px = sm.load()
+    pts = [px[x, y] for x in range(60) for y in (0, 79)] + [px[x, y] for y in range(80) for x in (0, 59)]
+    return tuple(sorted(c[i] for c in pts)[len(pts) // 2] for i in range(3))
 
 
 def fit_3x4(im):
@@ -450,8 +459,13 @@ def colors(style):
 
 
 # =================================================================== блок заголовка
-def head_block(kind, look, style, slide, on_dark):
-    """Готовит заголовок: возвращает (высота, функция рисования draw(im, y))."""
+def head_block(kind, look, style, slide, on_dark, scale=1.0):
+    """Готовит заголовок: возвращает (высота, функция рисования draw(im, y)). scale < 1 — компактнее."""
+
+    def F(text, family, weight, mw, mh, start, smallest, lh=1.1, ml=3, tr=0):
+        if scale < 1:
+            mh, start, smallest, ml = mh * scale, int(start * scale), max(22, int(smallest * scale)), min(ml, 2)
+        return fit_lines(text, family, weight, mw, mh, start, smallest, lh, ml, tr)
     fam = style.get("font", "Montserrat")
     ink, accent, plate_c, g1, g2, _ = colors(style)
     head = look["head"]
@@ -482,7 +496,7 @@ def head_block(kind, look, style, slide, on_dark):
 
     if head == "hero":
         word = up((slide.get("hero_word") or (slide.get("headline", "").split(" ") or [""])[0]).strip())
-        size = 250
+        size = int(250 * scale)
         while size > 80:
             fw = font(fam, "black", size)
             tr = trk * size / 100
@@ -497,7 +511,7 @@ def head_block(kind, look, style, slide, on_dark):
         parts.append((hgt + 14, draw_word))
         rest = (slide.get("hero_rest") or "").strip()
         if rest:
-            rf, rl, rs, rtr = fit_lines(up(rest) if upper else rest, fam, "extrabold", maxw, 130, 54, 32, 1.12, 2,
+            rf, rl, rs, rtr = F(up(rest) if upper else rest, fam, "extrabold", maxw, 130, 54, 32, 1.12, 2,
                                         trk / 2)
             rc = g1 if not on_dark else light_txt
             parts.append(text_lines(rl, rf, rs, rtr, 1.12, rc, dict(fx, stroke=None, shadow=False)))
@@ -505,19 +519,19 @@ def head_block(kind, look, style, slide, on_dark):
         rest = (slide.get("hero_rest") or "").strip()
         word = up((slide.get("hero_word") or slide.get("headline", "")).strip())
         if rest:
-            rf, rl, rs, rtr = fit_lines(rest, fam, "light", maxw, 120, 58, 34, 1.1, 2, trk)
+            rf, rl, rs, rtr = F(rest, fam, "light", maxw, 120, 58, 34, 1.1, 2, trk)
             parts.append(text_lines(rl, rf, rs, rtr, 1.1, t_ink, dict(fx, stroke=None)))
-        wf, wl, ws, wtr = fit_lines(word, fam, "black", maxw, 260, 150, 56, 1.0, 2, trk)
+        wf, wl, ws, wtr = F(word, fam, "black", maxw, 260, 150, 56, 1.0, 2, trk)
         parts.append(text_lines(wl, wf, ws, wtr, 1.02, fill, fx))
     elif head == "number":
         b = slide.get("number") or slide.get("badge") or {}
         val = f"{b.get('value', '')} {b.get('unit', '')}".strip() or slide.get("headline", "")
-        nf, nl, ns, ntr = fit_lines(val, fam, "black", maxw, 230, 190, 70, 1.0, 1, trk)
+        nf, nl, ns, ntr = F(val, fam, "black", maxw, 230, 190, 70, 1.0, 1, trk)
         parts.append(text_lines(nl, nf, ns, ntr, 1.04, fill, fx))
-        hf, hl, hs, htr = fit_lines(up(slide.get("headline", "")), fam, "extrabold", maxw, 130, 50, 32, 1.12, 2, trk / 2)
+        hf, hl, hs, htr = F(up(slide.get("headline", "")), fam, "extrabold", maxw, 130, 50, 32, 1.12, 2, trk / 2)
         parts.append(text_lines(hl, hf, hs, htr, 1.12, t_ink, dict(fx, stroke=None, shadow=False)))
     elif head == "ribbon":
-        hf, hl, hs, htr = fit_lines(up(slide.get("headline", "")), fam, "black", maxw - 20, 220, 66, 38, 1.1, 3, trk)
+        hf, hl, hs, htr = F(up(slide.get("headline", "")), fam, "black", maxw - 20, 220, 66, 38, 1.1, 3, trk)
         bh = int(len(hl) * hs * 1.1) + 44
 
         def draw_rib(im, y, hl=hl, hf=hf, hs=hs, htr=htr, bh=bh):
@@ -532,7 +546,7 @@ def head_block(kind, look, style, slide, on_dark):
     else:       # classic / duo / bottom
         txt = up(slide.get("headline", ""))
         start = 150 if len(txt) <= 10 else 120 if len(txt) <= 16 else (84 if upper else 78)
-        hf, hl, hs, htr = fit_lines(txt, fam, "black" if upper else "extrabold", maxw, 270, start, 40,
+        hf, hl, hs, htr = F(txt, fam, "black" if upper else "extrabold", maxw, 270, start, 40,
                                     1.08, 3, trk)
         if head == "duo":
             acc_words = {w.lower().strip(".,!?«»") for w in str(slide.get("accent_word") or "").split()} or \
@@ -554,7 +568,7 @@ def head_block(kind, look, style, slide, on_dark):
     sub = (slide.get("subtitle") or "").strip() if head not in ("hero", "number") else ""
     if sub:
         mode = look.get("sub", "plain")
-        sf, sl, ss, _ = fit_lines(sub, fam, "bold" if mode in ("ribbon",) else "medium", maxw - 40, 130, 38, 26, 1.22, 3)
+        sf, sl, ss, _ = F(sub, fam, "bold" if mode in ("ribbon",) else "medium", maxw - 40, 130, 38, 26, 1.22, 3)
         sh = int(len(sl) * ss * 1.22)
         if mode == "ribbon":
             bh = sh + 34
@@ -780,8 +794,8 @@ def draw_feats(im, cards, mode, x0, y0, width, gap=14):
 
 
 # =================================================================== бейдж
-def badge_size(look):
-    return {"circle": 118, "star": 122, "arc": 112, "corner": 0}.get(look.get("badge", "circle"), 118)
+def badge_size(look, k=1.0):
+    return int({"circle": 118, "star": 122, "arc": 112, "corner": 0}.get(look.get("badge", "circle"), 118) * k)
 
 
 def arc_text(im, text, cx, cy, radius, fnt, color, top=True):
@@ -803,7 +817,7 @@ def arc_text(im, text, cx, cy, radius, fnt, color, top=True):
         a += (w + 4) / radius * (1 if top else -1)
 
 
-def draw_badge(im, look, style, badge, cx, cy):
+def draw_badge(im, look, style, badge, cx, cy, k=1.0):
     fam = style.get("font", "Montserrat")
     ink, accent, plate_c, g1, g2, bcol = colors(style)
     kind = look.get("badge", "circle")
@@ -811,7 +825,7 @@ def draw_badge(im, look, style, badge, cx, cy):
     d = ImageDraw.Draw(im)
     white = (255, 255, 255)
     if kind == "star":
-        r1, r2, n = 122, 104, 22
+        r1, r2, n = 122 * k, 104 * k, 22
         pts = []
         for i in range(n * 2):
             rr = r1 if i % 2 == 0 else r2
@@ -823,23 +837,23 @@ def draw_badge(im, look, style, badge, cx, cy):
         d = ImageDraw.Draw(im)
         d.polygon(pts, fill=bcol)
         txt = (val + (" " + unit if unit else "")).strip()
-        f, lines, s, _ = fit_lines(txt, fam, "extrabold", 170, 150, 46, 22, 1.08, 3)
+        f, lines, s, _ = fit_lines(txt, fam, "extrabold", 170 * k, 150 * k, int(46 * k), 18, 1.08, 3)
         y = cy - len(lines) * s * 1.08 / 2
         for ln in lines:
             d.text((cx, y + s * 0.54), ln, font=f, fill=white, anchor="mm")
             y += s * 1.08
     elif kind == "arc":
-        r = 112
+        r = int(112 * k)
         soft_shadow(im, (cx - r, cy - r, cx + r, cy + r), radius=r, strength=60, blur=10, dy=6)
         d = ImageDraw.Draw(im)
         ring = ink if lum(ink) < 128 else (40, 40, 40)
         d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=white, outline=ring, width=5)
         top = str(badge.get("top") or "").upper()
         bottom = str(badge.get("bottom") or unit).upper()
-        af = font(fam, "extrabold", 26)
-        arc_text(im, top, cx, cy, r - 30, af, ring, top=True)
-        arc_text(im, bottom, cx, cy, r - 30, af, ring, top=False)
-        vs = 88
+        af = font(fam, "extrabold", int(26 * k))
+        arc_text(im, top, cx, cy, r - 30 * k, af, ring, top=True)
+        arc_text(im, bottom, cx, cy, r - 30 * k, af, ring, top=False)
+        vs = int(88 * k)
         while vs > 30 and font(fam, "black", vs).getlength(val) > r * 1.05:
             vs -= 4
         ImageDraw.Draw(im).text((cx, cy), val, font=font(fam, "black", vs), fill=ring, anchor="mm")
@@ -852,17 +866,17 @@ def draw_badge(im, look, style, badge, cx, cy):
         band = band.rotate(-45 if cx > W / 2 else 45, expand=True, resample=Image.BICUBIC)
         im.alpha_composite(band, (int(cx - band.width / 2), int(cy - band.height / 2)))
     else:       # circle
-        r = 112
-        d.ellipse((cx - r - 8, cy - r - 8, cx + r + 8, cy + r + 8), fill=mix(bcol, (0, 0, 0), 0.25))
+        r = int(112 * k)
+        d.ellipse((cx - r - 8 * k, cy - r - 8 * k, cx + r + 8 * k, cy + r + 8 * k), fill=mix(bcol, (0, 0, 0), 0.25))
         d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=bcol)
-        has_icon = bool(badge.get("icon")) and draw_icon(d, badge.get("icon"), cx, cy - 58, 46, white)
-        vs = 66
+        has_icon = bool(badge.get("icon")) and draw_icon(d, badge.get("icon"), cx, cy - 58 * k, int(46 * k), white)
+        vs = int(66 * k)
         while vs > 28 and font(fam, "black", vs).getlength(val) > r * 1.7:
             vs -= 4
-        y0 = cy + (8 if has_icon else -10)
+        y0 = cy + (8 if has_icon else -10) * k
         d.text((cx, y0), val, font=font(fam, "black", vs), fill=white, anchor="mm")
         if unit:
-            d.text((cx, y0 + vs * 0.72), unit, font=font(fam, "bold", 32), fill=white, anchor="mm")
+            d.text((cx, y0 + vs * 0.72), unit, font=font(fam, "bold", int(32 * k)), fill=white, anchor="mm")
 
 
 # =================================================================== размеры
@@ -875,50 +889,71 @@ def arrow(d, a, b, color, width=4, head=16, both=True):
             d.line([p, (p[0] + head * math.cos(ang + s), p[1] + head * math.sin(ang + s))], fill=color, width=width)
 
 
-def draw_dims(im, style, look, dims, bb, area_bottom):
+def draw_dims(im, style, look, dims, bb, area):
+    """Размерные стрелки вокруг товара bb строго внутри области area. Возвращает занятые прямоугольники."""
     dims = [x for x in (dims or []) if str(x.get("value", "")).strip()]
     if not dims or not bb:
-        return
+        return []
     fam = style.get("font", "Montserrat")
     ink, accent, *_ = colors(style)
     color = ink if lum(ink) < 160 else (21, 35, 45)
+    ax0, ay0, ax1, ay1 = area
     x0, y0, x1, y1 = [int(v) for v in bb]
+    x0, x1 = max(x0, ax0 + 20), min(x1, ax1 - 20)
+    y0, y1 = max(y0, ay0 + 20), min(y1, ay1 - 20)
     pills = look.get("dims", "pill") != "arrows"
     horiz = [x for x in dims if x.get("axis", "x") == "x"][:1]
     vert = [x for x in dims if x.get("axis") == "y"][:1]
     d = ImageDraw.Draw(im)
     f = font(fam, "bold" if pills else "extrabold", 32)
+    rects = []
 
     def label(text, cx, cy, rotate=False):
+        tw = f.getlength(text)
+        half_w = (25 if rotate and not pills else tw / 2 + 18)
+        half_h = (tw / 2 + 14 if rotate and not pills else 26)
+        cx = max(ax0 + half_w + 6, min(ax1 - half_w - 6, cx))
+        cy = max(ay0 + half_h + 6, min(ay1 - half_h - 6, cy))
         if pills:
-            tw = f.getlength(text)
-            ImageDraw.Draw(im).rounded_rectangle((cx - tw / 2 - 16, cy - 25, cx + tw / 2 + 16, cy + 25), radius=25,
-                                                 fill=accent)
+            r = (cx - tw / 2 - 16, cy - 25, cx + tw / 2 + 16, cy + 25)
+            ImageDraw.Draw(im).rounded_rectangle(r, radius=25, fill=accent)
             ImageDraw.Draw(im).text((cx, cy), text, font=f, fill=(255, 255, 255), anchor="mm")
+            rects.append(r)
             return
-        g = Image.new("RGBA", (int(f.getlength(text) + 20), 50), (0, 0, 0, 0))
-        ImageDraw.Draw(g).text((g.width / 2, 25), text, font=f, fill=color, anchor="mm")
+        g = Image.new("RGBA", (int(tw + 24), 50), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(g)
+        gd.rounded_rectangle((0, 0, g.width - 1, 49), radius=12, fill=(255, 255, 255, 200))
+        gd.text((g.width / 2, 25), text, font=f, fill=color, anchor="mm")
         if rotate:
             g = g.rotate(90, expand=True, resample=Image.BICUBIC)
         im.alpha_composite(g, (int(cx - g.width / 2), int(cy - g.height / 2)))
+        rects.append((cx - g.width / 2, cy - g.height / 2, cx + g.width / 2, cy + g.height / 2))
     if horiz:
-        y = int(min(y1 + 40, area_bottom - 40))
+        below = y1 + 78 <= ay1 - 10
+        y = y1 + 34 if below else (y0 - 34 if y0 - 78 >= ay0 + 10 else ay1 - 60)
         if pills:
             for xx in (x0, x1):
-                d.line([(xx, y - 18), (xx, y + 18)], fill=color, width=3)
+                d.line([(xx, y - 16), (xx, y + 16)], fill=color, width=3)
         arrow(d, (x0 + 4, y), (x1 - 4, y), color)
-        label(horiz[0]["value"], (x0 + x1) / 2, y + (42 if pills else 36))
+        ly = y + (40 if below else -40) if pills else y + (32 if below else -32)
+        label(horiz[0]["value"], (x0 + x1) / 2, ly)
+        rects.append((x0, y - 18, x1, y + 18))
     if vert:
-        x = min(x1 + 44, im.width - PAD - 10)
-        if x - x1 < 24:
-            x = max(x0 - 44, PAD + 10)
+        right = x1 + 110 <= ax1 - 10
+        left = x0 - 110 >= ax0 + 10
+        x = x1 + 36 if right else (x0 - 36 if left else ax1 - 40)
         if pills:
             for yy in (y0, y1):
-                d.line([(x - 18, yy), (x + 18, yy)], fill=color, width=3)
+                d.line([(x - 16, yy), (x + 16, yy)], fill=color, width=3)
         arrow(d, (x, y0 + 4), (x, y1 - 4), color)
-        lx = x + (70 if x > x1 else -70) if pills else x + (34 if x > x1 else -34)
-        lx = max(PAD + 40, min(im.width - PAD - 30, lx))
+        if pills:
+            lx = x + 62 if (right or not left) else x - 62
+        else:
+            lx = x + 30 if (right or not left) else x - 30
+        lx = max(ax0 + 50, min(ax1 - 50, lx))
         label(vert[0]["value"], lx, (y0 + y1) / 2, rotate=not pills)
+        rects.append((x - 18, y0, x + 18, y1))
+    return rects
 
 
 # =================================================================== композиция для нейросети
@@ -931,6 +966,10 @@ def composition_en(kind, slide, style):
     if look["photo"] in ("bands", "card"):
         return ("The product (and the situation) centered and fully visible, nothing cut off, with some breathing "
                 "room around it — the picture will be cropped to a band.")
+    if kind in ("problem", "trust") and look["head"] != "bottom":
+        return ("Keep the upper 28% of the frame calm and empty (soft plain background) for a headline and the bottom "
+                "30% calm and uncluttered (info cards go there). The product and the situation are in the middle band, "
+                "fully visible, nothing cut off.")
     parts = []
     if look["head"] == "bottom":
         parts.append("Keep the bottom 30% of the frame darker and calm (a caption goes there); the product is clearly "
@@ -956,169 +995,214 @@ KIND_NAMES = {"cover": "Обложка", "problem": "Проблема и реш�
               "usage": "Как использовать", "trust": "Комплектация и уход"}
 
 
+# =================================================================== раскладки
+MIN_PHOTO = 0.56          # фото в раскладке полосами — не меньше этой доли высоты слайда
+
+
+def _cards_spot(cards, fmode, fw, fh, pbox, top_free, bottom_lim, region_w, kind):
+    """Лучшее место для блока карточек поверх фото: (x, y, ширина области, доля перекрытия товара)."""
+    area_w = fw if fmode == "column" else region_w
+    xs = [PAD, W - PAD - area_w] if (fmode == "column" or region_w < W - 2 * PAD) else [PAD]
+    ys = [bottom_lim - fh, top_free, int(H * 0.42)] if kind != "cover" else [top_free, int(H * 0.42), bottom_lim - fh]
+    best = None
+    for x in xs:
+        for y in ys:
+            if y < top_free - 1 or y + fh > bottom_lim + 1:
+                continue
+            r = (x - 14, y - 14, x + area_w + 14, y + fh + 14)
+            ov = overlap(pbox, r) if pbox else 0.0       # какая часть товара закрыта
+            if best is None or ov < best[3] - 1e-6:
+                best = (x, int(y), area_w, ov)
+    return best
+
+
+def layout_full(bg, kind, look, style, slide, items, foot_h, band_bg):
+    """Фото во весь слайд, текст и карточки поверх в свободных местах. None — если места нет."""
+    full, pbox = place_photo(bg, W, H, slide.get("box"), band_bg)
+    im = full.convert("RGBA")
+    at_bottom = look["head"] == "bottom"
+    probe = (0, H - 460, W, H) if at_bottom else (0, 0, W, 440)
+    on_dark = zone(im, probe)[0] < 125 or at_bottom
+    for scale in (1.0, 0.82):
+        hh, hdraw = head_block(kind, look, style, slide, on_dark, scale)
+        if at_bottom:
+            hy = H - foot_h - 48 - hh
+        else:
+            hy = 44
+        hrect = (PAD - 10, hy - 10, W - PAD + 10, hy + hh + 10)
+        if not pbox or overlap(pbox, hrect) < 0.05:
+            break
+    else:
+        return None
+    occupied = [hrect] + ([pbox] if pbox else [])
+    region_w = W - 2 * PAD
+    if look.get("feats") in ("grid", "scatter") and kind == "cover" and pbox:
+        region_w = int(W * 0.64)
+    cards, fmode = feat_layout(items, look, style, region_w, kind) if items else ([], None)
+    spot = None
+    if cards:
+        fw, fh = feat_block_size(cards, fmode)
+        top_free = (hy + hh + 40) if not at_bottom else 50
+        bottom_lim = (H - foot_h - 40) if not at_bottom else (hy - 40)
+        spot = _cards_spot(cards, fmode, fw, fh, pbox, top_free, bottom_lim, region_w, kind)
+        if spot is None or spot[3] > 0.12:
+            return None
+    if at_bottom:
+        gradient_rect(im, (0, int(hy - 170), W, H), (8, 14, 18), 0, 225)
+    hdraw(im, hy)
+    if cards:
+        x, y, aw, _ = spot
+        draw_feats(im, cards, fmode, x, y, aw)
+        occupied.append((x - 14, y - 14, x + aw + 14, y + feat_block_size(cards, fmode)[1] + 14))
+    return im, occupied, pbox, (0, 0, W, H)
+
+
+def layout_bands(bg, kind, look, style, slide, items, foot_h, band_bg, card_mode):
+    """Полосами (или фото в рамке): заголовок, фото, карточки. Фото — не меньше MIN_PHOTO высоты."""
+    plate_c = rgb(style.get("plate"), (255, 255, 255))
+    accent = rgb(style.get("accent"), (31, 143, 180))
+    at_bottom = look["head"] == "bottom"
+    on_dark = lum(band_bg) < 128
+    lk = dict(look)
+    if lk.get("feats") in ("column", "scatter"):
+        lk["feats"] = "grid"
+    sl = dict(slide)
+    its = list(items)
+    for step in range(5):
+        scale = (1.0, 0.82, 0.82, 0.7, 0.62)[step]
+        if step >= 2:
+            its = [dict(i, text="") for i in its]
+        if step >= 3:
+            sl["subtitle"] = ""
+        if step >= 2 and lk.get("feats") == "cards" and len(its) >= 2:
+            lk["feats"] = "grid"
+        hh, hdraw = head_block(kind, lk, style, sl, on_dark, scale)
+        cards, fmode = feat_layout(its, lk, style, W - 2 * PAD, kind) if its else ([], None)
+        fw, fh = feat_block_size(cards, fmode) if cards else (0, 0)
+        top_h = 0 if at_bottom else hh + 40 + 34
+        bot_h = (fh + 28 + 38 if cards else 0) + foot_h + ((hh + 40 + 34) if at_bottom else 0)
+        if H - top_h - bot_h >= MIN_PHOTO * H:
+            break
+    p_top, p_bot = top_h, H - bot_h
+    im = Image.new("RGBA", (W, H), band_bg + (255,))
+    if card_mode:
+        ImageDraw.Draw(im).rectangle((0, 0, W, H), fill=mix(plate_c, accent, 0.18))
+        gradient_rect(im, (0, 0, W, H), mix(plate_c, accent, 0.55), 0, 255)
+        cx0, cy0, cx1, cy1 = PAD - 14, p_top + 4, W - PAD + 14, p_bot - 8
+        soft_shadow(im, (cx0, cy0, cx1, cy1), radius=40)
+        ImageDraw.Draw(im).rounded_rectangle((cx0, cy0, cx1, cy1), radius=40, fill=(255, 255, 255))
+        ox, oy, pw_, ph_ = cx0 + 18, cy0 + 18, cx1 - cx0 - 36, cy1 - cy0 - 36
+        photo, pb = place_photo(bg, pw_, ph_, slide.get("box"), (255, 255, 255))
+        im.paste(photo, (ox, oy), rounded_mask((pw_, ph_), 28))
+    else:
+        ox, oy, pw_, ph_ = 0, p_top, W, p_bot - p_top
+        photo, pb = place_photo(bg, W, ph_, slide.get("box"), band_bg)
+        im.paste(photo, (0, p_top), fade_mask(photo.size, 40, top=p_top > 0, bottom=p_bot < H))
+    pbox = (pb[0] + ox, pb[1] + oy, pb[2] + ox, pb[3] + oy) if pb else None
+    hy = 40 if not at_bottom else p_bot + 40
+    hdraw(im, hy)
+    occupied = [(0, hy - 10, W, hy + hh + 10)] + ([pbox] if pbox else [])
+    if cards:
+        fy = H - foot_h - 38 - fh
+        draw_feats(im, cards, fmode, PAD, fy, W - 2 * PAD)
+        occupied.append((PAD, fy, W - PAD, fy + fh))
+    return im, occupied, pbox, (ox, oy, ox + pw_, oy + ph_)
+
+
 # =================================================================== главная функция
 def render(kind, bg, slide, style):
     """bg — картинка нейросети; slide — тексты слайда (+ box — где товар, доли 0..1, + look); style — стиль серии."""
     style = {**DEFAULT_STYLE, **(style or {})}
     look = resolve_look(kind, slide, style)
     ink, accent, plate_c, g1, g2, bcol = colors(style)
-    box = slide.get("box")
     footer = str(slide.get("footer") or "").strip()
     foot_h = 104 if footer else 0
     items = feat_items(slide, kind)
     has_badge = bool(str((slide.get("badge") or {}).get("value", "")).strip()) and look["head"] != "number"
-    photo_mode = look["photo"]
-    if kind == "specs":
-        photo_mode = "card" if photo_mode == "card" else "bands"
     band_bg = mix(plate_c, accent, 0.08)
+    mode = "bands" if kind == "specs" and look["photo"] == "full" else look["photo"]
+    res = layout_full(bg, kind, look, style, slide, items, foot_h, band_bg) if mode == "full" else None
+    if res is None:
+        res = layout_bands(bg, kind, look, style, slide, items, foot_h, band_bg, mode == "card")
+    im, occupied, pbox, prect = res
 
-    # --- 1. решаем раскладку
-    head_at_bottom = look["head"] == "bottom"
-    if photo_mode == "full":
-        full, pbox = place_photo(bg, W, H, box, band_bg)
-        tmp = full.convert("RGBA")
-        top_mean, _ = zone(tmp, (0, 0, W, 420)) if not head_at_bottom else zone(tmp, (0, H - 420, W, H))
-        on_dark = top_mean < 125 or head_at_bottom
-        hh, hdraw = head_block(kind, look, style, slide, on_dark)
-        if not head_at_bottom:
-            head_y0, head_y1 = 44, 44 + hh
-            clash = pbox and pbox[1] < head_y1 + 10 and overlap((PAD, head_y0, W - PAD, head_y1), pbox) > 0.06
+    # --- размеры (слайд характеристик): товар — по ровному фону или по рамке от контролёра
+    if kind == "specs":
+        area = im.crop(tuple(int(v) for v in prect)).convert("RGB")
+        det = product_bbox(area)
+        det = (det[0] + prect[0], det[1] + prect[1], det[2] + prect[0], det[3] + prect[1]) if det else None
+        if det and pbox:
+            grow = (pbox[0] - 40, pbox[1] - 40, pbox[2] + 40, pbox[3] + 40)
+            bb = det if overlap(det, grow) > 0.85 else pbox
         else:
-            head_y1 = H - foot_h - 52
-            head_y0 = head_y1 - hh
-            clash = pbox and pbox[3] > head_y0 + 30 and overlap((PAD, head_y0, W - PAD, head_y1), pbox) > 0.15
-        if clash:
-            photo_mode = "bands"
-    if photo_mode in ("bands", "card"):
-        on_dark = lum(band_bg) < 128 if photo_mode == "bands" else lum(band_bg) < 128
-        hh, hdraw = head_block(kind, look, style, slide, on_dark)
+            bb = det or pbox
+        occupied += draw_dims(im, style, look, slide.get("dims"), bb, prect)
+        if bb:
+            occupied.append(bb)
+            pbox = bb
 
-    # --- 2. пункты / преимущества (для полос и рамки — своя нижняя полоса)
-    region_w = W - 2 * PAD
-    if photo_mode == "full" and look.get("feats") in ("grid", "scatter") and box:
-        region_w = int(W * 0.64)
-    cards, fmode = feat_layout(items, look, style, region_w, kind) if items else ([], None)
-    if items and photo_mode in ("bands", "card") and fmode == "column":
-        look = dict(look, feats="grid")
-        cards, fmode = feat_layout(items, look, style, W - 2 * PAD, kind)
-    fw, fh = feat_block_size(cards, fmode) if cards else (0, 0)
-
-    # --- 3. фон и фото
-    if photo_mode == "full":
-        im = full.convert("RGBA")
-        if head_at_bottom:
-            gradient_rect(im, (0, int(head_y0 - 160), W, H), (8, 14, 18), 0, 225)
-    else:
-        top_h = 0 if head_at_bottom else hh + 44 + 40
-        bot_h = (fh + 34 + 44 if cards else 0) + foot_h + ((hh + 44 + 40) if head_at_bottom else 0)
-        if H - top_h - bot_h < 430 and cards:      # мало места под фото — пункты компактнее
-            look2 = dict(look, feats="grid") if fmode == "cards" and len(cards) >= 3 else look
-            cards, fmode = feat_layout(items, look2, style, W - 2 * PAD, kind)
-            fw, fh = feat_block_size(cards, fmode)
-            bot_h = (fh + 34 + 44) + foot_h + ((hh + 84) if head_at_bottom else 0)
-        p_top, p_bot = top_h, H - bot_h
-        im = Image.new("RGBA", (W, H), band_bg + (255,))
-        if photo_mode == "card":
-            ImageDraw.Draw(im).rectangle((0, 0, W, H), fill=mix(plate_c, accent, 0.18))
-            gradient_rect(im, (0, 0, W, H), mix(plate_c, accent, 0.55), 0, 255)
-            cx0, cy0, cx1, cy1 = PAD - 14, p_top + 6, W - PAD + 14, p_bot - 10
-            soft_shadow(im, (cx0, cy0, cx1, cy1), radius=40)
-            ImageDraw.Draw(im).rounded_rectangle((cx0, cy0, cx1, cy1), radius=40, fill=(255, 255, 255))
-            iw_, ih_ = cx1 - cx0 - 36, cy1 - cy0 - 36
-            ph_img, pb = place_photo(bg, iw_, ih_, box, (255, 255, 255))
-            im.paste(ph_img, (cx0 + 18, cy0 + 18), rounded_mask((iw_, ih_), 28))
-            ox, oy, pw_, phh = cx0 + 18, cy0 + 18, iw_, ih_
-        else:
-            ph_img, pb = place_photo(bg, W, p_bot - p_top, box, band_bg)
-            im.paste(ph_img, (0, p_top), fade_mask(ph_img.size, 46, top=p_top > 0, bottom=p_bot < H))
-            ox, oy, pw_, phh = 0, p_top, W, p_bot - p_top
-        pbox = (pb[0] + ox, pb[1] + oy, pb[2] + ox, pb[3] + oy) if pb else None
-        if kind == "specs":
-            area = im.crop((ox, oy, ox + pw_, oy + phh)).convert("RGB")
-            bb = product_bbox(area)
-            bb = (bb[0] + ox, bb[1] + oy, bb[2] + ox, bb[3] + oy) if bb else pbox
-            draw_dims(im, style, look, slide.get("dims"), bb, oy + phh)
-            pbox = bb or pbox
-        head_y0 = 44 if not head_at_bottom else p_bot + 44
-        if head_at_bottom and cards:
-            head_y0 = p_bot + 44
-
-    # --- 4. заголовок
-    hdraw(im, head_y0)
-    occupied = [(0, head_y0 - 10, W, head_y0 + hh + 10)]
-    if pbox:
-        occupied.append(pbox)
-
-    # --- 5. преимущества / пункты
-    if cards:
-        if photo_mode == "full":
-            cands = []
-            col_w = fw
-            top_free = (head_y0 + hh + 60) if not head_at_bottom else 60
-            bottom_lim = (H - foot_h - 40) if not head_at_bottom else (head_y0 - 40)
-            xs = [PAD, W - PAD - col_w] if fmode in ("column",) else (
-                [W - PAD - region_w, PAD] if region_w < W - 2 * PAD else [PAD])
-            for x in xs:
-                for y in (top_free, max(top_free, int(H * 0.42)), bottom_lim - fh):
-                    if y >= top_free - 1 and y + fh <= bottom_lim + 1:
-                        cands.append((x, int(y)))
-            if not cands:
-                cands = [(PAD, max(top_free, bottom_lim - fh))]
-            area_w = col_w if fmode == "column" else region_w
-
-            def bad(p):
-                r = (p[0] - 14, p[1] - 14, p[0] + area_w + 14, p[1] + fh + 14)
-                return overlap(r, pbox) if pbox else 0.0
-            fx_, fy_ = min(cands, key=bad)
-            draw_feats(im, cards, fmode, fx_, fy_, area_w)
-            occupied.append((fx_ - 14, fy_ - 14, fx_ + area_w + 14, fy_ + fh + 14))
-        else:
-            fy_ = H - foot_h - 44 - fh
-            draw_feats(im, cards, fmode, PAD, fy_, W - 2 * PAD)
-            occupied.append((PAD, fy_, W - PAD, fy_ + fh))
-
-    # --- 6. бейдж
+    # --- бейдж: место, где он не закрывает товар, текст и стрелки
     if has_badge:
         r = badge_size(look)
         if look.get("badge") == "corner":
-            spot = (W - 110, 110) if look.get("align") != "center" else (W - 110, H - foot_h - 110)
-            draw_badge(im, look, style, slide["badge"], *spot)
+            draw_badge(im, look, style, slide["badge"], W - 110, 110 if look.get("align") != "center"
+                       else H - foot_h - 110)
         else:
-            hb = head_y0 + hh
-            spots = [(W - PAD - r + 12, hb + r + 24), (W - PAD - r + 12, H - foot_h - r - 40),
-                     (PAD + r - 12, H - foot_h - r - 40), (PAD + r - 12, hb + r + 24),
-                     (W - PAD - r + 12, int(H * 0.55)), (W // 2, H - foot_h - r - 40)]
+            px0, py0, px1, py1 = prect
+            best = None
+            for k in (1.0, 0.8, 0.66):
+                r = badge_size(look, k)
+                spots = [(px1 - r - 16, py0 + r + 16), (px0 + r + 16, py0 + r + 16), (px1 - r - 16, py1 - r - 16),
+                         (px0 + r + 16, py1 - r - 16), (px1 - r - 10, py0 + r * 0.25), (px0 + r + 10, py0 + r * 0.25),
+                         (px1 - r - 10, py1 - r * 0.25), (W - PAD - r + 12, int(H * 0.5)), (PAD + r - 12, int(H * 0.5))]
 
-            def badness(p):
-                rr = (p[0] - r, p[1] - r, p[0] + r, p[1] + r)
-                if rr[1] < 0 or rr[3] > H - foot_h:
-                    return 9.0
-                return sum(overlap(rr, o) * (0.6 if o is pbox else 1.0) for o in occupied)
-            cx, cy = min(spots, key=badness)
-            draw_badge(im, look, style, slide["badge"], cx, cy)
+                def badness(p, r=r):
+                    rr = (p[0] - r, p[1] - r, p[0] + r, p[1] + r)
+                    if rr[0] < 4 or rr[1] < 4 or rr[2] > W - 4 or rr[3] > H - foot_h - 4:
+                        return 99.0
+                    # текст, карточки и стрелки закрывать нельзя; угол рамки товара (часто пустой) — допустимо
+                    return sum(overlap(rr, o) * (1.5 if o is pbox else 8.0) for o in occupied)
+                p = min(spots, key=badness)
+                cand = (badness(p), k, p, r)
+                if best is None or cand[0] < best[0] - 0.02:
+                    best = cand
+                if cand[0] < 0.08:
+                    break
+            if best[0] > 2.0:          # места нет совсем — бейдж не ставим, чтобы ничего не закрыть
+                best = None
+            if best:
+                _, k, (cx, cy), r = best
+                draw_badge(im, look, style, slide["badge"], cx, cy, k)
+                occupied.append((cx - r, cy - r, cx + r, cy + r))
 
-    # --- 7. метка (например «РАЗМЕРЫ»)
+    # --- метка-табличка (например «РАЗМЕРЫ») — в свободном углу области фото
     tag = str(slide.get("tag") or "").strip()
     if tag:
         fam = style.get("font", "Montserrat")
-        f = font(fam, "black", 38)
-        tw = f.getlength(tag.upper())
-        bx1, by1 = W - PAD, H - foot_h - 40 - (fh + 20 if cards and photo_mode != "full" else 0)
-        bx0, by0 = bx1 - tw - 70, by1 - 86
-        soft_shadow(im, (bx0, by0, bx1, by1), radius=22, strength=50, blur=10, dy=5)
-        ImageDraw.Draw(im).rounded_rectangle((bx0, by0, bx1, by1), radius=22, fill=(255, 255, 255))
-        draw_fx(im, (bx0 + 35, by0 + 20), tag.upper(), f, ink if lum(ink) < 128 else (18, 30, 40),
-                {"italic": bool(look.get("italic"))})
+        f = font(fam, "black", 36)
+        tw, th = f.getlength(tag.upper()) + 64, 80
+        px0, py0, px1, py1 = prect
+        spots = [(px1 - tw - 16, py1 - th - 16), (px0 + 16, py1 - th - 16), (px1 - tw - 16, py0 + 16), (px0 + 16, py0 + 16)]
 
-    # --- 8. слоган внизу
+        def tbad(p):
+            rr = (p[0], p[1], p[0] + tw, p[1] + th)
+            return sum(overlap(rr, o) * (1.5 if o is pbox else 8.0) for o in occupied)
+        bx0, by0 = min(spots, key=tbad)
+        if tbad((bx0, by0)) < 1.0:
+            soft_shadow(im, (bx0, by0, bx0 + tw, by0 + th), radius=22, strength=50, blur=10, dy=5)
+            ImageDraw.Draw(im).rounded_rectangle((bx0, by0, bx0 + tw, by0 + th), radius=22, fill=(255, 255, 255))
+            draw_fx(im, (bx0 + 32, by0 + 18), tag.upper(), f, ink if lum(ink) < 128 else (18, 30, 40),
+                    {"italic": bool(look.get("italic"))})
+
+    # --- слоган внизу
     if footer:
         fam = style.get("font", "Montserrat")
         fc = ink if lum(ink) < 110 else mix(accent, (0, 0, 0), 0.35)
         ImageDraw.Draw(im).rectangle((0, H - foot_h, W, H), fill=fc)
-        f, lines, s, _ = fit_lines(footer, fam, "extrabold", W - 2 * PAD + 20, foot_h - 24, 36, 22, 1.12, 2)
-        y = H - foot_h + (foot_h - len(lines) * s * 1.12) / 2
+        f, lines, s_, _ = fit_lines(footer, fam, "extrabold", W - 2 * PAD + 20, foot_h - 24, 36, 22, 1.12, 2)
+        y = H - foot_h + (foot_h - len(lines) * s_ * 1.12) / 2
         d = ImageDraw.Draw(im)
         for ln in lines:
-            d.text((W / 2, y + s * 0.56), ln, font=f, fill=(255, 255, 255), anchor="mm")
-            y += s * 1.12
+            d.text((W / 2, y + s_ * 0.56), ln, font=f, fill=(255, 255, 255), anchor="mm")
+            y += s_ * 1.12
     return im.convert("RGB")
