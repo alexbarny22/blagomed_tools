@@ -35,10 +35,10 @@ VSELLM_URL = "https://api.vsellm.ru/v1"     # адрес API агрегатор�
 VSELLM_KEY = ""                        # ключ API агрегатора
 
 MODELS = [
-    {"name": "Claude Sonnet", "type": "openai", "base_url": VSELLM_URL, "api_key": VSELLM_KEY,
-     "model": "anthropic/claude-sonnet-4.5"},
-    {"name": "Gemini Pro", "type": "openai", "base_url": VSELLM_URL, "api_key": VSELLM_KEY,
-     "model": "google/gemini-2.5-pro"},
+    {"name": "Claude Sonnet 5.5", "type": "openai", "base_url": VSELLM_URL, "api_key": VSELLM_KEY,
+     "model": "anthropic/claude-sonnet-5.5"},
+    {"name": "Gemini 3.1 Pro", "type": "openai", "base_url": VSELLM_URL, "api_key": VSELLM_KEY,
+     "model": "google/gemini-3.1-pro-preview"},
     # GigaChat: ключ авторизации (Authorization key) из личного кабинета developers.sber.ru
     {"name": "GigaChat Max", "type": "gigachat", "api_key": "", "model": "GigaChat-2-Max",
      "scope": "GIGACHAT_API_PERS", "verify_ssl": False, "enabled": False},
