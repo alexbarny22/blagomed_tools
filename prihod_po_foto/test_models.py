@@ -8,7 +8,9 @@
 Запуск: test_models.bat. Результат — на экране и в файле test_result.txt.
 К 1С не подключается, в 1С ничего не пишет.
 """
+import math
 import os
+import re
 import sys
 import threading
 import time
@@ -26,9 +28,16 @@ IMG = (".jpg", ".jpeg", ".png", ".webp", ".heic")
 out_lines = []
 
 
+ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+def money(x):
+    return f"{x:,.2f}".replace(",", " ")
+
+
 def p(s=""):
     print(s)
-    out_lines.append(s)
+    out_lines.append(ANSI.sub("", s))      # в файл — без цветовых кодов
 
 
 def list_models():
@@ -73,6 +82,13 @@ def docs():
     return res
 
 
+# цвета в консоли Windows (Windows Terminal и cmd на Windows 10/11 их понимают)
+if os.name == "nt":
+    os.system("")
+G, Y, R_, C, D, B, X = ("\033[92m", "\033[93m", "\033[91m", "\033[96m", "\033[90m", "\033[1m", "\033[0m")
+SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
 class Progress:
     """Живая строка: общий ползунок, какая модель работает и сколько секунд прошло."""
     def __init__(self, total):
@@ -81,14 +97,17 @@ class Progress:
         self._th = None
 
     def _line(self):
-        w = 20
-        fill = int(w * self.done / self.total) if self.total else w
-        sec = int(time.time() - self.t0)
-        spin = "|/-\\"[sec % 4]
-        return f"\r  [{'#' * fill}{'.' * (w - fill)}] {self.done}/{self.total}  {spin} {self.label}  {sec} с   "
+        w = 24
+        el = time.time() - self.t0
+        part = min(0.95, 1 - math.exp(-el / 45))          # оценка внутри текущей проверки
+        frac = (self.done + part) / self.total if self.total else 1
+        fill = int(w * frac)
+        spin = SPIN[int(el * 8) % len(SPIN)]
+        return (f"\r  {C}{'█' * fill}{D}{'░' * (w - fill)}{X} {B}{int(frac * 100):3d}%{X}  "
+                f"{C}{spin}{X} {self.label} {D}{int(el)} с{X}   ")
 
     def _run(self):
-        while not self._stop.wait(0.5):
+        while not self._stop.wait(0.12):
             sys.stdout.write(self._line())
             sys.stdout.flush()
 
@@ -103,7 +122,7 @@ class Progress:
         if self._th:
             self._th.join()
         self.done += 1
-        sys.stdout.write("\r" + " " * 100 + "\r")      # стираем живую строку перед результатом
+        sys.stdout.write("\r" + " " * 110 + "\r")      # стираем живую строку перед результатом
         sys.stdout.flush()
 
 
@@ -130,7 +149,7 @@ def main():
       f"Каждая занимает 20–90 секунд.")
     bar = Progress(total)
     for name, files in found:
-        p(f"\n================ {name} ({len(files)} фото)")
+        p(f"\n{B}{C}▌ {name}{X} {D}({len(files)} фото){X}")
         raws = [open(f, "rb").read() for f in files]
         images = [R.prepare_image(b) for b in raws]
         for m in models:
@@ -140,7 +159,7 @@ def main():
                 d = R.ask_model(m, images, raws)
             except Exception as e:
                 bar.stop()
-                p(f"  {m['name']:<16} ОШИБКА: {str(e)[:200]}")
+                p(f"  {R_}✖ {m['name']:<18}{X} ошибка: {str(e)[:200]}")
                 stats[m["name"]][1] += 1
                 continue
             bar.stop()
@@ -151,17 +170,22 @@ def main():
             st[0] += 1 if ok else 0
             st[1] += 1
             st[2] += sec
-            p(f"  {m['name']:<16} {'✔ СОШЛОСЬ' if ok else '✖ есть ошибки'}  строк {len(d['lines'])}, "
-              f"итог {d['total'].get('sum')}, ИНН {d['supplier'].get('inn') or '-'}"
-              f"{'' if not chk['inn_bad'] else ' (ОШИБКА В ИНН)'}, №{d.get('number')} от {d.get('date')}, {sec:.0f} с")
+            mark = f"{G}✔ {m['name']:<18}{X} {G}всё сошлось{X}" if ok else f"{Y}⚠ {m['name']:<18}{X} {Y}есть замечания{X}"
+            tot = d["total"].get("sum")
+            p(f"  {mark}  {D}{sec:.0f} с{X}")
+            p(f"     № {d.get('number')} от {d.get('date')} · ИНН {d['supplier'].get('inn') or '-'}"
+              f"{f' {R_}(ошибка в ИНН){X}' if chk['inn_bad'] else ''} · итог {money(tot) if tot else '-'}")
             for x in d["lines"]:
-                p(f"       {x['n']}. {x['name'][:45]:<45} {x['qty']:g} × {x['price']:.2f} = {x['sum']:.2f}")
+                col = Y if x["n"] in chk["bad_lines"] else D
+                p(f"     {col}{x['n']:>2}. {x['name'][:42]:<42} {x['qty']:>6g} × {money(x['price']):>10} = {money(x['sum']):>12}{X}")
             for x in chk["issues"][:6]:
-                p(f"       - {x}")
-    p("\n================ ИТОГ")
-    for n, (ok, tot, sec) in stats.items():
+                p(f"     {Y}• {x}{X}")
+    p(f"\n{B}━━━━━━━━━━━━━━━━ ИТОГ ━━━━━━━━━━━━━━━━{X}")
+    for n, (ok, tot, sec) in sorted(stats.items(), key=lambda kv: -kv[1][0]):
         if tot:
-            p(f"  {n:<16} без ошибок {ok} из {tot}, в среднем {sec / max(tot, 1):.0f} с")
+            col = G if ok == tot else (Y if ok else R_)
+            p(f"  {col}{'●' * ok}{D}{'○' * (tot - ok)}{X}  {n:<18} без ошибок {col}{ok} из {tot}{X}"
+              f"{D}, в среднем {sec / max(tot, 1):.0f} с{X}")
     p("\nПервой в списке MODELS в config.py поставьте ту, у которой больше «без ошибок».")
     with open(os.path.join(HERE, "test_result.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(out_lines))

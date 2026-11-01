@@ -150,6 +150,54 @@ async def on_photo(m: Message):
     s["timer"] = asyncio.create_task(show_photo_status(uid, m.chat.id))
 
 
+# ------------------------------------------------------------------ живой индикатор хода работы
+ICON = {"run": "⏳", "ok": "✅", "warn": "⚠️", "err": "❌", "wait": "▫️"}
+
+
+def bar(frac, width=12):
+    full = int(round(frac * width))
+    return "▰" * full + "▱" * (width - full)
+
+
+def render(steps, title, finished=False):
+    lines = [f"<b>{e(title)}</b>",
+             f"{bar(1.0 if finished else steps.fraction())}  {int(steps.elapsed())} с", ""]
+    for it in steps.items:
+        sec = int(steps.elapsed(it)) if it["t0"] else 0
+        tail = f" — {e(it['note'])}" if it["note"] else ""
+        dots = "…" if it["state"] == "run" else ""
+        lines.append(f"{ICON[it['state']]} {e(it['title'])}{dots} <i>{sec} с</i>{tail}")
+    return "\n".join(lines)
+
+
+class Live:
+    """Сообщение в Telegram, которое само перерисовывается каждые 3 секунды, пока идёт работа."""
+    def __init__(self, msg, steps, title):
+        self.msg, self.steps, self.title = msg, steps, title
+        self.last = ""
+        self.task = asyncio.create_task(self._loop())
+
+    async def _draw(self, finished=False):
+        txt = render(self.steps, self.title, finished)
+        if txt != self.last:
+            try:
+                await self.msg.edit_text(txt, parse_mode="HTML")
+                self.last = txt
+            except Exception:
+                pass            # «message is not modified» и лимиты Telegram — пропускаем кадр
+
+    async def _loop(self):
+        while True:
+            await asyncio.sleep(3)
+            await self._draw()
+
+    async def close(self, title=None):
+        self.task.cancel()
+        if title:
+            self.title = title
+        await self._draw(finished=True)
+
+
 # ------------------------------------------------------------------ распознавание
 @dp.callback_query(F.data.in_({"go", "other_model"}))
 async def cb_go(c: CallbackQuery):
@@ -164,16 +212,20 @@ async def cb_go(c: CallbackQuery):
         used = [m["name"] for m in MODELS].index(s["rec"]["model"]) if s["rec"]["model"] in [m["name"] for m in MODELS] else -1
         start = (used + 1) % len(MODELS)
     await c.message.edit_reply_markup(reply_markup=None)
-    wait = await c.message.answer(f"⏳ Распознаю {len(s['photos'])} фото… обычно 20–60 секунд.")
+    steps = rec_mod.Steps()
+    title = f"🔍 Распознаю накладную · {len(s['photos'])} фото"
+    msg = await c.message.answer(render(steps, title), parse_mode="HTML")
+    live = Live(msg, steps, title)
     try:
-        r = await asyncio.to_thread(rec_mod.recognize, s["photos"], MODELS, log.info, start)
+        r = await asyncio.to_thread(rec_mod.recognize, s["photos"], MODELS, log.info, start, steps)
     except Exception as ex:
         log.exception("recognize")
-        await wait.edit_text(f"❌ Не получилось распознать: {e(ex)}", parse_mode="HTML",
-                             reply_markup=kb([Btn(text="🔁 Ещё раз", callback_data="go")]))
+        await live.close("❌ Не получилось распознать")
+        await c.message.answer(f"{e(ex)}", parse_mode="HTML",
+                               reply_markup=kb([Btn(text="🔁 Ещё раз", callback_data="go")]))
         return
-    await wait.delete()
     s["rec"] = r
+    s["live"] = live
     await prepare(uid, c.message.chat.id)
 
 
@@ -182,11 +234,22 @@ async def prepare(uid, chat_id):
     s = st(uid)
     d = s["rec"]["data"]
     inn = d["supplier"].get("inn", "")
+    live = s.pop("live", None)
+    step = live.steps.add("onec", "Ищу поставщика и товары в 1С") if live else None
     try:
         if not c1.items:
             await asyncio.to_thread(c1.load_items)
         ka = await asyncio.to_thread(c1.find_supplier, inn, d["supplier"].get("name", ""))
+        if step:
+            known = sum(1 for ln in d["lines"] if c1.match_line(inn, ln)["key"])
+            live.steps.finish(step, "ok" if ka else "warn",
+                              (f"поставщик найден, знакомых товаров {known} из {len(d['lines'])}" if ka
+                               else "поставщик не найден"))
+            await live.close(f"✅ Накладная прочитана за {int(live.steps.elapsed())} с")
     except Exception as ex:
+        if step:
+            live.steps.finish(step, "err", "нет связи с 1С")
+            await live.close("⚠️ Накладная прочитана, но 1С не ответила")
         await bot.send_message(chat_id, f"❌ Ошибка связи с 1С: {e(ex)}", parse_mode="HTML",
                                reply_markup=kb([Btn(text="🔁 Повторить", callback_data="sup_retry")]))
         return
@@ -411,18 +474,32 @@ async def cb_post(c: CallbackQuery):
                 parse_mode="HTML", reply_markup=kb([Btn(text="Да, создать", callback_data="post_force"),
                                                     Btn(text="✖ Нет", callback_data="cancel")]))
             return
-    wait = await c.message.answer("⏳ Создаю поступление в 1С…")
+    steps = rec_mod.Steps()
+    steps.EXPECT = dict(steps.EXPECT, onec=10)
+    msg = await c.message.answer(render(steps, "📦 Провожу поступление в 1С"), parse_mode="HTML")
+    live = Live(msg, steps, "📦 Провожу поступление в 1С")
+    st1 = steps.add("onec", "Беру настройки из прошлого поступления")
     try:
         def job():
             tpl, own = c1.template(s["ka"])
+            steps.finish(st1, "ok", "от этого поставщика" if own else "поставщик новый — образец от другого")
+            st2 = steps.add("onec", f"Записываю документ ({len(use)} строк) и провожу")
             doc = c1.build(s["ka"], d, use, tpl, own)
-            return doc, c1.create(doc, getattr(config, "POST", True))
+            res = c1.create(doc, getattr(config, "POST", True))
+            steps.finish(st2, "ok" if res["posted"] or not getattr(config, "POST", True) else "warn",
+                         f"№ {res['number']}")
+            return doc, res
         doc, res = await asyncio.to_thread(job)
     except Exception as ex:
         log.exception("create")
-        await wait.edit_text(f"❌ 1С не приняла документ: {e(ex)}", parse_mode="HTML",
-                             reply_markup=kb([Btn(text="🔁 Повторить", callback_data="post_force")]))
+        for it in steps.items:
+            if it["state"] == "run":
+                steps.finish(it, "err")
+        await live.close("❌ 1С не приняла документ")
+        await c.message.answer(e(ex), parse_mode="HTML",
+                               reply_markup=kb([Btn(text="🔁 Повторить", callback_data="post_force")]))
         return
+    await live.close("✅ Готово" if res["posted"] else "⚠️ Записано без проведения")
     save_history(uid, doc, res)
     if res["posted"]:
         text = f"✅ Поступление № <b>{e(res['number'])}</b> создано и проведено.\nСумма: {money(doc['СуммаДокумента'])}"
@@ -434,7 +511,7 @@ async def cb_post(c: CallbackQuery):
     skipped = [L for L in s["lines"] if L["skip"]]
     if skipped:
         text += "\n\nНе оприходованы: " + ", ".join(str(L["line"]["n"]) for L in skipped)
-    await wait.edit_text(text, parse_mode="HTML")
+    await c.message.answer(text, parse_mode="HTML")
     reset(uid)
 
 

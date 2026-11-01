@@ -10,6 +10,7 @@
 import base64
 import io
 import json
+import math
 import re
 import time
 import uuid
@@ -312,33 +313,78 @@ def score(chk: dict) -> int:
     return len(chk["issues"]) + (5 if chk["total_ok"] is False else 0) + (3 if chk.get("inn_bad") else 0)
 
 
+# ------------------------------------------------------------------ ход работы (для красивого показа)
+class Steps:
+    """Список этапов с состоянием. Бот и тест читают его и рисуют прогресс; сам ничего не выводит."""
+    EXPECT = {"prep": 2, "model": 45, "onec": 8}     # ожидаемая длительность этапа, с
+
+    def __init__(self):
+        self.items = []         # {kind, title, state: run|ok|warn|err|wait, note, t0, t1}
+        self.started = time.time()
+
+    def add(self, kind, title, state="run"):
+        self.items.append({"kind": kind, "title": title, "state": state, "note": "",
+                           "t0": time.time() if state == "run" else None, "t1": None})
+        return self.items[-1]
+
+    def finish(self, it, state="ok", note=""):
+        it.update(state=state, note=note, t1=time.time())
+
+    def fraction(self):
+        """Доля выполненного 0..1: завершённые этапы + оценка текущего по времени (не больше 95%)."""
+        tot = done = 0.0
+        for it in self.items:
+            w = self.EXPECT.get(it["kind"], 10)
+            tot += w
+            if it["state"] in ("ok", "warn", "err"):
+                done += w
+            elif it["state"] == "run" and it["t0"]:
+                # плавно растёт и никогда не упирается в 100%, пока этап не закончен
+                done += w * min(0.95, 1 - math.exp(-(time.time() - it["t0"]) / w))
+        return min(done / tot, 1.0) if tot else 0.0
+
+    def elapsed(self, it=None):
+        if it is None:
+            return time.time() - self.started
+        return (it["t1"] or time.time()) - (it["t0"] or time.time())
+
+
 # ------------------------------------------------------------------ главный вход
-def recognize(raw_images: list, models: list, log=print, start_from=0) -> dict:
+def recognize(raw_images: list, models: list, log=print, start_from=0, steps=None) -> dict:
     """
     raw_images — список байтов фото. models — config.MODELS.
     Пробует модели по очереди, пока результат не сойдётся по суммам. Возвращает
     {'data', 'check', 'model', 'tried': [(имя, кол-во замечаний или ошибка)]}.
     """
+    steps = steps or Steps()
+    st = steps.add("prep", f"Подготовка фото ({len(raw_images)} шт)")
     images = [prepare_image(b) for b in raw_images]
+    steps.finish(st)
     best, tried = None, []
-    order = models[start_from:] + models[:start_from]
-    for m in order:
-        if not m.get("enabled", True):
-            continue
+    order = [m for m in models[start_from:] + models[:start_from] if m.get("enabled", True)]
+    for i, m in enumerate(order):
         t0 = time.time()
+        st = steps.add("model", f"{m['name']} {'читает' if i == 0 else 'перепроверяет'} накладную")
         try:
             data = ask_model(m, images, raw_images)
         except Exception as e:
             log(f"{m['name']}: ошибка — {e}")
             tried.append((m["name"], f"ошибка: {str(e)[:120]}"))
+            steps.finish(st, "err", "нет ответа" + (" → пробую другую" if i < len(order) - 1 else ""))
             continue
         chk = check(data)
+        good = chk["total_ok"] and not chk["bad_lines"] and not chk["inn_bad"]
+        if good:
+            steps.finish(st, "ok", f"строк {len(data['lines'])}, суммы сошлись")
+        else:
+            steps.finish(st, "warn", f"замечаний {len(chk['issues'])}" +
+                         (" → перепроверяю другой" if i < len(order) - 1 else ""))
         log(f"{m['name']}: строк {len(data['lines'])}, замечаний {len(chk['issues'])}, {time.time() - t0:.0f} с")
         tried.append((m["name"], len(chk["issues"])))
         cand = {"data": data, "check": chk, "model": m["name"]}
         if best is None or score(chk) < score(best["check"]):
             best = cand
-        if chk["total_ok"] and not chk["bad_lines"] and not chk["inn_bad"]:
+        if good:
             break      # всё сошлось — дальше не тратим деньги
     if best is None:
         raise ModelError("Ни одна нейросеть не ответила:\n" + "\n".join(f"• {n}: {r}" for n, r in tried))
