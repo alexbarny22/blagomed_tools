@@ -311,21 +311,39 @@ class OneC:
         Не поступило = заказано − уже оприходовано проведёнными поступлениями со ссылкой на этот заказ.
         """
         od = self.od
+        t0 = time.time()
         flt = f"Контрагент_Key eq guid'{ka['Ref_Key']}' and Posted eq true and DeletionMark eq false"
-        try:
-            orders = od.get(ORDER_DOC, **{"$filter": flt, "$orderby": "Date asc"})
-        except ODataError:
-            orders = od.get(ORDER_DOC, **{"$filter": flt})
-            orders.sort(key=lambda r: r.get("Date", ""))
-        orders = [o for o in orders if "закрыт" not in str(o.get("Статус", "")).lower()]
+        sel = "Ref_Key,Number,Date,Статус,ЦенаВключаетНДС,Товары"
+        orders = None
+        for extra in (" and Статус ne 'Закрыт'", ""):      # сначала просим 1С отдать только незакрытые
+            try:
+                orders = od.get(ORDER_DOC, **{"$filter": flt + extra, "$select": sel})
+                break
+            except ODataError as e:
+                self.log(f"  заказы: запрос без фильтра по статусу ({str(e)[:80]})")
+        orders = [o for o in orders or [] if "закрыт" not in str(o.get("Статус", "")).lower()]
+        orders.sort(key=lambda r: r.get("Date", ""))
+        self.log(f"  открытых заказов: {len(orders)} ({time.time() - t0:.1f} с)")
         if not orders:
             return None
         okeys = {o["Ref_Key"] for o in orders}
         since = min(o["Date"] for o in orders)[:19]
-        try:
-            recs = od.get(DOC, **{"$filter": f"{flt} and Date ge datetime'{since}'"})
-        except ODataError:
-            recs = [r for r in od.get(DOC, **{"$filter": flt}) if r.get("Date", "") >= since]
+        t1 = time.time()
+        recs = None
+        # 1) только поступления, где в строках есть ссылка на эти заказы (1С отбирает сама — быстро)
+        if len(okeys) <= 40:
+            cond = " or ".join(f"t/ЗаказПоставщику_Key eq guid'{k}'" for k in okeys)
+            try:
+                recs = od.get(DOC, **{"$filter": f"{flt} and Товары/any(t: {cond})", "$select": "Ref_Key,Date,Товары"})
+            except ODataError as e:
+                self.log(f"  поступления по заказам: отбор в 1С не сработал ({str(e)[:80]}), беру за период")
+        # 2) запасной путь — все поступления поставщика с даты самого старого открытого заказа
+        if recs is None:
+            try:
+                recs = od.get(DOC, **{"$filter": f"{flt} and Date ge datetime'{since}'", "$select": "Ref_Key,Date,Товары"})
+            except ODataError:
+                recs = [r for r in od.get(DOC, **{"$filter": flt}) if r.get("Date", "") >= since]
+        self.log(f"  поступлений по ним: {len(recs)} ({time.time() - t1:.1f} с)")
         # как в этой базе строка поступления ссылается на заказ — узнаём по прошлым поступлениям/образцу
         sample = [ln for r in recs + ([tpl] if tpl else []) for ln in (r.get("Товары") or [])]
         field = next((self._order_ref_field(ln) for ln in sample if self._order_ref_field(ln)), "ЗаказПоставщику_Key")

@@ -8,6 +8,7 @@
 Запуск: start.bat
 """
 import asyncio
+import time
 import datetime as dt
 import html
 import json
@@ -287,20 +288,33 @@ async def prepare(uid, chat_id):
     try:
         if not c1.items:
             await asyncio.to_thread(c1.load_items)
-        ka = await asyncio.to_thread(c1.find_supplier, inn, d["supplier"].get("name", ""))
+        warm = WARM.get(inn)
+        fresh = warm and time.time() - warm["t"] < getattr(config, "WARM_MINUTES", 10) * 60 * 1.5
+        ka = warm["ka"] if fresh else await asyncio.to_thread(c1.find_supplier, inn, d["supplier"].get("name", ""))
         s["orders"] = None
-        if ka and getattr(config, "USE_ORDERS", True):
+        if fresh and getattr(config, "USE_ORDERS", True):
+            s["orders"] = warm["orders"]       # заготовка; перед проведением всё равно перечитаем
+        elif ka and getattr(config, "USE_ORDERS", True):
+            if step:
+                live.steps.finish(step, "ok", "поставщик найден")
+                step = live.steps.add("onec", "Читаю открытые заказы поставщику")
             try:
-                s["orders"] = await asyncio.to_thread(c1.orders_context, ka)
+                s["orders"] = await asyncio.wait_for(asyncio.to_thread(c1.orders_context, ka),
+                                                     timeout=getattr(config, "ORDERS_TIMEOUT", 90))
+            except asyncio.TimeoutError:
+                log.warning("Заказы поставщику: 1С не ответила вовремя")
+                s["orders_note"] = "1С долго отдаёт заказы — продолжаю без них. Нажмите «🔁 Пересчитать заказы» позже."
             except Exception as ex:
                 log.warning("Заказы поставщику не прочитаны: %s", ex)
+                s["orders_note"] = f"Заказы не прочитаны: {ex}"
         if step:
             known = sum(1 for ln in d["lines"] if c1.match_line(inn, ln)["key"])
             oc = s.get("orders")
-            live.steps.finish(step, "ok" if ka else "warn",
-                              (f"поставщик найден, знакомых товаров {known} из {len(d['lines'])}"
-                               + (f", открытых заказов {len(oc['orders'])}" if oc else "") if ka
-                               else "поставщик не найден"))
+            live.steps.finish(step, "ok" if ka and not s.get("orders_note") else "warn",
+                              (f"знакомых товаров {known} из {len(d['lines'])}"
+                               + (f", открытых заказов {len(oc['orders'])}" if oc else
+                                  (", заказы не прочитаны" if s.get("orders_note") else ", открытых заказов нет"))
+                               if ka else "поставщик не найден"))
             await live.close(f"✅ Накладная прочитана за {int(live.steps.elapsed())} с")
     except Exception as ex:
         if step:
@@ -461,6 +475,8 @@ async def summary(uid, chat_id):
             f"Поставщик: {e(ka['Description'])} (ИНН {e(ka.get('ИНН') or s['inn'])})\n"
             f"Склад: {e(getattr(config, 'WAREHOUSE', '') or 'как в прошлом поступлении')}\n"
             f"Распознал: {e(r['model'])}\n")
+    if s.get("orders_note"):
+        head += f"⚠️ {e(s['orders_note'])}\n"
     if oc:
         head += f"Открытых заказов поставщику: {len(oc['orders'])} — строки разложены по ним, от старых к новым\n"
     if over:
@@ -495,11 +511,15 @@ async def cb_reorders(c: CallbackQuery):
         await c.answer("Устарело", show_alert=True)
         return
     await c.answer("Читаю заказы из 1С…")
+    wait = await c.message.answer("⏳ Читаю заказы поставщику из 1С…")
     try:
-        s["orders"] = await asyncio.to_thread(c1.orders_context, s["ka"])
+        s["orders"] = await asyncio.wait_for(asyncio.to_thread(c1.orders_context, s["ka"]),
+                                             timeout=getattr(config, "ORDERS_TIMEOUT", 90) * 2)
+        s.pop("orders_note", None)
     except Exception as ex:
-        await c.message.answer(f"Заказы не прочитаны: {e(ex)}", parse_mode="HTML")
+        await wait.edit_text(f"Заказы не прочитаны: {e(ex) or '1С не ответила вовремя'}", parse_mode="HTML")
         return
+    await wait.delete()
     await summary(c.from_user.id, c.message.chat.id)
 
 
@@ -765,6 +785,28 @@ async def cb_cancel(c: CallbackQuery):
     await c.message.answer("Отменено. Присылайте фото новой накладной.", reply_markup=MENU)
 
 
+WARM = {}   # ИНН -> {"t": время, "ka": контрагент, "orders": заказы} — заготовка для частых поставщиков
+
+
+async def warm_orders_loop():
+    """Раз в N минут заранее читает открытые заказы частых поставщиков (в основном Гаврюшкин)."""
+    inns = [i for i in getattr(config, "FREQUENT_INNS", []) if i]
+    every = getattr(config, "WARM_MINUTES", 10) * 60
+    while inns and getattr(config, "USE_ORDERS", True):
+        for inn in inns:
+            t0 = time.time()
+            try:
+                ka = await asyncio.to_thread(c1.find_supplier, inn, "")
+                if ka:
+                    oc = await asyncio.to_thread(c1.orders_context, ka)
+                    WARM[inn] = {"t": time.time(), "ka": ka, "orders": oc}
+                    log.info("Заготовка заказов %s: %s открытых, %.0f с", ka["Description"],
+                             len(oc["orders"]) if oc else 0, time.time() - t0)
+            except Exception as ex:
+                log.warning("Заготовка заказов %s не удалась: %s", inn, ex)
+        await asyncio.sleep(every)
+
+
 async def load_items_bg():
     """Справочник товаров грузится в фоне — бот отвечает в Telegram сразу."""
     try:
@@ -790,6 +832,7 @@ async def main():
     print(f"  ✔ Telegram: бот @{me.username} на связи.")
     print("  Напишите боту /start в Telegram. Это окно не закрывайте — бот работает, пока оно открыто.\n")
     asyncio.create_task(load_items_bg())
+    asyncio.create_task(warm_orders_loop())
     try:
         await bot.set_my_commands([BotCommand(command="start", description="Начало и кнопки"),
                                    BotCommand(command="sopost", description="Таблица сопоставлений"),
