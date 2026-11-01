@@ -4,3 +4,6 @@ cache_1c.json
 *.log
 __pycache__/
 *.new
+config.ini
+python_path.txt
+Заказы/
