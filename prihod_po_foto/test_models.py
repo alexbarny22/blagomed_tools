@@ -10,6 +10,7 @@
 """
 import os
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -72,6 +73,40 @@ def docs():
     return res
 
 
+class Progress:
+    """Живая строка: общий ползунок, какая модель работает и сколько секунд прошло."""
+    def __init__(self, total):
+        self.total, self.done, self.label, self.t0 = total, 0, "", time.time()
+        self._stop = threading.Event()
+        self._th = None
+
+    def _line(self):
+        w = 20
+        fill = int(w * self.done / self.total) if self.total else w
+        sec = int(time.time() - self.t0)
+        spin = "|/-\\"[sec % 4]
+        return f"\r  [{'#' * fill}{'.' * (w - fill)}] {self.done}/{self.total}  {spin} {self.label}  {sec} с   "
+
+    def _run(self):
+        while not self._stop.wait(0.5):
+            sys.stdout.write(self._line())
+            sys.stdout.flush()
+
+    def start(self, label):
+        self.label, self.t0 = label, time.time()
+        self._stop.clear()
+        self._th = threading.Thread(target=self._run, daemon=True)
+        self._th.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._th:
+            self._th.join()
+        self.done += 1
+        sys.stdout.write("\r" + " " * 100 + "\r")      # стираем живую строку перед результатом
+        sys.stdout.flush()
+
+
 def main():
     if len(sys.argv) == 1:
         print("1 - проверить нейросети на фото из папки test_photos")
@@ -90,18 +125,25 @@ def main():
     if not found:
         return
     stats = {m["name"]: [0, 0, 0.0] for m in models}       # сошлось, всего, секунд
+    total = len(found) * len(models)
+    p(f"Накладных: {len(found)}, нейросетей: {len(models)} — всего проверок: {total}. "
+      f"Каждая занимает 20–90 секунд.")
+    bar = Progress(total)
     for name, files in found:
         p(f"\n================ {name} ({len(files)} фото)")
         raws = [open(f, "rb").read() for f in files]
         images = [R.prepare_image(b) for b in raws]
         for m in models:
             t0 = time.time()
+            bar.start(f"{m['name']} читает «{name[:30]}»…")
             try:
                 d = R.ask_model(m, images, raws)
             except Exception as e:
+                bar.stop()
                 p(f"  {m['name']:<16} ОШИБКА: {str(e)[:200]}")
                 stats[m["name"]][1] += 1
                 continue
+            bar.stop()
             sec = time.time() - t0
             chk = R.check(d)
             ok = chk["total_ok"] and not chk["bad_lines"] and not chk["inn_bad"]
