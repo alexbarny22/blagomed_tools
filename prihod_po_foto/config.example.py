@@ -39,6 +39,10 @@ MODELS = [
      "model": "anthropic/claude-sonnet-5.5"},
     {"name": "Gemini 3.1 Pro", "type": "openai", "base_url": VSELLM_URL, "api_key": VSELLM_KEY,
      "model": "google/gemini-3.1-pro-preview"},
+    # DeepSeek через тот же агрегатор. Имя модели — из списка (test_models.bat → 2, раздел deepseek).
+    # Пока стоит ЗАМЕНИТЬ — строка пропускается. Если модель не принимает фото, тест покажет ошибку.
+    {"name": "DeepSeek", "type": "openai", "base_url": VSELLM_URL, "api_key": VSELLM_KEY,
+     "model": "ЗАМЕНИТЬ (например deepseek/...)"},
     # GigaChat: ключ авторизации (Authorization key) из личного кабинета developers.sber.ru
     # GigaChat 3 Ultra — новая модель, физлицам бесплатно (freemium); своя адресная строка API
     {"name": "GigaChat 3 Ultra", "type": "gigachat", "api_key": "", "model": "GigaChat-3-Ultra",

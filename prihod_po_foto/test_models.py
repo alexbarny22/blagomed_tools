@@ -56,7 +56,7 @@ def list_models():
         print(f"HTTP {r.status_code}: {r.text[:500]}")
         return
     ids = sorted(x.get("id", "") for x in r.json().get("data", []))
-    for word in ("claude", "gemini", "gpt", "qwen"):
+    for word in ("claude", "gemini", "gpt", "deepseek", "qwen"):
         hit = [i for i in ids if word in i.lower()]
         if hit:
             print(f"\n--- {word} ---")

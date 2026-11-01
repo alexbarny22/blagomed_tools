@@ -37,7 +37,8 @@ bot = Bot(token=config.TELEGRAM_TOKEN, session=session) if session else Bot(toke
 dp = Dispatcher()
 c1 = onec.OneC(config, log=log.info)
 rec_mod.OWN_INNS = set(getattr(config, "OWN_INNS", []))
-MODELS = [m for m in config.MODELS if m.get("enabled", True)]
+MODELS = [m for m in config.MODELS if m.get("enabled", True) and m.get("api_key")
+          and "ЗАМЕНИТЬ" not in m.get("base_url", "") + m.get("model", "")]
 HISTORY = os.path.join(HERE, "history")
 
 S = {}   # user_id -> состояние сеанса
