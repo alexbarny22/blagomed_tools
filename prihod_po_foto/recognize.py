@@ -304,10 +304,12 @@ def check(d: dict) -> dict:
         elif x["unclear"]:
             bad.add(x["n"])
             issues.append(f"строка {x['n']}: нейросеть сомневается в цифрах")
+    incomplete = False
     nums = [x["n"] for x in d["lines"]]
     if nums and nums[0] >= 1 and max(nums) - min(nums) + 1 != len(set(nums)):
         missing = sorted(set(range(1, max(nums) + 1)) - set(nums))
         if missing:
+            incomplete = True
             issues.append("пропущены строки № " + ", ".join(map(str, missing[:15])) +
                           " — возможно, не хватает фото")
     total_ok = None
@@ -321,17 +323,25 @@ def check(d: dict) -> dict:
         issues.append("итог документа не прочитан — сверить не с чем")
     rc = d.get("records_count")
     if rc and rc != len(d["lines"]):
+        incomplete = True
         issues.append(f"в документе {rc} строк(и), а прочитано {len(d['lines'])} — проверьте, все ли страницы")
     inn = d["supplier"].get("inn")
     if not inn:
         issues.append("ИНН поставщика не прочитан")
     elif not inn_ok(inn):
         issues.append(f"ИНН поставщика {inn} прочитан с ошибкой (не сходится контрольная сумма)")
-    return {"issues": issues, "bad_lines": bad, "total_ok": total_ok, "inn_bad": not inn_ok(inn or "")}
+    return {"issues": issues, "bad_lines": bad, "total_ok": total_ok, "inn_bad": not inn_ok(inn or ""),
+            "incomplete": incomplete}
+
+
+def is_good(chk: dict) -> bool:
+    """Всё сошлось: строки, итог, ИНН и ни одна строка не потеряна."""
+    return bool(chk["total_ok"]) and not chk["bad_lines"] and not chk["inn_bad"] and not chk.get("incomplete")
 
 
 def score(chk: dict) -> int:
-    return len(chk["issues"]) + (5 if chk["total_ok"] is False else 0) + (3 if chk.get("inn_bad") else 0)
+    return (len(chk["issues"]) + (5 if chk["total_ok"] is False else 0) + (3 if chk.get("inn_bad") else 0)
+            + (5 if chk.get("incomplete") else 0))
 
 
 # ------------------------------------------------------------------ ход работы (для красивого показа)
@@ -398,7 +408,7 @@ def recognize(raw_images: list, models: list, log=print, start_from=0, steps=Non
                 steps.finish(st, "err", "нет ответа")
             return None
         chk = check(data)
-        good = chk["total_ok"] and not chk["bad_lines"] and not chk["inn_bad"]
+        good = is_good(chk)
         log(f"{m['name']}: строк {len(data['lines'])}, замечаний {len(chk['issues'])}, {time.time() - t0:.0f} с")
         state["tried"].append((m["name"], len(chk["issues"])))
         if st["state"] == "run":

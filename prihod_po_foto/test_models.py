@@ -165,7 +165,7 @@ def main():
             bar.stop()
             sec = time.time() - t0
             chk = R.check(d)
-            ok = chk["total_ok"] and not chk["bad_lines"] and not chk["inn_bad"]
+            ok = R.is_good(chk)
             st = stats[m["name"]]
             st[0] += 1 if ok else 0
             st[1] += 1
