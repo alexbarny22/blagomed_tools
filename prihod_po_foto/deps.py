@@ -5,6 +5,18 @@ import subprocess
 import sys
 
 NEED = {"aiogram": "aiogram", "rapidfuzz": "rapidfuzz", "PIL": "pillow", "requests": "requests"}
+if len(sys.argv) > 1 and sys.argv[1] == "config":
+    # первый запуск: создаём config.py из образца и открываем в Блокноте
+    import os
+    import shutil
+    here = os.path.dirname(os.path.abspath(__file__))
+    cfg = os.path.join(here, "config.py")
+    if not os.path.exists(cfg):
+        shutil.copy(os.path.join(here, "config.example.py"), cfg)
+        print("Создан config.py — заполните его в Блокноте, сохраните и запустите start.bat снова.")
+        subprocess.call(["notepad", cfg])
+        sys.exit(2)
+    sys.exit(0)
 if len(sys.argv) > 1 and sys.argv[1] == "test":
     NEED = {"PIL": "pillow", "requests": "requests"}
 

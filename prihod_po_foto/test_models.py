@@ -73,6 +73,11 @@ def docs():
 
 
 def main():
+    if len(sys.argv) == 1:
+        print("1 - проверить нейросети на фото из папки test_photos")
+        print("2 - показать список моделей агрегатора")
+        if input("Введите 1 или 2 и нажмите Enter: ").strip() == "2":
+            sys.argv.append("list")
     if len(sys.argv) > 1 and sys.argv[1] == "list":
         list_models()
         return
