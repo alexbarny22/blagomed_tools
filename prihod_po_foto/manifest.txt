@@ -1,5 +1,8 @@
 # файлы, которые обновляются автоматически
 prihod_bot.py
+flow.py
+max_bot.py
+tg_bot.py
 recognize.py
 onec_odata.py
 mapping.py

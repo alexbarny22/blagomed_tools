@@ -374,7 +374,10 @@ class Steps:
             elif it["state"] == "run" and it["t0"]:
                 # плавно растёт и никогда не упирается в 100%, пока этап не закончен
                 done += w * min(0.95, 1 - math.exp(-(time.time() - it["t0"]) / w))
-        return min(done / tot, 1.0) if tot else 0.0
+        frac = min(done / tot, 1.0) if tot else 0.0
+        if any(it["state"] == "run" for it in self.items):
+            frac = min(frac, 0.9)          # пока что-то идёт — полоска не заполняется до конца
+        return frac
 
     def elapsed(self, it=None):
         if it is None:

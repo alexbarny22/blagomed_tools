@@ -4,8 +4,19 @@ import importlib
 import subprocess
 import sys
 
-NEED = {"aiogram": "aiogram", "rapidfuzz": "rapidfuzz", "PIL": "pillow", "requests": "requests",
-        "openpyxl": "openpyxl"}
+NEED = {"rapidfuzz": "rapidfuzz", "PIL": "pillow", "requests": "requests", "openpyxl": "openpyxl"}
+# библиотека мессенджера — только та, что нужна (MAX или Telegram)
+try:
+    import os as _os
+    sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import config as _cfg
+    _pl = str(getattr(_cfg, "PLATFORM", "") or ("max" if getattr(_cfg, "MAX_TOKEN", "") else "telegram")).lower()
+except Exception:
+    _pl = "max"
+if _pl == "max":
+    NEED["maxapi"] = "maxapi>=1.2.2"
+else:
+    NEED["aiogram"] = "aiogram"
 if len(sys.argv) > 1 and sys.argv[1] == "config":
     # первый запуск: создаём config.py из образца и открываем в Блокноте
     import os
