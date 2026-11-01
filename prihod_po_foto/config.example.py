@@ -34,6 +34,10 @@ CACHE_DAYS = 7        # номенклатура хранится в файле;
 VSELLM_URL = "https://api.vsellm.ru/v1"     # адрес API агрегатора (заканчивается на /v1)
 VSELLM_KEY = ""                        # ключ API агрегатора
 
+# Сколько первых моделей запускать ОДНОВРЕМЕННО. Бот берёт первый ответ, у которого всё сошлось, —
+# ждать приходится столько, сколько отвечает самая быстрая. 1 — строго по очереди (дешевле).
+RACE = 2
+
 MODELS = [
     {"name": "Claude Sonnet 5.5", "type": "openai", "base_url": VSELLM_URL, "api_key": VSELLM_KEY,
      "model": "anthropic/claude-sonnet-5.5"},

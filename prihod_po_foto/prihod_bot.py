@@ -152,7 +152,7 @@ async def on_photo(m: Message):
 
 
 # ------------------------------------------------------------------ живой индикатор хода работы
-ICON = {"run": "⏳", "ok": "✅", "warn": "⚠️", "err": "❌", "wait": "▫️"}
+ICON = {"run": "⏳", "ok": "✅", "warn": "⚠️", "err": "❌", "wait": "▫️", "skip": "➖"}
 
 
 def bar(frac, width=12):
@@ -218,7 +218,8 @@ async def cb_go(c: CallbackQuery):
     msg = await c.message.answer(render(steps, title), parse_mode="HTML")
     live = Live(msg, steps, title)
     try:
-        r = await asyncio.to_thread(rec_mod.recognize, s["photos"], MODELS, log.info, start, steps)
+        r = await asyncio.to_thread(rec_mod.recognize, s["photos"], MODELS, log.info, start, steps,
+                                    getattr(config, "RACE", 2))
     except Exception as ex:
         log.exception("recognize")
         await live.close("❌ Не получилось распознать")

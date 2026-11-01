@@ -67,6 +67,9 @@ PROMPT = """На фотографиях — страницы ОДНОГО бум
 }
 Правила:
 - "n" — номер строки из таблицы документа (графа «№ п/п»), если он виден.
+- "name" — переписывай БУКВА В БУКВУ, как напечатано: не исправляй, не сокращай, не дополняй.
+- "article" — код товара поставщика из графы «код» / «артикул» (например 00-00000030), если есть.
+- Пустые и нулевые поля можно не писать — короче ответ, быстрее работа.
 - "sum" — стоимость строки С налогом (итоговая графа), "sum_without_vat" — без налога; если НДС нет — они равны.
 - "price" — цена за единицу как в документе.
 - "vat_rate": "без НДС", "0%", "5%", "7%", "10%", "20%" или "22%".
@@ -117,7 +120,7 @@ def _ask_openai_compatible(m: dict, images: list) -> str:
     r = _post_retry(m["base_url"].rstrip("/") + "/chat/completions",
                       headers={"Authorization": "Bearer " + m["api_key"]},
                       json={"model": m["model"], "temperature": 0, "max_tokens": 16000,
-                            "messages": [{"role": "user", "content": content}]},
+                            "messages": [{"role": "user", "content": content}], **m.get("extra", {})},
                       timeout=m.get("timeout", 240))
     if r.status_code != 200:
         raise ModelError(f"{m['name']}: HTTP {r.status_code} {r.text[:300]}")
@@ -356,43 +359,70 @@ class Steps:
 
 
 # ------------------------------------------------------------------ главный вход
-def recognize(raw_images: list, models: list, log=print, start_from=0, steps=None) -> dict:
+def recognize(raw_images: list, models: list, log=print, start_from=0, steps=None, race=1) -> dict:
     """
     raw_images — список байтов фото. models — config.MODELS.
-    Пробует модели по очереди, пока результат не сойдётся по суммам. Возвращает
-    {'data', 'check', 'model', 'tried': [(имя, кол-во замечаний или ошибка)]}.
+    race — сколько первых моделей запускать одновременно: берётся первый ответ, у которого всё сошлось
+    (ждём самую быструю, а не всех по очереди). Если ни одна не сошлась — остальные модели по очереди.
+    Возвращает {'data', 'check', 'model', 'tried': [(имя, кол-во замечаний или ошибка)]}.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     steps = steps or Steps()
     st = steps.add("prep", f"Подготовка фото ({len(raw_images)} шт)")
     images = [prepare_image(b) for b in raw_images]
     steps.finish(st)
-    best, tried = None, []
     order = [m for m in models[start_from:] + models[:start_from] if m.get("enabled", True)]
-    for i, m in enumerate(order):
+    state = {"best": None, "tried": []}
+
+    def run(m, st):
         t0 = time.time()
-        st = steps.add("model", f"{m['name']} {'читает' if i == 0 else 'перепроверяет'} накладную")
         try:
             data = ask_model(m, images, raw_images)
         except Exception as e:
             log(f"{m['name']}: ошибка — {e}")
-            tried.append((m["name"], f"ошибка: {str(e)[:120]}"))
-            steps.finish(st, "err", "нет ответа" + (" → пробую другую" if i < len(order) - 1 else ""))
-            continue
+            state["tried"].append((m["name"], f"ошибка: {str(e)[:120]}"))
+            if st["state"] == "run":
+                steps.finish(st, "err", "нет ответа")
+            return None
         chk = check(data)
         good = chk["total_ok"] and not chk["bad_lines"] and not chk["inn_bad"]
-        if good:
-            steps.finish(st, "ok", f"строк {len(data['lines'])}, суммы сошлись")
-        else:
-            steps.finish(st, "warn", f"замечаний {len(chk['issues'])}" +
-                         (" → перепроверяю другой" if i < len(order) - 1 else ""))
         log(f"{m['name']}: строк {len(data['lines'])}, замечаний {len(chk['issues'])}, {time.time() - t0:.0f} с")
-        tried.append((m["name"], len(chk["issues"])))
+        state["tried"].append((m["name"], len(chk["issues"])))
+        if st["state"] == "run":
+            steps.finish(st, "ok" if good else "warn",
+                         f"строк {len(data['lines'])}, суммы сошлись" if good else f"замечаний {len(chk['issues'])}")
         cand = {"data": data, "check": chk, "model": m["name"]}
-        if best is None or score(chk) < score(best["check"]):
-            best = cand
-        if good:
-            break      # всё сошлось — дальше не тратим деньги
-    if best is None:
-        raise ModelError("Ни одна нейросеть не ответила:\n" + "\n".join(f"• {n}: {r}" for n, r in tried))
-    best["tried"] = tried
-    return best
+        if state["best"] is None or score(chk) < score(state["best"]["check"]):
+            state["best"] = cand
+        return good
+
+    def done():
+        best = state["best"]
+        if best is None:
+            raise ModelError("Ни одна нейросеть не ответила:\n" +
+                             "\n".join(f"• {n}: {r}" for n, r in state["tried"]))
+        for it in steps.items:          # кого не дождались — уже не нужны
+            if it["state"] == "run":
+                steps.finish(it, "skip", "не понадобилась")
+        best["tried"] = list(state["tried"])
+        return best
+
+    first, rest = order[:max(1, race)], order[max(1, race):]
+    if len(first) > 1:
+        pool = ThreadPoolExecutor(max_workers=len(first))
+        futs = {pool.submit(run, m, steps.add("model", f"{m['name']} читает накладную")): m for m in first}
+        try:
+            for f in as_completed(futs):
+                if f.result():
+                    return done()       # первый правильный ответ — дальше не ждём
+        finally:
+            pool.shutdown(wait=False)
+    else:
+        for m in first:
+            if run(m, steps.add("model", f"{m['name']} читает накладную")):
+                return done()
+    for m in rest:                      # никто не сошёлся — перепроверяем остальными по очереди
+        if run(m, steps.add("model", f"{m['name']} перепроверяет накладную")):
+            break
+    return done()
