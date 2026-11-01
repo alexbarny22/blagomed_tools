@@ -143,7 +143,8 @@ def _giga_auth(m: dict) -> str:
 
 
 def _ask_gigachat(m: dict, images: list) -> str:
-    base = "https://gigachat.devices.sberbank.ru/api/v1"
+    # у новых моделей (GigaChat 3 Ultra) свой адрес — задаётся в config.py полем base_url
+    base = m.get("base_url", "https://gigachat.devices.sberbank.ru/api/v1").rstrip("/")
     hdr = {"Authorization": "Bearer " + _giga_auth(m)}
     ver = m.get("verify_ssl", False)
     msgs = []

@@ -40,6 +40,10 @@ MODELS = [
     {"name": "Gemini 3.1 Pro", "type": "openai", "base_url": VSELLM_URL, "api_key": VSELLM_KEY,
      "model": "google/gemini-3.1-pro-preview"},
     # GigaChat: ключ авторизации (Authorization key) из личного кабинета developers.sber.ru
+    # GigaChat 3 Ultra — новая модель, физлицам бесплатно (freemium); своя адресная строка API
+    {"name": "GigaChat 3 Ultra", "type": "gigachat", "api_key": "", "model": "GigaChat-3-Ultra",
+     "base_url": "https://api.giga.chat/v1", "scope": "GIGACHAT_API_PERS", "verify_ssl": False,
+     "enabled": True},
     {"name": "GigaChat Max", "type": "gigachat", "api_key": "", "model": "GigaChat-2-Max",
      "scope": "GIGACHAT_API_PERS", "verify_ssl": False, "enabled": False},
 ]
