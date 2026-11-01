@@ -702,12 +702,31 @@ async def cb_cancel(c: CallbackQuery):
     await c.message.answer("Отменено. Присылайте фото новой накладной.", reply_markup=MENU)
 
 
-async def main():
-    log.info("Запуск. Модели: %s", ", ".join(m["name"] for m in MODELS) or "НЕТ — заполните MODELS в config.py")
+async def load_items_bg():
+    """Справочник товаров грузится в фоне — бот отвечает в Telegram сразу."""
     try:
-        await asyncio.to_thread(c1.load_items)
+        n = await asyncio.to_thread(c1.load_items)
+        print(f"  Товары из 1С загружены: {n}")
     except Exception as ex:
-        log.error("Номенклатура не загрузилась (проверьте 1С): %s", ex)
+        print(f"  ⚠ Товары из 1С не загрузились: {ex}\n    Проверьте 1С (логин/пароль, адрес ODATA_URL).")
+        log.error("Номенклатура не загрузилась: %s", ex)
+
+
+async def main():
+    print("\n=== Бот «Приход по фото» ===")
+    print("  Нейросети:", ", ".join(m["name"] for m in MODELS) or "НЕТ — заполните MODELS в config.py")
+    print("  Проверяю связь с Telegram…")
+    try:
+        me = await asyncio.wait_for(bot.get_me(), timeout=30)
+    except Exception as ex:
+        print(f"\n  ✖ Telegram не отвечает: {ex}\n"
+              "    Скорее всего, Telegram недоступен без VPN. Варианты:\n"
+              "    • включить VPN так, чтобы vsellm.ru и sberbank.ru шли мимо него (исключения / split tunneling);\n"
+              "    • или вписать прокси в TELEGRAM_PROXY в config.py.\n")
+        raise SystemExit(1)
+    print(f"  ✔ Telegram: бот @{me.username} на связи.")
+    print("  Напишите боту /start в Telegram. Это окно не закрывайте — бот работает, пока оно открыто.\n")
+    asyncio.create_task(load_items_bg())
     try:
         await bot.set_my_commands([BotCommand(command="start", description="Начало и кнопки"),
                                    BotCommand(command="sopost", description="Таблица сопоставлений"),
@@ -715,7 +734,7 @@ async def main():
                                    BotCommand(command="cancel", description="Начать заново")])
     except Exception as ex:
         log.warning("Меню команд не установлено: %s", ex)
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, handle_signals=False)
 
 
 if __name__ == "__main__":
