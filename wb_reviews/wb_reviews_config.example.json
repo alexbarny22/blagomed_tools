@@ -1,0 +1,8 @@
+{
+  "token": "ВСТАВЬТЕ_СЮДА_ТОКЕН_WB",
+  "dry_run": true,
+  "interval_min": 30,
+  "max_per_run": 100,
+  "pause_sec": 1.5,
+  "skip_nm_ids": []
+}

@@ -7,3 +7,6 @@ __pycache__/
 config.ini
 python_path.txt
 Заказы/
+wb_reviews_config.json
+*_state.json
+heartbeat_*.txt
