@@ -24,10 +24,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ------------------------------------------------------------------ подготовка фото
 OWN_INNS = set()      # заполняется из config.OWN_INNS ботом
-MAX_SIDE = 2400        # длинная сторона после уменьшения — хватает для мелкого шрифта
+MAX_SIDE = 1600        # длинная сторона: Claude всё равно уменьшает до ~1600, больше — только дольше грузится
+QUALITY = 80
 
 
-def prepare_image(raw: bytes, max_side: int = 0, quality: int = 88) -> bytes:
+def prepare_image(raw: bytes, max_side: int = 0, quality: int = 0) -> bytes:
     """Поворот по EXIF, RGB, уменьшение, лёгкое повышение контраста. Возвращает JPEG."""
     img = Image.open(io.BytesIO(raw))
     img = ImageOps.exif_transpose(img)
@@ -39,7 +40,7 @@ def prepare_image(raw: bytes, max_side: int = 0, quality: int = 88) -> bytes:
         img = img.resize((int(w * k), int(h * k)), Image.LANCZOS)
     img = ImageOps.autocontrast(img, cutoff=1)
     out = io.BytesIO()
-    img.save(out, "JPEG", quality=quality)
+    img.save(out, "JPEG", quality=quality or QUALITY, optimize=True)
     return out.getvalue()
 
 
@@ -171,7 +172,7 @@ def ask_model(m: dict, images: list, raw_images: list = None) -> dict:
     except ModelError as e:
         if "обрыв связи" not in str(e) or not raw_images:
             raise
-        small = [prepare_image(b, 1600, 80) for b in raw_images]
+        small = [prepare_image(b, 1200, 75) for b in raw_images]
         text = ask(m, small)
     return normalize(_parse_json(text))
 
