@@ -330,8 +330,26 @@ class OneC:
         since = min(o["Date"] for o in orders)[:19]
         t1 = time.time()
         recs = None
-        # 1) только поступления, где в строках есть ссылка на эти заказы (1С отбирает сама — быстро)
-        if len(okeys) <= 40:
+        # 0) самый быстрый путь: строки поступлений (табличная часть «Товары») с отбором по заказу,
+        #    по короткому запросу на каждый открытый заказ; потом — какие из этих поступлений проведены
+        try:
+            lines_by_doc = {}
+            for k in okeys:
+                for ln in od.get(DOC + "_Товары", **{"$filter": f"ЗаказПоставщику_Key eq guid'{k}'"}):
+                    lines_by_doc.setdefault(ln["Ref_Key"], []).append(ln)
+            alive = set()
+            ids = list(lines_by_doc)
+            for i in range(0, len(ids), 20):
+                cond = " or ".join(f"Ref_Key eq guid'{x}'" for x in ids[i:i + 20])
+                for r in od.get(DOC, **{"$filter": f"({cond}) and Posted eq true and DeletionMark eq false",
+                                        "$select": "Ref_Key"}):
+                    alive.add(r["Ref_Key"])
+            recs = [{"Ref_Key": k, "Товары": v} for k, v in lines_by_doc.items() if k in alive]
+        except ODataError as e:
+            self.log(f"  строки поступлений по заказам: не вышло ({str(e)[:80]})")
+            recs = None
+        # 1) поступления, где в строках есть ссылка на эти заказы (1С отбирает сама)
+        if recs is None and len(okeys) <= 40:
             cond = " or ".join(f"t/ЗаказПоставщику_Key eq guid'{k}'" for k in okeys)
             try:
                 recs = od.get(DOC, **{"$filter": f"{flt} and Товары/any(t: {cond})", "$select": "Ref_Key,Date,Товары"})
