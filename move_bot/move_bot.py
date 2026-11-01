@@ -61,6 +61,29 @@ _suffix_core = re.escape(norm(config.SUFFIX).strip("() "))
 SUFFIX_RE = re.compile(r"\s*\(\s*" + _suffix_core + r"\s*\)\s*", re.IGNORECASE)
 
 
+MAPPING_FILE = os.path.join(HERE, "mapping.csv")
+
+
+def load_mapping():
+    """Ручное сопоставление: {норм. имя на общем складе: норм. имя карточки (МГ)}.
+    Файл mapping.csv: «Общий склад;Магазин (МГ)», по строке на пару."""
+    res = {}
+    try:
+        with open(MAPPING_FILE, encoding="utf-8-sig") as f:
+            for i, line in enumerate(f):
+                parts = line.rstrip("\r\n").split(";")
+                if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
+                    continue
+                if i == 0 and norm(parts[0]).startswith("общий"):
+                    continue          # заголовок
+                res[norm(parts[0].strip('"'))] = norm(parts[1].strip('"'))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log("mapping.csv не прочитан: " + str(e))
+    return res
+
+
 def mg_base(nn):
     """Нормализованное имя без «(МГ)» (где бы суффикс ни стоял) — для поиска пары."""
     return norm(SUFFIX_RE.sub(" ", nn))
@@ -358,6 +381,7 @@ class App(tk.Tk):
         self.org_from = self.org_to = None      # (ключ, название)
         self.price_type = None                  # ключ вида цены
         self.noms, self.pairs, self.items, self.mg_keys = {}, {}, {}, set()
+        self.mg_by_name, self.mapping = {}, {}
         self.busy = False
         self._last_progress = 0.0
         self.od.progress = self.progress_from_thread
@@ -574,7 +598,8 @@ class App(tk.Tk):
         self.lbl_org.configure(text=f"Передача: {self.org_from[1]}  →  {self.org_to[1]}, "
                                     f"по цене «{config.PRICE_TYPE}»")
 
-        self.noms, self.pairs, self.mg_keys = {}, {}, set()
+        self.noms, self.pairs, self.mg_keys, self.mg_by_name = {}, {}, set(), {}
+        self.mapping = load_mapping()
         n_mg = 0
         for n in res["noms"]:
             if n.get("IsFolder") or n.get("DeletionMark"):
@@ -584,6 +609,7 @@ class App(tk.Tk):
             if SUFFIX_RE.search(nn):
                 self.pairs[mg_base(nn)] = n["Ref_Key"]
                 self.mg_keys.add(n["Ref_Key"])
+                self.mg_by_name[nn] = n["Ref_Key"]
                 n_mg += 1
             else:
                 self.noms[n["Ref_Key"]] = name
@@ -676,6 +702,7 @@ class App(tk.Tk):
                 if SUFFIX_RE.search(nn):
                     self.pairs[mg_base(nn)] = n["Ref_Key"]
                     self.mg_keys.add(n["Ref_Key"])
+                    self.mg_by_name[nn] = n["Ref_Key"]
                 else:
                     self.noms[n["Ref_Key"]] = n.get("Description") or ""
             self.say(f"Догружено карточек, которых не было в сохранённом списке: {len(extra)}.")
@@ -686,7 +713,9 @@ class App(tk.Tk):
             st = stock.get((key, src))
             if not st or st[0] <= 0:
                 continue
-            pair = self.pairs.get(mg_base(norm(name)))
+            mapped = self.mapping.get(norm(name))
+            pair = (self.mg_by_name.get(mapped) if mapped
+                    else self.pairs.get(mg_base(norm(name))))
             if not pair:            # нет карточки (МГ) — в списке не показываем
                 no_pair += 1
                 continue

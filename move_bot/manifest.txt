@@ -4,3 +4,4 @@ update.py
 setup_odata_move.py
 setup_odata_move.bat
 config.example.py
+mapping.csv
