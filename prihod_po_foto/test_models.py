@@ -19,6 +19,8 @@ import requests  # noqa: E402
 import config  # noqa: E402
 import recognize as R  # noqa: E402
 
+R.OWN_INNS = set(getattr(config, "OWN_INNS", []))
+
 IMG = (".jpg", ".jpeg", ".png", ".webp", ".heic")
 out_lines = []
 
@@ -96,13 +98,16 @@ def main():
                 continue
             sec = time.time() - t0
             chk = R.check(d)
-            ok = chk["total_ok"] and not chk["bad_lines"]
+            ok = chk["total_ok"] and not chk["bad_lines"] and not chk["inn_bad"]
             st = stats[m["name"]]
             st[0] += 1 if ok else 0
             st[1] += 1
             st[2] += sec
             p(f"  {m['name']:<16} {'✔ СОШЛОСЬ' if ok else '✖ есть ошибки'}  строк {len(d['lines'])}, "
-              f"итог {d['total'].get('sum')}, ИНН {d['supplier'].get('inn') or '-'}, {sec:.0f} с")
+              f"итог {d['total'].get('sum')}, ИНН {d['supplier'].get('inn') or '-'}"
+              f"{'' if not chk['inn_bad'] else ' (ОШИБКА В ИНН)'}, №{d.get('number')} от {d.get('date')}, {sec:.0f} с")
+            for x in d["lines"]:
+                p(f"       {x['n']}. {x['name'][:45]:<45} {x['qty']:g} × {x['price']:.2f} = {x['sum']:.2f}")
             for x in chk["issues"][:6]:
                 p(f"       - {x}")
     p("\n================ ИТОГ")

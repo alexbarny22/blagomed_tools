@@ -22,6 +22,7 @@ from PIL import Image, ImageOps
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ------------------------------------------------------------------ подготовка фото
+OWN_INNS = set()      # заполняется из config.OWN_INNS ботом
 MAX_SIDE = 2400        # длинная сторона после уменьшения — хватает для мелкого шрифта
 
 
@@ -59,6 +60,7 @@ PROMPT = """На фотографиях — страницы ОДНОГО бум
     "vat_sum": 0.0, "sum": 0.0, "unclear": false}
  ],
  "total": {"sum_without_vat": 0.0, "vat": 0.0, "sum": 0.0},
+ "records_count": "сколько порядковых номеров записей указано в документе («содержит … порядковых номеров записей»), числом",
  "notes": "что не удалось прочитать или в чём сомневаешься"
 }
 Правила:
@@ -68,7 +70,12 @@ PROMPT = """На фотографиях — страницы ОДНОГО бум
 - "vat_rate": "без НДС", "0%", "5%", "7%", "10%", "20%" или "22%".
 - Числа — числами, с точкой: 1234.50. Пробелы между разрядами убирай.
 - Если цифру не разобрать — поставь наиболее вероятное значение и "unclear": true.
-- Не выдумывай строки, которых нет на фото. ИНН поставщика ищи в шапке (продавец / грузоотправитель).
+- "total" — итог по ВСЕМУ документу: строка «Всего по накладной» / «Всего к оплате». Если документ на
+  нескольких страницах, у каждой страницы своё «Итого» — это НЕ итог документа, его не бери.
+- Не выдумывай строки, которых нет на фото. Номер строки бывает обрезан краем фото — тогда нумеруй по порядку.
+- ИНН поставщика бери из строки «Поставщик» (или «Продавец»), а не из «Грузополучатель», «Плательщик»,
+  «Покупатель» и не из печати. ИНН — ровно 10 цифр (организация) или 12 цифр (ИП). ОГРН/ОГРНИП, ОКПО,
+  расчётный счёт, БИК — это НЕ ИНН. Перепроверь каждую цифру ИНН.
 """
 
 
@@ -212,7 +219,25 @@ def normalize(d: dict) -> dict:
     t = d.get("total") or {}
     d["total"] = {"sum_without_vat": num(t.get("sum_without_vat")), "vat": num(t.get("vat")),
                   "sum": num(t.get("sum"))}
+    rc = num(d.get("records_count"))
+    d["records_count"] = int(rc) if rc and rc == int(rc) and 0 < rc < 1000 else None
+    # покупатель и поставщик перепутаны? (ИНН своих организаций — в config.OWN_INNS)
+    if d["supplier"]["inn"] in OWN_INNS and d["buyer"].get("inn"):
+        d["supplier"], d["buyer"] = d["buyer"], d["supplier"]
+        d["supplier"]["inn"] = re.sub(r"\D", "", str(d["supplier"].get("inn") or ""))
     return d
+
+
+def inn_ok(inn: str) -> bool:
+    """Контрольная сумма ИНН: ловит перепутанную или пропущенную цифру."""
+    if not re.fullmatch(r"\d{10}|\d{12}", inn or ""):
+        return False
+    d = [int(c) for c in inn]
+    if len(d) == 10:
+        return sum(a * b for a, b in zip([2, 4, 10, 3, 5, 9, 4, 6, 8], d)) % 11 % 10 == d[9]
+    n11 = sum(a * b for a, b in zip([7, 2, 4, 10, 3, 5, 9, 4, 6, 8], d)) % 11 % 10
+    n12 = sum(a * b for a, b in zip([3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8], d)) % 11 % 10
+    return n11 == d[10] and n12 == d[11]
 
 
 def _close(a, b, rel=0.005, abs_=1.0):
@@ -256,13 +281,19 @@ def check(d: dict) -> dict:
             issues.append(f"сумма строк {s:,.2f} ≠ итогу документа {tot:,.2f}".replace(",", " "))
     else:
         issues.append("итог документа не прочитан — сверить не с чем")
-    if not d["supplier"].get("inn"):
+    rc = d.get("records_count")
+    if rc and rc != len(d["lines"]):
+        issues.append(f"в документе {rc} строк(и), а прочитано {len(d['lines'])} — проверьте, все ли страницы")
+    inn = d["supplier"].get("inn")
+    if not inn:
         issues.append("ИНН поставщика не прочитан")
-    return {"issues": issues, "bad_lines": bad, "total_ok": total_ok}
+    elif not inn_ok(inn):
+        issues.append(f"ИНН поставщика {inn} прочитан с ошибкой (не сходится контрольная сумма)")
+    return {"issues": issues, "bad_lines": bad, "total_ok": total_ok, "inn_bad": not inn_ok(inn or "")}
 
 
 def score(chk: dict) -> int:
-    return len(chk["issues"]) + (5 if chk["total_ok"] is False else 0)
+    return len(chk["issues"]) + (5 if chk["total_ok"] is False else 0) + (3 if chk.get("inn_bad") else 0)
 
 
 # ------------------------------------------------------------------ главный вход
@@ -291,7 +322,7 @@ def recognize(raw_images: list, models: list, log=print, start_from=0) -> dict:
         cand = {"data": data, "check": chk, "model": m["name"]}
         if best is None or score(chk) < score(best["check"]):
             best = cand
-        if chk["total_ok"] and not chk["bad_lines"]:
+        if chk["total_ok"] and not chk["bad_lines"] and not chk["inn_bad"]:
             break      # всё сошлось — дальше не тратим деньги
     if best is None:
         raise ModelError("Ни одна нейросеть не ответила:\n" + "\n".join(f"• {n}: {r}" for n, r in tried))
