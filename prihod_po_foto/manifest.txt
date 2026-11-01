@@ -7,6 +7,8 @@ test_models.py
 deps.py
 test_models.bat
 setup_odata_prihod.py
+check_odata.py
+check_odata.bat
 setup_odata_prihod.bat
 update.py
 config.example.py
