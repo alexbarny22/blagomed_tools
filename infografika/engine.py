@@ -356,6 +356,10 @@ PLAN_TASK = """Ты — арт-директор и маркетолог карт
   Деликатно: интимные зоны и медицинские изделия на теле — аккуратно, через одежду, без натурализма.
 • Ключевые запросы — как реально ищут на WB/Ozon: main — 3–5 главных высокочастотных по смыслу,
   extra — 5–10 уточняющих, synonyms — 3–8 синонимов и разговорных вариантов.
+• ЕДИНЫЙ СТИЛЬ СЕРИИ (обязательно!): все 5 слайдов — ОДНА среда/фон, палитра и свет (style.scene_base_en);
+  scene_en каждого слайда — только вариация внутри этой среды (другой ракурс, человек, деталь), без смены места
+  (нельзя: обложка у воды, второй в интерьере, четвёртый в парке). Одна вёрстка заголовков на всех слайдах
+  (общий style.look), фото у всех во весь слайд, заголовок сверху. footer — либо у всех 5 слайдов, либо ни у одного.
 • ВЁРСТКА. Каждый слайд собирается конструктором; выбери вид элементов (style.look — для всей серии,
   slide.look — особенности слайда). Варианты:
   head (вид заголовка): classic (заголовок + подзаголовок) | hero (одно главное слово огромно + уточнение) |
@@ -368,7 +372,7 @@ PLAN_TASK = """Ты — арт-директор и маркетолог карт
   feats (преимущества/пункты): column (колонкой с иконками) | cards (список) | grid (2×2) | scatter (вразброс)
   feat_style: filled | outline (контурные иконки в рамках);  badge: circle | star | arc (текст по дуге) | corner
   dims (размеры): pill | arrows (простые стрелки с подписью)
-  По умолчанию: обложка — hero, photo full; слайды 2,3,5 — classic, photo bands; слайд 4 — bottom.
+  По умолчанию: обложка — hero, остальные — classic; photo full у всех.
   {typo_hint}
 • ОБЛОЖКА: hero_word — 1 слово крупно (тип товара), hero_rest — уточнение 2–5 слов (вместе = поисковый запрос).
   features — 2–4 преимущества: icon, title (1–2 слова), text (2–4 слова, можно пусто).
@@ -400,12 +404,12 @@ PLAN_TASK = """Ты — арт-директор и маркетолог карт
   {{"kind": "cover", "look": {{"head": "hero", "photo": "full", "feats": "column"}}, "headline": "", "subtitle": "",
     "hero_word": "", "hero_rest": "", "accent_word": "", "features": [{{"icon": "", "title": "", "text": ""}}],
     "badge": null, "footer": "", "scene_en": ""}},
-  {{"kind": "problem", "look": {{"head": "classic", "photo": "bands", "feats": "cards"}}, "headline": "", "subtitle": "",
+  {{"kind": "problem", "look": {{"head": "classic", "feats": "grid"}}, "headline": "", "subtitle": "",
     "bullets": ["", "", ""], "icons": ["", "", ""], "scene_en": ""}},
-  {{"kind": "specs", "look": {{"head": "classic", "photo": "bands"}}, "headline": "", "subtitle": "", "bullets": ["", ""],
+  {{"kind": "specs", "look": {{"head": "classic"}}, "headline": "", "subtitle": "", "bullets": ["", ""],
     "dims": [{{"value": "18 см", "axis": "x"}}], "badge": null, "tag": "", "scene_en": ""}},
-  {{"kind": "usage", "look": {{"head": "bottom", "photo": "full"}}, "headline": "", "subtitle": "", "scene_en": ""}},
-  {{"kind": "trust", "look": {{"head": "classic", "photo": "bands", "feats": "cards"}}, "headline": "",
+  {{"kind": "usage", "look": {{"head": "classic"}}, "headline": "", "subtitle": "", "footer": "", "scene_en": ""}},
+  {{"kind": "trust", "look": {{"head": "classic", "feats": "grid"}}, "headline": "",
     "bullets": ["", "", ""], "icons": ["", "", ""], "footer": "", "scene_en": ""}}
  ],
  "cover_variants": [{{"subtitle": "", "scene_en": ""}}]
@@ -502,6 +506,17 @@ def normalize_plan(plan, covers, fixed=None):
                        "bullets": [str(b).strip() for b in (s.get("bullets") or []) if str(b).strip()],
                        "dims": [d for d in (s.get("dims") or []) if isinstance(d, dict) and str(d.get("value", "")).strip()],
                        "scene_en": str(s.get("scene_en", "")).strip()})
+    # единый слоган: если он есть у большинства слайдов — у всех (недостающим — слоган обложки), иначе ни у кого
+    feet = [x["footer"] for x in slides if x.get("footer")]
+    if len(feet) >= 3:
+        for x in slides:
+            x["footer"] = x.get("footer") or feet[0]
+    else:
+        for x in slides:
+            x["footer"] = ""
+    # единая раскладка: фото во весь слайд у всех, если сценарий не задал общую иначе
+    for x in slides:
+        (x.get("look") or {}).pop("photo", None)
     plan["slides"] = slides
     cv = [v for v in (plan.get("cover_variants") or []) if isinstance(v, dict)][:covers - 1]
     while len(cv) < covers - 1:
@@ -613,20 +628,37 @@ PRODUCT_REF = ("PRODUCT: use the attached photos as the exact reference of the p
                "Do not add or remove parts, do not change the color.")
 
 
-def build_prompt(plan, slide, wish=""):
+SERIES_REF = ("SERIES STYLE REFERENCE: the LAST attached image is the cover of the same product card series. Match its "
+              "colour palette, lighting, colour grading and background environment closely (same place and backdrop "
+              "family, same mood) so all slides look like one series. Do NOT copy its composition, people or any text. "
+              "The product must stay identical to the product photos.")
+
+
+def build_prompt(plan, slide, wish="", style_ref=False):
     style = plan["style"]
     kind = slide["kind"]
+    base = style.get("scene_base_en", "")
+    scene = f"{base}. {slide.get('scene_en', '')}"
     if kind == "specs":
-        scene = ("Clean e-commerce studio shot of the product alone, front view, " + (slide.get("scene_en") or "")
-                 + ". Very light plain seamless background.")
-    else:
-        scene = f"{style.get('scene_base_en', '')}. {slide.get('scene_en', '')}"
+        scene = (f"Product-only shot, front view, on a simple seamless backdrop in the series palette ({base}). "
+                 + (slide.get("scene_en") or ""))
     zone = render.composition_en(kind, slide, style)
-    parts = [PRODUCT_REF.format(desc=plan.get("product_en", "the product")), "SCENE: " + scene,
-             "COMPOSITION: " + zone, STRICT]
+    parts = [PRODUCT_REF.format(desc=plan.get("product_en", "the product")),
+             "SERIES LOOK (identical for every slide of the series): " + base,
+             "SCENE OF THIS SLIDE: " + scene, "COMPOSITION: " + zone, STRICT]
+    if style_ref:
+        parts.insert(1, SERIES_REF)
     if wish:
         parts.append("CHANGES REQUESTED BY THE SELLER (most important): " + wish)
     return "\n".join(parts)
+
+
+def cover_ref(p):
+    """Картинка обложки этой серии — образец стиля для остальных слайдов."""
+    for sl in p.st.get("slides", []):
+        if sl.get("kind") == "cover" and sl.get("bg") and os.path.exists(p.path(sl["bg"])):
+            return png_bytes(p.path(sl["bg"]), 1024)
+    return None
 
 
 def call_image(model, prompt, refs, size, quality=""):
@@ -722,10 +754,7 @@ def generate_job(p, only_key=None, wish=""):
         keys = [only_key]
     refs = [png_bytes(p.path("photos", fn)) for fn in st["photos"][:4]]
     ref_paths = [p.path("photos", fn) for fn in st["photos"]]
-    with cf.ThreadPoolExecutor(max_workers=max(1, int(s["parallel"]))) as ex:
-        futs = [ex.submit(make_slide, p, k, refs, ref_paths, wish if only_key else "") for k in keys]
-        for fu in futs:
-            fu.result()
+    run_series(p, keys, refs, ref_paths, wish if only_key else "")
     if only_key is None:
         p.feed(f"Нарисовано слайдов: {len(keys)}", "done", fid=fstart)
     p.finish()
@@ -741,11 +770,23 @@ def generate_missing_job(p):
     fstart = p.feed(f"Дорисовываю недостающие слайды: {len(missing)}")
     refs = [png_bytes(p.path("photos", fn)) for fn in st["photos"][:4]]
     ref_paths = [p.path("photos", fn) for fn in st["photos"]]
-    with cf.ThreadPoolExecutor(max_workers=max(1, int(S.load()["parallel"]))) as ex:
-        for fu in [ex.submit(make_slide, p, k, refs, ref_paths) for k in missing]:
-            fu.result()
+    run_series(p, missing, refs, ref_paths)
     p.feed(f"Дорисовано: {len(missing)}", "done", fid=fstart)
     p.finish()
+
+
+def run_series(p, keys, refs, ref_paths, wish=""):
+    """Сначала обложка (она задаёт стиль серии), затем остальные слайды — с обложкой как образцом стиля."""
+    par = max(1, int(S.load()["parallel"]))
+    covers = [k for k in keys if k.startswith("1")]
+    rest = [k for k in keys if not k.startswith("1")]
+    for group in (covers, rest):
+        if not group:
+            continue
+        ref = cover_ref(p) if group is rest else None
+        with cf.ThreadPoolExecutor(max_workers=par) as ex:
+            for fu in [ex.submit(make_slide, p, k, refs, ref_paths, wish, ref) for k in group]:
+                fu.result()
 
 
 def slide_by_key(p, key):
@@ -755,11 +796,15 @@ def slide_by_key(p, key):
     raise KeyError(key)
 
 
-def make_slide(p, key, refs, ref_paths, wish=""):
+def make_slide(p, key, refs, ref_paths, wish="", style_ref=None):
     s = S.load()
     sl = slide_by_key(p, key)
+    if style_ref and sl.get("kind") != "cover":
+        refs = list(refs) + [style_ref]
+    else:
+        style_ref = None
     plan = p.st["plan"]
-    prompt = build_prompt(plan, sl, wish)
+    prompt = build_prompt(plan, sl, wish, bool(style_ref))
     models = [sl["model"]] + [resolve(m) for m in s["profiles"].get(p.st["inputs"]["profile"], [])
                               if resolve(m) != sl["model"]]
     max_att = max(1, int(s["max_attempts"]))
@@ -900,7 +945,7 @@ def regen_slide_job(p, key, wish):
     refs = [png_bytes(p.path("photos", fn)) for fn in p.st["photos"][:4]]
     ref_paths = [p.path("photos", fn) for fn in p.st["photos"]]
     p.set(status="generating")
-    make_slide(p, key, refs, ref_paths, wish)
+    make_slide(p, key, refs, ref_paths, wish, cover_ref(p))
     export(p)
     p.set(status="done")
 
@@ -912,6 +957,9 @@ def update_style(p, style):
                                                             "badge_color")})
         if "look" in style:
             st_["look"] = {k: v for k, v in render.clean_look(style["look"]).items() if k in render.SERIES_KEYS}
+            if "photo" in st_["look"]:      # единая раскладка для всей серии — снимаем отличия отдельных слайдов
+                for x in list(p.st["plan"].get("slides", [])) + list(p.st.get("slides", [])):
+                    (x.get("look") or {}).pop("photo", None)
         p.save()
     for sl in p.st.get("slides", []):
         if sl.get("bg"):

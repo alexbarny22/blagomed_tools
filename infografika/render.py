@@ -43,8 +43,8 @@ HEADS = ["classic", "hero", "duo", "weight", "ribbon", "number", "bottom"]
 LOOK_DEFAULTS = {
     "cover": {"head": "hero", "photo": "full", "feats": "column"},
     "problem": {"head": "classic", "photo": "full", "feats": "grid"},
-    "specs": {"head": "classic", "photo": "bands", "feats": "cards"},
-    "usage": {"head": "bottom", "photo": "full", "feats": "cards"},
+    "specs": {"head": "classic", "photo": "full", "feats": "grid"},
+    "usage": {"head": "classic", "photo": "full", "feats": "grid"},
     "trust": {"head": "classic", "photo": "full", "feats": "grid"},
 }
 LOOK_COMMON = {"align": "left", "case": "sentence", "tracking": 0, "italic": False, "stroke": False,
@@ -85,7 +85,7 @@ def clean_look(look):
 
 
 SERIES_KEYS = ("align", "case", "tracking", "italic", "stroke", "shadow", "fill", "sub", "feat_style", "badge",
-               "dims")
+               "dims", "photo")
 
 
 # =================================================================== шрифты и цвета
@@ -380,6 +380,66 @@ def place_photo(src, w, h, box, bgc):
         s = w / rw
         pbox = ((bpx[0] - x0) * s, (bpx[1] - y0) * s, (bpx[2] - x0) * s, (bpx[3] - y0) * s)
     return img, pbox
+
+
+def place_full(src, box, target, fill=None):
+    """Фото на весь слайд W×H так, чтобы товар целиком встал в область target (x0,y0,x1,y1).
+    Сначала пробует сдвиг с небольшим увеличением (фото по-прежнему на весь слайд), если не выходит —
+    уменьшает фото и заполняет края ровным цветом фона. Возвращает (картинка, рамка товара на слайде)."""
+    src = src.convert("RGB")
+    iw, ih = src.size
+    if box:
+        b = [max(0.0, min(1.0, float(v))) for v in box]
+        bx0, by0, bx1, by1 = b[0] * iw, b[1] * ih, b[2] * iw, b[3] * ih
+    else:
+        bx0, by0, bx1, by1 = iw * 0.2, ih * 0.2, iw * 0.8, ih * 0.8
+    m = 0.03
+    bx0, bx1 = bx0 - (bx1 - bx0) * m, bx1 + (bx1 - bx0) * m
+    by0, by1 = by0 - (by1 - by0) * m, by1 + (by1 - by0) * m
+    tx0, ty0, tx1, ty1 = target
+    tcx, tcy = (tx0 + tx1) / 2, (ty0 + ty1) / 2
+    s_cover = max(W / iw, H / ih)
+    s_fit = min((tx1 - tx0) / (bx1 - bx0), (ty1 - ty0) / (by1 - by0))
+
+    def feasible(s):
+        # смещения, при которых фото закрывает весь слайд и товар внутри target
+        lo_x, hi_x = max(W - iw * s, tx0 - bx0 * s), min(0, tx1 - bx1 * s)
+        lo_y, hi_y = max(H - ih * s, ty0 - by0 * s), min(0, ty1 - by1 * s)
+        if lo_x > hi_x + 0.5 or lo_y > hi_y + 0.5:
+            return None
+        ox = min(hi_x, max(lo_x, tcx - (bx0 + bx1) / 2 * s))
+        oy = min(hi_y, max(lo_y, tcy - (by0 + by1) / 2 * s))
+        return ox, oy
+    chosen = None
+    if s_fit >= s_cover:
+        s = s_cover
+        while s <= min(s_fit, s_cover * 1.9) + 1e-9:
+            off = feasible(s)
+            if off:
+                chosen = (s, off)
+                break
+            s *= 1.03
+    canvas = Image.new("RGB", (W, H), fill or edge_color(src))
+    if chosen:
+        s, (ox, oy) = chosen
+        scaled = src.resize((max(W, int(round(iw * s))), max(H, int(round(ih * s)))), Image.LANCZOS)
+        canvas.paste(scaled, (int(round(ox)), int(round(oy))))
+    else:       # товар не помещается при фото на весь слайд — уменьшаем, края ровным цветом
+        s = min(s_fit, s_cover)
+        ox, oy = tcx - (bx0 + bx1) / 2 * s, tcy - (by0 + by1) / 2 * s
+        # по возможности без пустых краёв, но товар обязательно внутри target
+        cx_ = min(max(ox, W - iw * s), 0) if iw * s >= W else ox
+        cy_ = min(max(oy, H - ih * s), 0) if ih * s >= H else oy
+        if tx0 - 1 <= cx_ + bx0 * s and cx_ + bx1 * s <= tx1 + 1:
+            ox = cx_
+        if ty0 - 1 <= cy_ + by0 * s and cy_ + by1 * s <= ty1 + 1:
+            oy = cy_
+        scaled = src.resize((max(1, int(round(iw * s))), max(1, int(round(ih * s)))), Image.LANCZOS)
+        mk = fade_mask(scaled.size, 80, top=oy > 0.5, bottom=oy + ih * s < H - 0.5,
+                       sides=ox > 0.5 or ox + iw * s < W - 0.5)
+        canvas.paste(scaled, (int(round(ox)), int(round(oy))), mk)
+    pbox = (ox + bx0 * s, oy + by0 * s, ox + bx1 * s, oy + by1 * s)
+    return canvas, pbox
 
 
 def edge_color(im):
@@ -959,33 +1019,28 @@ def draw_dims(im, style, look, dims, bb, area):
 # =================================================================== композиция для нейросети
 def composition_en(kind, slide, style):
     look = resolve_look(kind, slide, style)
-    if kind == "specs":
-        return ("Plain seamless very light studio background, no props. The product alone, front view, centered, "
-                "fully visible, occupying about 55% of the frame with generous empty space on all sides "
-                "(dimension lines will be drawn around it).")
     if look["photo"] in ("bands", "card"):
         return ("The product (and the situation) centered and fully visible, nothing cut off, with some breathing "
                 "room around it — the picture will be cropped to a band.")
-    if kind in ("problem", "trust") and look["head"] != "bottom":
-        return ("Keep the upper 28% of the frame calm and empty (soft plain background) for a headline and the bottom "
-                "30% calm and uncluttered (info cards go there). The product and the situation are in the middle band, "
-                "fully visible, nothing cut off.")
+    has_cards = bool(feat_items(slide, kind))
+    column = kind == "cover" and look.get("feats") == "column" and has_cards
     parts = []
     if look["head"] == "bottom":
-        parts.append("Keep the bottom 30% of the frame darker and calm (a caption goes there); the product is clearly "
-                     "visible in the upper and middle part.")
+        parts.append("Keep the bottom 32% of the frame darker and calm (a caption goes there).")
     else:
-        big = look["head"] in ("hero", "weight", "number")
-        parts.append(f"Keep the upper {34 if big else 30}% of the frame calm and empty (soft plain background) "
-                     "for a headline.")
-    has_feats = kind == "cover" and any(str(f.get("title", "")).strip() for f in slide.get("features") or [])
-    if has_feats:
-        side = "right" if look.get("feats") in ("column", None) else "left"
-        other = "left" if side == "right" else "right"
-        parts.append(f"Place the whole product in the {side} half and lower two thirds of the frame; keep the {other} "
-                     f"40% of the frame below the headline calm and uncluttered (feature cards go there).")
-    elif look["head"] != "bottom":
-        parts.append("The whole product sits in the lower two thirds, fully visible.")
+        parts.append(f"Keep the upper {32 if kind == 'cover' else 28}% of the frame calm and uncluttered "
+                     "(same soft backdrop, no objects) — a headline goes there.")
+    if column:
+        parts.append("Place the whole product in the right 55% of the frame; keep the left 40% below the headline calm "
+                     "(feature icons go there).")
+    elif has_cards and look["head"] != "bottom":
+        parts.append("Keep the bottom 28% calm and uncluttered (info cards go there).")
+    if kind == "specs":
+        parts.append("Show the product alone, front view, on a simple seamless backdrop of the series colour, "
+                     "centered, fully visible, occupying about 50% of the frame with empty space around it "
+                     "(dimension lines will be drawn).")
+    else:
+        parts.append("The product is fully visible in the middle part of the frame, nothing cut off.")
     return " ".join(parts)
 
 
@@ -1017,44 +1072,66 @@ def _cards_spot(cards, fmode, fw, fh, pbox, top_free, bottom_lim, region_w, kind
 
 
 def layout_full(bg, kind, look, style, slide, items, foot_h, band_bg):
-    """Фото во весь слайд, текст и карточки поверх в свободных местах. None — если места нет."""
-    full, pbox = place_photo(bg, W, H, slide.get("box"), band_bg)
-    im = full.convert("RGBA")
+    """Фото во весь слайд: товар ставится между заголовком и карточками, под текст — мягкая подложка.
+    Один и тот же вид у всех слайдов серии."""
     at_bottom = look["head"] == "bottom"
-    probe = (0, H - 460, W, H) if at_bottom else (0, 0, W, 440)
-    on_dark = zone(im, probe)[0] < 125 or at_bottom
-    for scale in (1.0, 0.82):
-        hh, hdraw = head_block(kind, look, style, slide, on_dark, scale)
-        if at_bottom:
-            hy = H - foot_h - 48 - hh
-        else:
-            hy = 44
-        hrect = (PAD - 10, hy - 10, W - PAD + 10, hy + hh + 10)
-        if not pbox or overlap(pbox, hrect) < 0.05:
+    column = kind == "cover" and look.get("feats") == "column" and bool(items)
+    lk = dict(look)
+    if not column and lk.get("feats") in ("column", "scatter") and kind != "cover":
+        lk["feats"] = "grid"
+    sl = dict(slide)
+    its = list(items)
+    for step in range(5):
+        scale = (1.0, 0.86, 0.86, 0.74, 0.66)[step]
+        if step >= 2:
+            its = [dict(i, text="") for i in its] if not column else its
+        if step >= 3:
+            sl["subtitle"] = ""
+        hh, hdraw = head_block(kind, lk, style, sl, at_bottom, scale)
+        region_w = W - 2 * PAD
+        if kind == "cover" and lk.get("feats") in ("grid", "scatter"):
+            region_w = int(W * 0.64)
+        cards, fmode = feat_layout(its, lk, style, region_w, kind) if its else ([], None)
+        fw, fh = feat_block_size(cards, fmode) if cards else (0, 0)
+        top_h = 0 if at_bottom else hh + 44 + 26
+        bot_cards = (fh + 34 + 30) if cards and not column else 0
+        bot_h = bot_cards + foot_h + ((hh + 48 + 30) if at_bottom else 0) + (0 if bot_cards or at_bottom else 24)
+        if H - top_h - bot_h >= 0.42 * H:
             break
+    if column:
+        target = (int(W * 0.44), top_h + 10, W - 24, H - bot_h - 16)
     else:
-        return None
-    occupied = [hrect] + ([pbox] if pbox else [])
-    region_w = W - 2 * PAD
-    if look.get("feats") in ("grid", "scatter") and kind == "cover" and pbox:
-        region_w = int(W * 0.64)
-    cards, fmode = feat_layout(items, look, style, region_w, kind) if items else ([], None)
-    spot = None
-    if cards:
-        fw, fh = feat_block_size(cards, fmode)
-        top_free = (hy + hh + 40) if not at_bottom else 50
-        bottom_lim = (H - foot_h - 40) if not at_bottom else (hy - 40)
-        spot = _cards_spot(cards, fmode, fw, fh, pbox, top_free, bottom_lim, region_w, kind)
-        if spot is None or spot[3] > 0.12:
-            return None
-    if at_bottom:
-        gradient_rect(im, (0, int(hy - 170), W, H), (8, 14, 18), 0, 225)
+        target = (PAD - 20, top_h + 8, W - PAD + 20, H - bot_h - 12)
+    full, pbox = place_full(bg, slide.get("box"), target, band_bg)
+    im = full.convert("RGBA")
+    # подложки под текст: светлый цвет фона серии, плавно уходящий в фото (если за текстом пёстро/темно)
+    if not at_bottom:
+        mean, std = zone(im, (0, 0, W, top_h))
+        if mean < 165 or std > 26:
+            im.alpha_composite(Image.new("RGBA", (W, max(1, top_h - 20)), band_bg + (232,)), (0, 0))
+            gradient_rect(im, (0, top_h - 20, W, top_h + 70), band_bg, 232, 0)
+    else:
+        gradient_rect(im, (0, H - bot_h - 170, W, H), (8, 14, 18), 0, 225)
+    if bot_cards:
+        y0 = H - bot_h
+        mean, std = zone(im, (0, y0, W, H - foot_h))
+        if mean < 150 or std > 34:
+            gradient_rect(im, (0, y0 - 70, W, y0 + 20), band_bg, 0, 220)
+            im.alpha_composite(Image.new("RGBA", (W, max(1, H - y0 - 20)), band_bg + (220,)), (0, y0 + 20))
+    hy = 44 if not at_bottom else H - foot_h - 48 - hh
     hdraw(im, hy)
+    occupied = [(PAD - 10, hy - 10, W - PAD + 10, hy + hh + 10)] + ([pbox] if pbox else [])
     if cards:
-        x, y, aw, _ = spot
-        draw_feats(im, cards, fmode, x, y, aw)
-        occupied.append((x - 14, y - 14, x + aw + 14, y + feat_block_size(cards, fmode)[1] + 14))
-    return im, occupied, pbox, (0, 0, W, H)
+        if column:
+            x, y = PAD, hy + hh + 46 if not at_bottom else 60
+            y = min(y, H - foot_h - 30 - fh)
+            draw_feats(im, cards, fmode, x, y, fw)
+            occupied.append((x - 14, y - 14, x + fw + 14, y + fh + 14))
+        else:
+            y = H - foot_h - 34 - fh - ((hh + 48 + 30) if at_bottom else 0)
+            draw_feats(im, cards, fmode, PAD, y, W - 2 * PAD)
+            occupied.append((PAD, y - 6, W - PAD, y + fh + 6))
+    return im, occupied, pbox, (0, top_h, W, H - bot_h)
 
 
 def layout_bands(bg, kind, look, style, slide, items, foot_h, band_bg, card_mode):
@@ -1120,9 +1197,10 @@ def render(kind, bg, slide, style):
     items = feat_items(slide, kind)
     has_badge = bool(str((slide.get("badge") or {}).get("value", "")).strip()) and look["head"] != "number"
     band_bg = mix(plate_c, accent, 0.08)
-    mode = "bands" if kind == "specs" and look["photo"] == "full" else look["photo"]
-    res = layout_full(bg, kind, look, style, slide, items, foot_h, band_bg) if mode == "full" else None
-    if res is None:
+    mode = look["photo"]
+    if mode == "full":
+        res = layout_full(bg, kind, look, style, slide, items, foot_h, band_bg)
+    else:
         res = layout_bands(bg, kind, look, style, slide, items, foot_h, band_bg, mode == "card")
     im, occupied, pbox, prect = res
 

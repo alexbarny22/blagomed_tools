@@ -325,7 +325,7 @@ function extraFields(sl) {
   return `<details class="look-box"${sl.kind === "cover" ? " open" : ""}><summary><b>Вид слайда, бейдж, слоган</b></summary>
     <div class="grid3" style="gap:10px">
       <div><label>Заголовок</label>${lookSelect("head", lk.head, 'data-lk="head"', true)}</div>
-      <div><label>Фото</label>${lookSelect("photo", lk.photo, 'data-lk="photo"', true)}</div>
+      <div><label>Фото (только этот слайд)</label>${lookSelect("photo", lk.photo, 'data-lk="photo"', true)}</div>
       <div><label>Пункты / преимущества</label>${lookSelect("feats", lk.feats, 'data-lk="feats"', true)}</div>
       <div><label>Выравнивание</label>${lookSelect("align", lk.align, 'data-lk="align"', true)}</div>
       <div><label>Подзаголовок</label>${lookSelect("sub", lk.sub, 'data-lk="sub"', true)}</div>
@@ -371,6 +371,7 @@ function styleEditor(style) {
     <div><label>Иконки преимуществ</label>${lookSelect("feat_style", lk.feat_style || "filled", 'data-sl="feat_style"')}</div>
     <div><label>Форма бейджа</label>${lookSelect("badge", lk.badge || "circle", 'data-sl="badge"')}</div>
     <div><label>Размеры</label>${lookSelect("dims", lk.dims || "pill", 'data-sl="dims"')}</div>
+    <div><label>Фото (вся серия)</label>${lookSelect("photo", lk.photo || "full", 'data-sl="photo"')}</div>
     <div><label>Разрядка букв</label><select data-sl="tracking">${[0, 4, 8, 12].map(v => `<option value="${v}" ${Number(lk.tracking || 0) === v ? "selected" : ""}>${v ? "+" + v : "нет"}</option>`).join("")}</select></div>
   </div>
   <div class="row" style="gap:18px;margin:10px 0 2px">
