@@ -24,6 +24,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ------------------------------------------------------------------ подготовка фото
 OWN_INNS = set()      # заполняется из config.OWN_INNS ботом
+MODEL_TIMEOUT = 120    # сколько ждать ответа одной модели, с
+RACE_DEADLINE = 150    # сколько ждать гонку моделей, с: потом берём лучшее из полученного
 MAX_SIDE = 1600        # длинная сторона: Claude всё равно уменьшает до ~1600, больше — только дольше грузится
 QUALITY = 80
 
@@ -101,7 +103,7 @@ def _parse_json(text: str) -> dict:
         raise ModelError(f"Испорченный JSON от нейросети ({e}): " + text[:300])
 
 
-def _post_retry(url, tries=3, **kw):
+def _post_retry(url, tries=2, **kw):
     """Обрыв связи (SSL EOF, сброс соединения) — повторяем с паузой."""
     for i in range(tries):
         try:
@@ -121,7 +123,7 @@ def _ask_openai_compatible(m: dict, images: list) -> str:
                       headers={"Authorization": "Bearer " + m["api_key"]},
                       json={"model": m["model"], "temperature": 0, "max_tokens": 16000,
                             "messages": [{"role": "user", "content": content}], **m.get("extra", {})},
-                      timeout=m.get("timeout", 240))
+                      timeout=m.get("timeout", MODEL_TIMEOUT))
     if r.status_code != 200:
         raise ModelError(f"{m['name']}: HTTP {r.status_code} {r.text[:300]}")
     return r.json()["choices"][0]["message"]["content"]
@@ -160,7 +162,7 @@ def _ask_gigachat(m: dict, images: list) -> str:
             raise ModelError(f"GigaChat загрузка фото: HTTP {up.status_code} {up.text[:300]}")
         msgs.append({"role": "user", "content": f"Фото {i} из {len(images)}.", "attachments": [up.json()["id"]]})
     msgs.append({"role": "user", "content": PROMPT})
-    r = requests.post(base + "/chat/completions", headers=hdr, verify=ver, timeout=m.get("timeout", 240),
+    r = requests.post(base + "/chat/completions", headers=hdr, verify=ver, timeout=m.get("timeout", MODEL_TIMEOUT),
                       json={"model": m["model"], "temperature": 0.01, "max_tokens": 16000, "messages": msgs})
     if r.status_code != 200:
         raise ModelError(f"GigaChat: HTTP {r.status_code} {r.text[:300]}")
@@ -435,9 +437,14 @@ def recognize(raw_images: list, models: list, log=print, start_from=0, steps=Non
         pool = ThreadPoolExecutor(max_workers=len(first))
         futs = {pool.submit(run, m, steps.add("model", f"{m['name']} читает накладную")): m for m in first}
         try:
-            for f in as_completed(futs):
+            for f in as_completed(futs, timeout=RACE_DEADLINE):
                 if f.result():
                     return done()       # первый правильный ответ — дальше не ждём
+        except TimeoutError:
+            log(f"Гонка моделей дольше {RACE_DEADLINE} с — беру лучшее из полученного")
+            for it in steps.items:
+                if it["state"] == "run":
+                    steps.finish(it, "err", "слишком долго")
         finally:
             pool.shutdown(wait=False)
     else:

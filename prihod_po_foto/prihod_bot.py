@@ -40,6 +40,8 @@ bot = Bot(token=config.TELEGRAM_TOKEN, session=session) if session else Bot(toke
 dp = Dispatcher()
 c1 = onec.OneC(config, log=log.info)
 rec_mod.OWN_INNS = set(getattr(config, "OWN_INNS", []))
+rec_mod.MODEL_TIMEOUT = getattr(config, "MODEL_TIMEOUT", 120)
+rec_mod.RACE_DEADLINE = getattr(config, "RACE_DEADLINE", 150)
 MODELS = [m for m in config.MODELS if m.get("enabled", True) and m.get("api_key")
           and "ЗАМЕНИТЬ" not in m.get("base_url", "") + m.get("model", "")]
 HISTORY = os.path.join(HERE, "history")
