@@ -107,7 +107,8 @@ def _giga_auth(m: dict) -> str:
         return _giga_token["value"]
     r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
                       headers={"Authorization": "Basic " + m["api_key"], "RqUID": str(uuid.uuid4()),
-                               "Content-Type": "application/x-www-form-urlencoded"},
+                               "Content-Type": "application/x-www-form-urlencoded",
+                               "Accept": "application/json"},
                       data={"scope": m.get("scope", "GIGACHAT_API_PERS")},
                       verify=m.get("verify_ssl", False), timeout=30)
     if r.status_code != 200:
