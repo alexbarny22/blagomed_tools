@@ -430,7 +430,7 @@ async def summary(uid, chat_id):
     oc = s.get("orders")
     alloc = c1.allocate(oc, [{"line": L["line"], "key": L["key"]} for L in use]) if oc else []
     where = {id(L["line"]): a for L, a in zip(use, alloc)}
-    over = []
+    over, pricey = [], []
     lines_txt = []
     for L in s["lines"]:
         ln = L["line"]
@@ -444,6 +444,15 @@ async def summary(uid, chat_id):
             free = sum(q for r, q in parts if not r)
             if got:
                 txt += "\n     📦 заказ " + ", ".join(got)
+            # сверка цены: накладная против заказа
+            inv_price = ln["sum"] / ln["qty"] if ln["qty"] else 0
+            diffs = sorted({r["price"] for r, q in parts if r and r.get("price") and
+                            abs(inv_price - r["price"]) > max(0.5, r["price"] * 0.005)})
+            if diffs:
+                pct = (inv_price - diffs[0]) / diffs[0] * 100
+                txt += (f"\n     💰 цена в заказе {', '.join(money(x) for x in diffs)}, "
+                        f"в накладной {money(inv_price)} ({pct:+.1f}%)")
+                pricey.append(ln["n"])
             if free > 0.0001:
                 txt += f"\n     ⚠️ {free:g} шт нет в открытых заказах"
                 over.append(ln["n"])
@@ -458,6 +467,9 @@ async def summary(uid, chat_id):
         head += (f"\n⚠️ <b>{'Строка' if len(over) == 1 else 'Строки'} {', '.join(map(str, over))}</b> — "
                  "товара нет в открытых заказах (или привезли больше). "
                  "Без заказа 1С может не провести поступление: создайте или поправьте заказ, затем «🔁 Пересчитать заказы».\n")
+    if pricey:
+        head += (f"\n💰 <b>Цена не как в заказе: {'строка' if len(pricey) == 1 else 'строки'} "
+                 f"{', '.join(map(str, pricey))}</b> — проверьте, прежде чем проводить.\n")
     if chk["issues"]:
         head += "\n⚠️ <b>Проверьте:</b>\n" + "\n".join("• " + e(x) for x in chk["issues"][:10]) + "\n"
     else:
@@ -689,6 +701,11 @@ async def cb_post(c: CallbackQuery):
     st1 = steps.add("onec", "Беру настройки из прошлого поступления")
     try:
         def job():
+            if s.get("orders") is not None or getattr(config, "USE_ORDERS", True):
+                try:      # заказы могли закрыться/появиться, пока смотрели итог
+                    s["orders"] = c1.orders_context(s["ka"])
+                except Exception as ex:
+                    log.warning("Заказы не перечитаны перед проведением: %s", ex)
             tpl, own = c1.template(s["ka"])
             steps.finish(st1, "ok", "от этого поставщика" if own else "поставщик новый — образец от другого")
             st2 = steps.add("onec", f"Записываю документ ({len(use)} строк) и провожу")

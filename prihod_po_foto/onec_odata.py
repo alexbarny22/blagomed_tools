@@ -360,9 +360,13 @@ class OneC:
                     left_item[k] -= take
                     qty -= take
                 if qty > 0.0001:
+                    # цена в заказе за единицу — для сверки с накладной (с НДС, если цены в заказе без него)
+                    price = to_num(ln.get("Цена"))
+                    if not o.get("ЦенаВключаетНДС", True) and to_num(ln.get("Количество")):
+                        price = round(to_num(ln.get("СуммаСНДС") or ln.get("Сумма")) / to_num(ln.get("Количество")), 2)
                     rem.append({"order": o["Ref_Key"], "number": str(o.get("Number", "")).strip(),
                                 "date": o.get("Date", "")[:10], "item": item, "code": ln.get("КодСтроки"),
-                                "left": qty})
+                                "left": qty, "price": price})
         return {"orders": orders, "rem": rem, "field": field, "use_code": use_code}
 
     @staticmethod
