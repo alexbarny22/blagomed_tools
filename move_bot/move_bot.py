@@ -394,6 +394,11 @@ class App(tk.Tk):
         top.pack(fill="x")
         self.lbl_wh = ttk.Label(top, text="Склады: —", font=("Segoe UI", 10, "bold"))
         self.lbl_wh.pack(side="left")
+        self.var_dst = tk.StringVar()
+        self.cb_dst = ttk.Combobox(top, textvariable=self.var_dst, state="readonly", width=34,
+                                   font=("Segoe UI", 10, "bold"))
+        self.cb_dst.pack(side="left", padx=(4, 0))
+        self.cb_dst.bind("<<ComboboxSelected>>", self.on_dst_change)
         ttk.Button(top, text="Склады…", command=self.choose_warehouses).pack(side="right")
         self.lbl_org = ttk.Label(self, padding=(10, 0), foreground="#444", text="")
         self.lbl_org.pack(fill="x")
@@ -630,9 +635,35 @@ class App(tk.Tk):
             self.startup(force=True)
 
     # ---------- склады
+    def store_names(self):
+        """Склады магазинов для выпадающего списка «Куда» — все склады 1С со словом «магазин»."""
+        names = [n for n in self.warehouses if "магазин" in norm(n)
+                 and n != self.settings.get("src_name")]
+        cur = self.settings.get("dst_name")
+        if cur and cur not in names:
+            names.append(cur)
+        return sorted(names)
+
     def show_wh(self):
-        self.lbl_wh.configure(text=f"Откуда: {self.settings['src_name']}   →   "
-                                   f"Куда: {self.settings['dst_name']}")
+        self.lbl_wh.configure(text=f"Откуда: {self.settings['src_name']}   →   Куда:")
+        self.cb_dst.configure(values=self.store_names())
+        self.var_dst.set(self.settings["dst_name"])
+
+    def on_dst_change(self, _=None):
+        name = self.var_dst.get()
+        if self.busy:
+            self.var_dst.set(self.settings["dst_name"])
+            self.say("Подождите окончания загрузки, затем выберите магазин.")
+            return
+        if name == self.settings.get("dst_name") or name not in self.warehouses:
+            return
+        self.settings["dst_name"], self.settings["dst_key"] = name, self.warehouses[name]
+        save_settings(self.settings)
+        self.say(f"Склад-получатель: {name}.")
+        if getattr(self, "last_res", None):
+            self.refresh_done(self.last_res)     # остатки уже загружены — только пересчёт
+        else:
+            self.refresh()
 
     def choose_warehouses(self):
         if not self.warehouses:
@@ -683,9 +714,10 @@ class App(tk.Tk):
 
     def load_stock_and_prices(self):
         stock = self.od.stock()
-        src, dst = self.settings["src_key"], self.settings["dst_key"]
+        whs = {self.settings["src_key"], self.settings["dst_key"]}
+        whs |= {self.warehouses[n] for n in self.store_names() if n in self.warehouses}
         unknown = {k for (k, wh), v in stock.items()
-                   if wh in (src, dst) and k not in self.noms and k not in self.mg_keys}
+                   if wh in whs and k not in self.noms and k not in self.mg_keys}
         extra = []
         if unknown:
             log(f"Позиций с остатком нет в сохранённой номенклатуре: {len(unknown)} — догружаю")
@@ -696,6 +728,7 @@ class App(tk.Tk):
 
     def refresh_done(self, res):
         stock, prices, extra = res
+        self.last_res = (stock, prices, [])
         if extra:
             for n in extra:
                 nn = norm(n.get("Description"))
