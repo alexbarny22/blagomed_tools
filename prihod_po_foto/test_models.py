@@ -92,11 +92,12 @@ def main():
     stats = {m["name"]: [0, 0, 0.0] for m in models}       # сошлось, всего, секунд
     for name, files in found:
         p(f"\n================ {name} ({len(files)} фото)")
-        images = [R.prepare_image(open(f, "rb").read()) for f in files]
+        raws = [open(f, "rb").read() for f in files]
+        images = [R.prepare_image(b) for b in raws]
         for m in models:
             t0 = time.time()
             try:
-                d = R.ask_model(m, images)
+                d = R.ask_model(m, images, raws)
             except Exception as e:
                 p(f"  {m['name']:<16} ОШИБКА: {str(e)[:200]}")
                 stats[m["name"]][1] += 1

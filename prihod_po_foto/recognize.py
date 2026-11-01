@@ -26,19 +26,19 @@ OWN_INNS = set()      # заполняется из config.OWN_INNS ботом
 MAX_SIDE = 2400        # длинная сторона после уменьшения — хватает для мелкого шрифта
 
 
-def prepare_image(raw: bytes) -> bytes:
+def prepare_image(raw: bytes, max_side: int = 0, quality: int = 88) -> bytes:
     """Поворот по EXIF, RGB, уменьшение, лёгкое повышение контраста. Возвращает JPEG."""
     img = Image.open(io.BytesIO(raw))
     img = ImageOps.exif_transpose(img)
     if img.mode != "RGB":
         img = img.convert("RGB")
     w, h = img.size
-    k = MAX_SIDE / max(w, h)
+    k = (max_side or MAX_SIDE) / max(w, h)
     if k < 1:
         img = img.resize((int(w * k), int(h * k)), Image.LANCZOS)
     img = ImageOps.autocontrast(img, cutoff=1)
     out = io.BytesIO()
-    img.save(out, "JPEG", quality=88)
+    img.save(out, "JPEG", quality=quality)
     return out.getvalue()
 
 
@@ -95,12 +95,23 @@ def _parse_json(text: str) -> dict:
         raise ModelError(f"Испорченный JSON от нейросети ({e}): " + text[:300])
 
 
+def _post_retry(url, tries=3, **kw):
+    """Обрыв связи (SSL EOF, сброс соединения) — повторяем с паузой."""
+    for i in range(tries):
+        try:
+            return requests.post(url, **kw)
+        except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
+            if i == tries - 1:
+                raise ModelError(f"обрыв связи с {url.split('/')[2]}: {str(e)[:150]}")
+            time.sleep(3 + 5 * i)
+
+
 def _ask_openai_compatible(m: dict, images: list) -> str:
     content = [{"type": "text", "text": PROMPT}]
     for jpg in images:
         content.append({"type": "image_url", "image_url": {
             "url": "data:image/jpeg;base64," + base64.b64encode(jpg).decode()}})
-    r = requests.post(m["base_url"].rstrip("/") + "/chat/completions",
+    r = _post_retry(m["base_url"].rstrip("/") + "/chat/completions",
                       headers={"Authorization": "Bearer " + m["api_key"]},
                       json={"model": m["model"], "temperature": 0, "max_tokens": 16000,
                             "messages": [{"role": "user", "content": content}]},
@@ -149,11 +160,16 @@ def _ask_gigachat(m: dict, images: list) -> str:
     return r.json()["choices"][0]["message"]["content"]
 
 
-def ask_model(m: dict, images: list) -> dict:
-    if m.get("type", "openai") == "gigachat":
-        text = _ask_gigachat(m, images)
-    else:
-        text = _ask_openai_compatible(m, images)
+def ask_model(m: dict, images: list, raw_images: list = None) -> dict:
+    """raw_images — исходные фото: если связь рвётся на больших файлах, пробуем уменьшенные."""
+    ask = _ask_gigachat if m.get("type", "openai") == "gigachat" else _ask_openai_compatible
+    try:
+        text = ask(m, images)
+    except ModelError as e:
+        if "обрыв связи" not in str(e) or not raw_images:
+            raise
+        small = [prepare_image(b, 1600, 80) for b in raw_images]
+        text = ask(m, small)
     return normalize(_parse_json(text))
 
 
@@ -311,7 +327,7 @@ def recognize(raw_images: list, models: list, log=print, start_from=0) -> dict:
             continue
         t0 = time.time()
         try:
-            data = ask_model(m, images)
+            data = ask_model(m, images, raw_images)
         except Exception as e:
             log(f"{m['name']}: ошибка — {e}")
             tried.append((m["name"], f"ошибка: {str(e)[:120]}"))
