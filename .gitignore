@@ -12,3 +12,7 @@ wb_reviews_config.json
 heartbeat_*.txt
 nomenclature.json
 bot.log
+blagomed_cost/wb_catalog.json
+cost_history.json
+blagomed_cost/*.xlsx
+*.pdf
