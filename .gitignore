@@ -10,3 +10,5 @@ python_path.txt
 wb_reviews_config.json
 *_state.json
 heartbeat_*.txt
+nomenclature.json
+bot.log

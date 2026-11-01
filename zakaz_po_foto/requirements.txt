@@ -1,0 +1,6 @@
+aiogram>=3.7
+pywin32>=306
+rapidfuzz>=3.9
+pytesseract>=0.3.10
+opencv-python>=4.9
+numpy>=1.26
