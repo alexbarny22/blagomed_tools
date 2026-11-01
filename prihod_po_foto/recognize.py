@@ -15,7 +15,11 @@ import time
 import uuid
 
 import requests
+import urllib3
 from PIL import Image, ImageOps
+
+# GigaChat работает с отключённой проверкой сертификата — не засоряем экран предупреждениями
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ------------------------------------------------------------------ подготовка фото
 MAX_SIDE = 2400        # длинная сторона после уменьшения — хватает для мелкого шрифта
