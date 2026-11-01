@@ -1,0 +1,5 @@
+config.py
+settings.json
+styles.json
+projects/
+__pycache__/

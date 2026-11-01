@@ -1,0 +1,13 @@
+# файлы, которые обновляются автоматически
+app.py
+engine.py
+render.py
+settings.py
+styles.py
+deps.py
+update.py
+config.example.py
+README.md
+static/index.html
+static/app.js
+static/app.css
