@@ -19,7 +19,8 @@ import sys
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton as Btn, InlineKeyboardMarkup, Message
+from aiogram.types import (BotCommand, CallbackQuery, FSInputFile, InlineKeyboardButton as Btn,
+                           InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -86,6 +87,14 @@ async def send_long(chat_id, text, markup=None):
                                reply_markup=markup if i == len(parts) - 1 else None)
 
 
+# ------------------------------------------------------------------ постоянные кнопки внизу экрана
+B_TABLE, B_REFRESH, B_RESET = "📋 Таблица сопоставлений", "🔄 Обновить товары из 1С", "✖ Начать заново"
+MENU = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=B_TABLE)],
+                                     [KeyboardButton(text=B_REFRESH), KeyboardButton(text=B_RESET)]],
+                           resize_keyboard=True, is_persistent=True,
+                           input_field_placeholder="Пришлите фото накладной")
+
+
 # ------------------------------------------------------------------ приём фото
 @dp.message(CommandStart())
 async def cmd_start(m: Message):
@@ -94,18 +103,22 @@ async def cmd_start(m: Message):
         return
     reset(m.from_user.id)
     await m.answer("Пришлите фото накладной — все страницы (можно альбомом).\n"
-                   "Лучше отправлять «как файл» — без сжатия Telegram, так цифры читаются точнее.\n\n"
-                   "/sopost — таблица сопоставлений товаров (прислать, исправить, вернуть)\n"
-                   "/refresh — перезагрузить номенклатуру из 1С\n/cancel — начать заново")
+                   "Лучше отправлять «как файл» (скрепка → Файл) — без сжатия Telegram цифры читаются точнее.\n\n"
+                   "Кнопки внизу:\n"
+                   f"{B_TABLE} — бот пришлёт таблицу; исправьте её в Excel и отправьте файл обратно\n"
+                   f"{B_REFRESH} — если в 1С завели новый товар\n"
+                   f"{B_RESET} — бросить текущую накладную", reply_markup=MENU)
 
 
 @dp.message(Command("cancel"))
+@dp.message(F.text == B_RESET)
 async def cmd_cancel(m: Message):
     reset(m.from_user.id)
-    await m.answer("Сброшено. Присылайте фото новой накладной.")
+    await m.answer("Сброшено. Присылайте фото новой накладной.", reply_markup=MENU)
 
 
 @dp.message(Command("sopost"))
+@dp.message(F.text == B_TABLE)
 async def cmd_sopost(m: Message):
     if not allowed(m.from_user.id):
         return
@@ -124,10 +137,11 @@ async def cmd_sopost(m: Message):
         FSInputFile(mapping.FILE, filename="Сопоставления.xlsx"), parse_mode="HTML",
         caption=(f"Таблица сопоставлений — {len(rows)} строк:\n{by}\n\n"
                  + (f"⚠️ Ещё {pend} строк ждут записи — файл открыт в Excel на компьютере бота.\n\n" if pend else "")
-                 + "Исправьте в Excel и пришлите файл обратно — бот заменит таблицу.")[:1000])
+                 + "Исправьте в Excel и просто отправьте файл сюда (скрепка → Файл) — бот заменит таблицу.")[:1000])
 
 
 @dp.message(Command("refresh"))
+@dp.message(F.text == B_REFRESH)
 async def cmd_refresh(m: Message):
     if not allowed(m.from_user.id):
         return
@@ -422,16 +436,106 @@ async def summary(uid, chat_id):
         head += "\n✔️ Все суммы сошлись с итогом документа.\n"
     foot = (f"\nК приходу: строк {len(use)} из {len(s['lines'])}, сумма <b>{money(total)}</b>"
             + (f" (итог в документе {money(doc_total)})" if doc_total else "") +
-            "\n\n<i>Поправить строку — напишите сообщением:</i>\n"
-            "<code>3 = 5 x 450</code> — строка 3: 5 шт по 450\n"
-            "<code>3 сумма 2250</code> — сумма строки 3\n"
-            "<code>3 ?</code> — заново выбрать товар для строки 3\n"
-            "<code>3 удалить</code> — не приходовать строку 3")
+            "\n\nНашли ошибку — «✏️ Исправить строку».")
     s["ready"] = True
     await send_long(chat_id, head + "\n" + "\n".join(lines_txt) + "\n" + foot,
                     kb([Btn(text="✅ Провести в 1С", callback_data="post")],
+                       [Btn(text="✏️ Исправить строку", callback_data="fix")],
                        [Btn(text="🔁 Другой нейросетью", callback_data="other_model"),
                         Btn(text="✖ Отмена", callback_data="cancel")]))
+
+
+# ------------------------------------------------------------------ правка строки кнопками
+FIELDS = {"qty": "количество", "price": "цену за единицу", "sum": "сумму строки"}
+
+
+def apply_edit(ln, field, value):
+    """Меняет количество / цену / сумму строки и пересчитывает связанные суммы."""
+    vat = rec_mod.vat_percent(ln["vat_rate"])
+    if field in ("qty", "price"):
+        ln[field] = value
+        ln["sum_without_vat"] = round(ln["qty"] * ln["price"], 2)
+        ln["sum"] = ln["sum_without_vat"] if vat == 0 else round(ln["sum_without_vat"] * (1 + vat / 100), 2)
+        ln["vat_sum"] = round(ln["sum"] - ln["sum_without_vat"], 2)
+    else:
+        ln["sum"] = value
+        if ln["qty"]:
+            base = value / (1 + vat / 100) if vat else value
+            ln["price"] = round(base / ln["qty"], 2)
+            ln["sum_without_vat"] = round(base, 2)
+            ln["vat_sum"] = round(value - base, 2)
+    ln["unclear"] = False
+
+
+@dp.callback_query(F.data == "fix")
+async def cb_fix(c: CallbackQuery):
+    s = st(c.from_user.id)
+    if not s.get("lines"):
+        await c.answer("Устарело", show_alert=True)
+        return
+    await c.answer()
+    bad = s["rec"]["check"]["bad_lines"]
+    rows = [[Btn(text=(f"{'⚠️' if L['line']['n'] in bad else ('⏭' if L['skip'] else '')} {L['line']['n']}. "
+                       f"{L['line']['name'][:40]}").strip(), callback_data=f"fixl:{i}")]
+            for i, L in enumerate(s["lines"])]
+    rows.append([Btn(text="↩ Назад", callback_data="fixback")])
+    await c.message.answer("Какую строку исправить?", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@dp.callback_query(F.data.startswith("fixl:"))
+async def cb_fix_line(c: CallbackQuery):
+    s = st(c.from_user.id)
+    i = int(c.data.split(":")[1])
+    if not s.get("lines") or i >= len(s["lines"]):
+        await c.answer("Устарело", show_alert=True)
+        return
+    await c.answer()
+    L = s["lines"][i]
+    ln = L["line"]
+    await c.message.edit_text(
+        f"Строка {ln['n']}: <b>{e(ln['name'])}</b>\n{ln['qty']:g} × {money(ln['price'])} = {money(ln['sum'])}\n"
+        f"У нас: {e(L['name1c'] or '—')}\n\nЧто исправить?", parse_mode="HTML",
+        reply_markup=kb([Btn(text="Количество", callback_data=f"fixf:{i}:qty"),
+                         Btn(text="Цена", callback_data=f"fixf:{i}:price"),
+                         Btn(text="Сумма", callback_data=f"fixf:{i}:sum")],
+                        [Btn(text="🔁 Другой товар", callback_data=f"fixf:{i}:item")],
+                        [Btn(text="⏭ Не приходовать" if not L["skip"] else "✅ Вернуть в приход",
+                             callback_data=f"fixf:{i}:skip")],
+                        [Btn(text="↩ Назад", callback_data="fixback")]))
+
+
+@dp.callback_query(F.data.startswith("fixf:"))
+async def cb_fix_field(c: CallbackQuery):
+    uid = c.from_user.id
+    s = st(uid)
+    _, i, field = c.data.split(":")
+    i = int(i)
+    if not s.get("lines") or i >= len(s["lines"]):
+        await c.answer("Устарело", show_alert=True)
+        return
+    await c.answer()
+    L = s["lines"][i]
+    if field == "skip":
+        L["skip"] = not L["skip"]
+        await c.message.delete()
+        await summary(uid, c.message.chat.id)
+    elif field == "item":
+        try:
+            await asyncio.to_thread(onec.forget, s["inn"], L["line"])
+        except Exception as ex:
+            await c.message.answer(f"⚠️ {e(ex)}", parse_mode="HTML")
+        L.update(key=None, name1c="", how="", skip=False, cands=c1.search(L["line"]["name"], 4))
+        await c.message.delete()
+        await ask_line(uid, c.message.chat.id, i)
+    else:
+        s["await_num"] = (i, field)
+        await c.message.edit_text(f"Напишите {FIELDS[field]} для строки {L['line']['n']} — только число.")
+
+
+@dp.callback_query(F.data == "fixback")
+async def cb_fix_back(c: CallbackQuery):
+    await c.answer()
+    await c.message.delete()
 
 
 EDIT_QP = re.compile(r"^\s*(\d+)\s*[=:]\s*([\d\s.,]+?)\s*[xхX×*]\s*([\d\s.,]+)\s*$")
@@ -454,11 +558,22 @@ async def on_text(m: Message):
         return
     s = st(uid)
     t = m.text.strip()
+    if s.get("await_num"):
+        i, field = s["await_num"]
+        val = rec_mod.num(t)
+        if val is None or val < 0:
+            await m.answer("Нужно число, например 450 или 12,5. Попробуйте ещё раз.")
+            return
+        s.pop("await_num")
+        apply_edit(s["lines"][i]["line"], field, val)
+        s["rec"]["check"] = rec_mod.check(s["rec"]["data"])
+        await summary(uid, m.chat.id)
+        return
     if s.get("search_for") is not None:
         i = s["search_for"]
         res = c1.search(t, 6)
         if not res:
-            await m.answer("Ничего не нашёл. Попробуйте другое слово или /refresh, если товар только что заведён.")
+            await m.answer(f"Ничего не нашёл. Попробуйте другое слово или «{B_REFRESH}», если товар только что заведён.")
             return
         await ask_line(uid, m.chat.id, i, res)
         return
@@ -475,14 +590,10 @@ async def on_text(m: Message):
             return
         ln = L["line"]
         if kind == "qp":
-            ln["qty"] = rec_mod.num(mt.group(2)) or ln["qty"]
-            ln["price"] = rec_mod.num(mt.group(3)) or ln["price"]
-            k = 1 + rec_mod.vat_percent(ln["vat_rate"]) / 100
-            ln["sum_without_vat"] = round(ln["qty"] * ln["price"], 2)
-            ln["sum"] = ln["sum_without_vat"] if rec_mod.vat_percent(ln["vat_rate"]) == 0 else round(ln["sum_without_vat"] * k, 2)
-            ln["vat_sum"] = round(ln["sum"] - ln["sum_without_vat"], 2)
+            apply_edit(ln, "qty", rec_mod.num(mt.group(2)) or ln["qty"])
+            apply_edit(ln, "price", rec_mod.num(mt.group(3)) or ln["price"])
         elif kind == "sum":
-            ln["sum"] = rec_mod.num(mt.group(2)) or ln["sum"]
+            apply_edit(ln, "sum", rec_mod.num(mt.group(2)) or ln["sum"])
         elif kind == "del":
             L["skip"] = True
         elif kind == "ask":
@@ -498,7 +609,7 @@ async def on_text(m: Message):
             s["rec"]["check"] = rec_mod.check(s["rec"]["data"])
         await summary(uid, m.chat.id)
         return
-    await m.answer("Не понял. Пример правки: <code>3 = 5 x 450</code>", parse_mode="HTML")
+    await m.answer("Не понял. Чтобы поправить строку — кнопка «✏️ Исправить строку» под итогом.")
 
 
 # ------------------------------------------------------------------ проведение
@@ -562,7 +673,7 @@ async def cb_post(c: CallbackQuery):
     skipped = [L for L in s["lines"] if L["skip"]]
     if skipped:
         text += "\n\nНе оприходованы: " + ", ".join(str(L["line"]["n"]) for L in skipped)
-    await c.message.answer(text, parse_mode="HTML")
+    await c.message.answer(text + "\n\nМожно присылать следующую накладную.", parse_mode="HTML", reply_markup=MENU)
     reset(uid)
 
 
@@ -588,7 +699,7 @@ async def cb_cancel(c: CallbackQuery):
     reset(c.from_user.id)
     await c.answer()
     await c.message.edit_reply_markup(reply_markup=None)
-    await c.message.answer("Отменено. Присылайте фото новой накладной.")
+    await c.message.answer("Отменено. Присылайте фото новой накладной.", reply_markup=MENU)
 
 
 async def main():
@@ -597,6 +708,13 @@ async def main():
         await asyncio.to_thread(c1.load_items)
     except Exception as ex:
         log.error("Номенклатура не загрузилась (проверьте 1С): %s", ex)
+    try:
+        await bot.set_my_commands([BotCommand(command="start", description="Начало и кнопки"),
+                                   BotCommand(command="sopost", description="Таблица сопоставлений"),
+                                   BotCommand(command="refresh", description="Обновить товары из 1С"),
+                                   BotCommand(command="cancel", description="Начать заново")])
+    except Exception as ex:
+        log.warning("Меню команд не установлено: %s", ex)
     await dp.start_polling(bot)
 
 
