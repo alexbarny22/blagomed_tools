@@ -21,19 +21,19 @@ NEED = [
     ("Catalog_ДоговорыКонтрагентов", "Договоры", False),
 ]
 
-od = O.OData(config.ODATA_URL, config.ONEC_USER, config.ONEC_PASSWORD, 60)
+od = O.OData(config.ODATA_URL, config.ONEC_USER, config.ONEC_PASSWORD, 180)
 print(f"Проверяю OData: {config.ODATA_URL}\n")
 missing_main = False
 for entity, title, main in NEED:
     try:
-        od.get(entity, **{"$top": "1", "$select": "Ref_Key"})
+        od.get(entity, **{"$top": "1"})
         print(f"  ✔ есть   {title}")
     except Exception as e:
         msg = str(e)
         if "401" in msg:
             print(f"  ✖ 1С не пустила по логину/паролю — проверьте ONEC_USER / ONEC_PASSWORD в config.py")
             break
-        print(f"  {'✖ НЕТ ' if main else '· нет '}  {title}")
+        print(f"  {'✖ НЕТ ' if main else '· нет '}  {title}\n           причина: {msg[:300]}")
         missing_main |= main
 
 if missing_main:
