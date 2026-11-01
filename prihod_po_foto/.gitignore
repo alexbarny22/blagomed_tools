@@ -1,0 +1,8 @@
+config.py
+mapping.json
+nomenclature.json
+history/
+test_photos/
+test_result.txt
+*.log
+__pycache__/
