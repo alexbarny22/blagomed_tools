@@ -3,6 +3,7 @@ prihod_bot.py
 recognize.py
 onec_odata.py
 test_models.py
+deps.py
 test_models.bat
 setup_odata_prihod.py
 setup_odata_prihod.bat
