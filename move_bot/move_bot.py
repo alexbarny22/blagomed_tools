@@ -232,10 +232,26 @@ class OData:
 
     def get_by_keys(self, entity, keys, select):
         """Карточки по списку ключей (небольшими пачками)."""
-        res = []
+        res, keys = [], list(keys)
         make = lambda part: " or ".join(f"Ref_Key eq guid'{k}'" for k in part)
-        for part in self.or_batches(list(keys), make):
-            res += self.get(entity, {"$filter": make(part), "$select": select})
+        try:
+            for part in self.or_batches(keys, make):
+                res += self.get(entity, {"$filter": make(part), "$select": select})
+            return res
+        except RuntimeError as e:
+            log(f"{entity}: отбор по ключам не разрешён ({str(e)[:200]}) — читаю по одному")
+        # запасной путь: обращение к каждой записи по ключу (без отбора «ГДЕ»)
+        res = []
+        for k in keys:
+            try:
+                r = self.s.get(f"{self.base}{entity}(guid'{k}')",
+                               params={"$format": "json", "$select": select}, timeout=120)
+                if r.status_code == 200:
+                    res.append(r.json())
+                else:
+                    log(f"{entity}({k}): {self._err(r)[:200]}")
+            except requests.RequestException as e:
+                log(f"{entity}({k}): нет ответа ({e})")
         return res
 
     def load_meta(self):
