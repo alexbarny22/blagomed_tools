@@ -790,50 +790,97 @@ class App(tk.Tk):
         self.refresh()
 
     # ---------- кэш закупочных цен (раз в день; при «Передать» цены всё равно сверяются с 1С)
-    def cached_prices(self, need, force=False):
-        today = datetime.date.today().isoformat()
+    # ---------- закупочные цены: своя база цен из документов «Установка цен номенклатуры»
+    # Первый раз (или по кнопке «Обновить цены») читаются все проведённые документы,
+    # дальше — только документы с датой не раньше последнего чтения. Результат хранится
+    # в prices_cache.json: по каждой позиции последняя цена «Закупочная».
+    PRICE_DB_VERSION = 2
+
+    def load_price_db(self):
         try:
             with open(PRICE_CACHE, encoding="utf-8") as f:
-                c = json.load(f)
+                db = json.load(f)
+            if db.get("v") == self.PRICE_DB_VERSION and db.get("price_type") == self.price_type:
+                return db
         except Exception:
-            c = {}
-        if force or c.get("date") != today or c.get("price_type") != self.price_type:
-            c = {"date": today, "price_type": self.price_type, "prices": {}}
-        known = c["prices"]                       # ключ -> цена или None (цены в 1С нет)
-        missing = [k for k in need if not known.get(k)]   # без цены — спрашиваем 1С снова
-        if missing:
-            got = self.od.prices(self.price_type, missing)
-            for k in missing:
-                known[k] = got.get(k)
-            self.save_price_cache(c)
-            src = (f"из 1С по {len(missing)} поз." + ("" if len(missing) == len(need)
-                   else f", остальные {len(need) - len(missing)} — из сохранённых за сегодня"))
-        else:
-            src = "сохранённые за сегодня (кнопка «Обновить цены» — загрузить заново)"
-            self.od.price_info = ""
-        res = {k: known[k] for k in need if known.get(k)}
-        self.price_src = f"Закупочные цены: {src}; цена есть у {len(res)} из {len(need)} позиций."
-        return res
+            pass
+        return {"v": self.PRICE_DB_VERSION, "price_type": self.price_type,
+                "last": None, "day": None, "items": {}}
 
-    def save_price_cache(self, c):
+    def save_price_db(self, db):
         try:
             tmp = PRICE_CACHE + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(c, f, ensure_ascii=False)
+                json.dump(db, f, ensure_ascii=False)
             os.replace(tmp, PRICE_CACHE)
         except Exception as e:
             log("Не удалось сохранить цены: " + str(e))
 
-    def update_price_cache(self, fresh):
-        """После сверки при передаче — обновляем сохранённые цены свежими."""
+    def fetch_price_docs(self, since):
+        """Проведённые документы установки цен (с табличной частью) с даты since или все."""
+        od, doc = self.od, "Document_УстановкаЦенНоменклатуры"
+        flt = {"$filter": f"Date ge datetime'{since}'"} if since else {}
+        variants = [
+            (dict(flt, **{"$select": "Ref_Key,Date,Posted,DeletionMark,Товары"}), "Date"),
+            (dict(flt), "Date"),
+            (dict(flt), None),
+        ]
+        last_err = None
+        for params, order in variants:
+            try:
+                return od.get_all(doc, params, page=100, label="Документы установки цен", order=order)
+            except RuntimeError as e:
+                last_err = e
+                log(f"Цены: документы не прочитаны ({params}, {order}) — {str(e)[:300]}")
+        raise RuntimeError(f"Документы установки цен не читаются: {last_err}")
+
+    def update_price_db(self, force=False):
+        db = {"v": self.PRICE_DB_VERSION, "price_type": self.price_type,
+              "last": None, "day": None, "items": {}} if force else self.load_price_db()
+        today = datetime.date.today().isoformat()
+        since = db.get("last")
+        if since and db.get("incremental") is False and db.get("day") == today:
+            return db, "сохранённые за сегодня"
         try:
-            with open(PRICE_CACHE, encoding="utf-8") as f:
-                c = json.load(f)
-            if c.get("price_type") == self.price_type:
-                c["prices"].update(fresh)
-                self.save_price_cache(c)
-        except Exception:
-            pass
+            docs = self.fetch_price_docs(since)
+            db["incremental"] = True
+        except RuntimeError:
+            if not since:
+                raise
+            docs = self.fetch_price_docs(None)        # отбор по дате не поддерживается
+            db["incremental"] = False
+        now = datetime.datetime.now().replace(microsecond=0).isoformat()
+        items, n_docs, n_rows = db["items"], 0, 0
+        for d in docs:
+            if not d.get("Posted") or d.get("DeletionMark"):
+                continue
+            date = d.get("Date") or ""
+            if date > now:
+                continue
+            n_docs += 1
+            for r in d.get("Товары") or []:
+                if r.get("ВидЦены_Key") != self.price_type:
+                    continue
+                nom, price = r.get("Номенклатура_Key"), float(r.get("Цена") or 0)
+                if not nom or price <= 0:
+                    continue
+                old = items.get(nom)
+                if not old or date >= old[0]:
+                    items[nom] = [date, price]
+                    n_rows += 1
+        # следующий раз читаем документы начиная со вчерашнего дня (с запасом)
+        db["last"] = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
+        db["day"] = today
+        self.save_price_db(db)
+        what = "все документы" if not since or not db["incremental"] else f"новые документы с {since[:10]}"
+        return db, f"из 1С прочитаны {what}: {n_docs} шт."
+
+    def get_prices(self, need, force=False):
+        db, src = self.update_price_db(force)
+        res = {k: db["items"][k][1] for k in need if k in db["items"]}
+        self.price_src = (f"Закупочные цены: {src}; в базе цен {len(db['items'])} поз.; "
+                          f"цена есть у {len(res)} из {len(need)} передаваемых позиций.")
+        return res
 
     def reload_noms(self):
         if self.busy:
@@ -953,7 +1000,7 @@ class App(tk.Tk):
                 need.add(k)
         force = getattr(self, "_force_prices", False)
         self._force_prices = False
-        prices = self.cached_prices(need, force)
+        prices = self.get_prices(need, force)
         return stock, prices, extra
 
     def refresh_done(self, res):
@@ -1178,8 +1225,7 @@ class App(tk.Tk):
                                "ничего не создано. Поля строки: " +
                                ", ".join(sorted(od.props[sort_row])))
         stock = od.stock(s["src_key"])
-        prices = od.prices(self.price_type, [l[0] for l in lines])
-        self.update_price_cache({l[0]: prices.get(l[0]) for l in lines})
+        prices = self.get_prices([l[0] for l in lines])   # дочитывает новые документы цен
         problems = []
         for key, pair, qty, name in lines:
             free = stock.get((key, s["src_key"]), [0.0, 0.0])[1]
