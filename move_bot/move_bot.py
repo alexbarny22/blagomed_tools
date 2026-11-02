@@ -834,21 +834,26 @@ class App(tk.Tk):
                 log(f"Цены: документы не прочитаны ({params}, {order}) — {str(e)[:300]}")
         raise RuntimeError(f"Документы установки цен не читаются: {last_err}")
 
-    def update_price_db(self, force=False):
+    def update_price_db(self, force=False, only_cached=False):
         db = {"v": self.PRICE_DB_VERSION, "price_type": self.price_type,
               "last": None, "day": None, "items": {}} if force else self.load_price_db()
+        if force:
+            db["no_date_filter"] = self.load_price_db().get("no_date_filter")
         today = datetime.date.today().isoformat()
         since = db.get("last")
-        if since and db.get("incremental") is False and db.get("day") == today:
-            return db, "сохранённые за сегодня"
+        no_filter = db.get("no_date_filter")       # 1С не даёт отбирать документы по дате
+        if since and (no_filter or only_cached) and db.get("day") == today:
+            return db, "сохранённые за сегодня (кнопка «Обновить цены» — перечитать)"
+        if no_filter:
+            since = None
         try:
             docs = self.fetch_price_docs(since)
-            db["incremental"] = True
         except RuntimeError:
             if not since:
                 raise
-            docs = self.fetch_price_docs(None)        # отбор по дате не поддерживается
-            db["incremental"] = False
+            db["no_date_filter"] = True             # запоминаем: дальше — полное чтение раз в день
+            since = None
+            docs = self.fetch_price_docs(None)
         now = datetime.datetime.now().replace(microsecond=0).isoformat()
         items, n_docs, n_rows = db["items"], 0, 0
         for d in docs:
@@ -872,11 +877,11 @@ class App(tk.Tk):
         db["last"] = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
         db["day"] = today
         self.save_price_db(db)
-        what = "все документы" if not since or not db["incremental"] else f"новые документы с {since[:10]}"
+        what = "все документы" if not since else f"новые документы с {since[:10]}"
         return db, f"из 1С прочитаны {what}: {n_docs} шт."
 
-    def get_prices(self, need, force=False):
-        db, src = self.update_price_db(force)
+    def get_prices(self, need, force=False, only_cached=False):
+        db, src = self.update_price_db(force, only_cached)
         res = {k: db["items"][k][1] for k in need if k in db["items"]}
         self.price_src = (f"Закупочные цены: {src}; в базе цен {len(db['items'])} поз.; "
                           f"цена есть у {len(res)} из {len(need)} передаваемых позиций.")
@@ -1225,7 +1230,7 @@ class App(tk.Tk):
                                "ничего не создано. Поля строки: " +
                                ", ".join(sorted(od.props[sort_row])))
         stock = od.stock(s["src_key"])
-        prices = self.get_prices([l[0] for l in lines])   # дочитывает новые документы цен
+        prices = self.get_prices([l[0] for l in lines], only_cached=True)
         problems = []
         for key, pair, qty, name in lines:
             free = stock.get((key, s["src_key"]), [0.0, 0.0])[1]
