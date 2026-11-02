@@ -32,6 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(HERE, "settings.json")
 LOG_FILE = os.path.join(HERE, "move_bot.log")
 CACHE_FILE = os.path.join(HERE, "cache_1c.json")   # сохранённые номенклатура и описание базы
+TEMPLATE_FILE = os.path.join(HERE, "transfer_template.json")  # образец шапки передачи
 PRICE_CACHE = os.path.join(HERE, "prices_cache.json")  # закупочные цены, обновляются раз в день
 CACHE_DAYS = getattr(config, "CACHE_DAYS", 30)
 CACHE_VERSION = 2                                   # старые (неполные) файлы перезагружаются       # полная перезагрузка не чаще раза в N дней
@@ -1295,16 +1296,42 @@ class App(tk.Tk):
         return res
 
     def find_template(self):
-        """Последняя проведённая передача между этими же организациями — образец шапки."""
-        flt = (f"Организация_Key eq guid'{self.org_from[0]}' and Posted eq true "
+        """Последняя проведённая передача между этими же организациями — образец шапки
+        (договор, налогообложение НДС и т.п.). Сначала с отбором в 1С; если 1С отбор
+        не разрешает — читаем передачи целиком и выбираем сами; удачный образец
+        сохраняется в файл и используется, если 1С недоступна для чтения."""
+        od, org_from, org_to = self.od, self.org_from[0], self.org_to[0]
+        tpl = None
+        flt = (f"Организация_Key eq guid'{org_from}' and Posted eq true "
                f"and DeletionMark eq false")
-        if self.od.has(DOC_TRANSFER, "ОрганизацияПолучатель_Key"):
-            flt += f" and ОрганизацияПолучатель_Key eq guid'{self.org_to[0]}'"
+        if od.has(DOC_TRANSFER, "ОрганизацияПолучатель_Key"):
+            flt += f" and ОрганизацияПолучатель_Key eq guid'{org_to}'"
         try:
-            rows = self.od.get(DOC_TRANSFER, {"$filter": flt, "$orderby": "Date desc", "$top": "1"})
-            return rows[0] if rows else None
+            rows = od.get(DOC_TRANSFER, {"$filter": flt, "$orderby": "Date desc", "$top": "1"})
+            tpl = rows[0] if rows else None
         except Exception as e:
-            log("Образец передачи не получен: " + str(e))
+            log("Образец передачи с отбором не получен: " + str(e)[:200])
+            try:
+                rows = od.get_all(DOC_TRANSFER, page=200)
+                rows = [r for r in rows if r.get("Posted") and not r.get("DeletionMark")
+                        and r.get("Организация_Key") == org_from
+                        and r.get("ОрганизацияПолучатель_Key", org_to) == org_to]
+                rows.sort(key=lambda r: r.get("Date") or "")
+                tpl = rows[-1] if rows else None
+            except Exception as e2:
+                log("Образец передачи не получен: " + str(e2)[:200])
+        if tpl:
+            try:
+                with open(TEMPLATE_FILE, "w", encoding="utf-8") as f:
+                    json.dump(tpl, f, ensure_ascii=False)
+            except Exception:
+                pass
+            return tpl
+        try:
+            with open(TEMPLATE_FILE, encoding="utf-8") as f:
+                log("Образец передачи взят из сохранённого файла")
+                return json.load(f)
+        except Exception:
             return None
 
     def move_work(self, lines):
@@ -1391,6 +1418,9 @@ class App(tk.Tk):
             head["СкладПолучатель_Key"] = s["dst_key"]
         if not tpl:
             head.setdefault("ЦенаВключаетНДС", False)
+        if not head.get("НалогообложениеНДС"):
+            # ИП-отправитель не плательщик НДС (АУСН) — продажа не облагается НДС
+            head["НалогообложениеНДС"] = getattr(config, "VAT_TAXATION", "ПродажаНеОблагаетсяНДС")
         row_tpl = {}
         if tpl and tpl.get("Товары"):
             row_tpl = {k: v for k, v in tpl["Товары"][0].items() if k in ROW_COPY}
