@@ -5,3 +5,8 @@ setup_odata_move.py
 setup_odata_move.bat
 config.example.py
 mapping.csv
+web.py
+web_page.html
+server_run.bat
+install_server.bat
+install_server.ps1

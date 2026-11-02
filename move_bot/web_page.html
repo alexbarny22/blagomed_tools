@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Передача в магазин (МГ)</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1d2330; --mute:#6b7280; --line:#e3e6ea;
+          --acc:#2563eb; --ok:#e7f6ec; --bad:#fde8e8; --warn:#fff6db; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 "Segoe UI", Arial, sans-serif; background:var(--bg); color:var(--ink); }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px; background:var(--card);
+           border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; flex-wrap:wrap; }
+  h1 { font-size:17px; margin:0; }
+  .tabs button { border:0; background:none; padding:6px 12px; border-radius:6px; cursor:pointer; font:inherit; color:var(--mute); }
+  .tabs button.on { background:#eef2ff; color:var(--acc); font-weight:600; }
+  #status { margin-left:auto; color:var(--mute); }
+  #status.busy::before { content:""; display:inline-block; width:9px; height:9px; margin-right:6px;
+     border:2px solid var(--acc); border-right-color:transparent; border-radius:50%; animation:sp 0.8s linear infinite; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+  main { padding:16px 20px; max-width:1300px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  select, input[type=text], input[type=number] { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  input[type=text] { flex:1; min-width:200px; }
+  button.btn { font:inherit; padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.btn:hover { background:#f3f4f6; }
+  button.main { background:var(--acc); color:#fff; border-color:var(--acc); }
+  button.main:hover { background:#1d4ed8; }
+  button:disabled { opacity:.5; cursor:default; }
+  .mute { color:var(--mute); }
+  table { width:100%; border-collapse:collapse; }
+  th, td { padding:6px 8px; border-bottom:1px solid var(--line); text-align:left; }
+  th { position:sticky; top:58px; background:#fafbfc; font-weight:600; font-size:13px; z-index:2; }
+  td.n, th.n { text-align:right; white-space:nowrap; }
+  tr.sel { background:var(--ok); }
+  tr.over { background:var(--bad); }
+  tr.off { color:#a0a4ab; }
+  td input[type=number] { width:80px; text-align:right; }
+  .wrap { overflow:auto; max-height:62vh; }
+  #result { white-space:pre-wrap; padding:10px 12px; border-radius:8px; display:none; }
+  #result.ok { background:var(--ok); display:block; }
+  #result.bad { background:var(--bad); display:block; }
+  pre { margin:0; white-space:pre-wrap; font:12px/1.4 Consolas, monospace; max-height:50vh; overflow:auto; }
+  #msgs { max-height:180px; }
+  .hidden { display:none; }
+  .err { background:var(--bad); padding:10px 12px; border-radius:8px; margin-bottom:12px; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Передача в магазин (МГ)</h1>
+  <div class="tabs"><button id="t1" class="on" onclick="tab(1)">Передача</button><button id="t2" onclick="tab(2)">Управление</button></div>
+  <span id="status">…</span>
+</header>
+<main>
+  <div id="err" class="err hidden"></div>
+
+  <section id="p1">
+    <div class="card">
+      <div class="row">
+        <span>Откуда: <b id="src">—</b></span>
+        <span>→ Куда:</span>
+        <select id="dst" onchange="setDst()"></select>
+        <span class="mute" id="org"></span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="q" placeholder="Поиск по названию…" oninput="render()">
+        <label><input type="checkbox" id="onlySel" onchange="render()"> только отмеченные</label>
+        <button class="btn" onclick="post('/api/refresh',{dst:val('dst')})">Обновить остатки</button>
+        <button class="btn" onclick="post('/api/refresh',{dst:val('dst'),force_prices:true})">Обновить цены</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="wrap"><table>
+        <thead><tr><th style="width:34px"></th><th>Номенклатура (общий склад)</th>
+          <th class="n">Свободно на общем</th><th class="n">В магазине (МГ)</th>
+          <th class="n">Закуп. цена</th><th class="n">Передать</th></tr></thead>
+        <tbody id="tb"></tbody>
+      </table></div>
+      <div class="row" style="margin-top:12px">
+        <span id="sum" class="mute"></span>
+        <button class="btn" onclick="sel={};render()">Снять отметки</button>
+        <button class="btn main" id="go" style="margin-left:auto" onclick="doMove()">Передать отмеченное</button>
+      </div>
+      <div id="result" style="margin-top:12px"></div>
+    </div>
+  </section>
+
+  <section id="p2" class="hidden">
+    <div class="card">
+      <div class="row">
+        <span>Версия: <b id="ver">—</b></span>
+        <button class="btn" onclick="admin('/api/restart','Перезапустить бота? Он проверит обновления на GitHub и запустится снова (около минуты).')">Обновить и перезапустить</button>
+        <button class="btn" onclick="admin('/api/reinstall','Переустановить бота? Все файлы будут заново скачаны с GitHub. Настройки, сопоставление и кэш сохранятся.')">Переустановить</button>
+        <button class="btn" onclick="if(confirm('Загрузить номенклатуру из 1С заново? Займёт пару минут.'))post('/api/reload_noms',{})">Обновить номенклатуру</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row" style="margin-bottom:8px"><b>Журнал бота</b><button class="btn" onclick="loadLog()">Обновить</button></div>
+      <pre id="log">…</pre>
+    </div>
+  </section>
+
+  <div class="card"><b>Сообщения</b><pre id="msgs" style="margin-top:6px"></pre></div>
+</main>
+
+<script>
+let S = {items:[]}, sel = {}, itemsSig = "", curTab = 1;
+const $ = id => document.getElementById(id);
+const val = id => $(id).value;
+const fmt = v => v==null ? "—" : (Math.abs(v-Math.round(v))<1e-9 ? String(Math.round(v)) : v.toFixed(3).replace(/0+$/,"").replace(/\.$/,""));
+const money = v => v==null ? "—" : v.toLocaleString("ru-RU",{minimumFractionDigits:2,maximumFractionDigits:2});
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function tab(n){ curTab=n; $("p1").classList.toggle("hidden",n!==1); $("p2").classList.toggle("hidden",n!==2);
+  $("t1").classList.toggle("on",n===1); $("t2").classList.toggle("on",n===2); if(n===2) loadLog(); }
+
+async function post(url, body){
+  const r = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
+  const j = await r.json().catch(()=>({}));
+  if (j.started===false) alert("Бот сейчас занят — дождитесь окончания операции.");
+  if (j.ok===false && j.msg) alert(j.msg);
+  poll(); return j;
+}
+async function setDst(){ await post("/api/dst",{dst:val("dst")}); }
+async function admin(url, q){
+  if(!confirm(q)) return;
+  const j = await post(url,{});
+  if (j.ok) { $("status").textContent = "Перезапуск… страница обновится сама"; setTimeout(()=>location.reload(), 20000); }
+}
+async function loadLog(){ const r = await fetch("/api/log"); $("log").textContent = await r.text(); $("log").scrollTop = 1e9; }
+
+function render(){
+  const q = val("q").toLowerCase().replace(/ё/g,"е"), only = $("onlySel").checked;
+  let html = "";
+  for (const it of S.items){
+    const name = it.name.toLowerCase().replace(/ё/g,"е");
+    if (q && !name.includes(q)) continue;
+    const qty = sel[it.key] || 0;
+    if (only && !qty) continue;
+    const off = !it.price;
+    const cls = off ? "off" : (qty ? (qty > it.free + 1e-9 ? "over" : "sel") : "");
+    html += `<tr class="${cls}"><td>${off ? "—" : `<input type="checkbox" ${qty?"checked":""} onchange="tog('${it.key}',this.checked)">`}</td>
+      <td>${esc(it.name)}${off ? ' <span class="mute">⚠ нет закуп. цены</span>' : ""}</td>
+      <td class="n">${fmt(it.free)}</td><td class="n">${fmt(it.store)}</td><td class="n">${money(it.price)}</td>
+      <td class="n">${off ? "" : `<input type="number" min="0" step="1" value="${qty||""}" onchange="setQty('${it.key}',this.value)">`}</td></tr>`;
+  }
+  $("tb").innerHTML = html || `<tr><td colspan="6" class="mute">${S.ready ? "Нет позиций" : "Загрузка…"}</td></tr>`;
+  let n=0, cnt=0, total=0;
+  for (const it of S.items){ const q2 = sel[it.key]||0; if(q2){ n++; cnt+=q2; total+=q2*(it.price||0);} }
+  $("sum").textContent = `Отмечено: ${n} поз., ${fmt(cnt)} шт., на ${money(total)} ₽`;
+}
+function tog(k,on){ if(on){ sel[k]=sel[k]||1; } else delete sel[k]; render(); }
+function setQty(k,v){ v=parseFloat(String(v).replace(",",".")); if(v>0) sel[k]=v; else delete sel[k]; render(); }
+
+async function doMove(){
+  const byKey = Object.fromEntries(S.items.map(i=>[i.key,i]));
+  const lines = Object.entries(sel).filter(([k])=>byKey[k]).map(([k,q])=>({key:k,qty:q}));
+  if(!lines.length){ alert("Ничего не отмечено."); return; }
+  const over = lines.filter(l=>l.qty>byKey[l.key].free+1e-9).map(l=>byKey[l.key].name);
+  if(over.length){ alert("Больше свободного остатка:\n"+over.join("\n")); return; }
+  const total = lines.reduce((s,l)=>s+l.qty*byKey[l.key].price,0);
+  const dstName = $("dst").selectedOptions[0]?.text || "";
+  if(!confirm(`Пересортировать ${lines.length} поз. в (МГ) и передать на ${money(total)} ₽\n${S.org}\n${S.src} → ${dstName}\n\nВсе документы будут проведены.`)) return;
+  $("result").className=""; S.result=null;
+  const j = await post("/api/move",{dst:val("dst"),lines});
+  if (j.started) sel = {};
+}
+
+async function poll(){
+  try{
+    const r = await fetch("/api/state"); S = await r.json();
+  }catch(e){ $("status").textContent = "Нет связи с ботом (перезапускается?)"; return; }
+  $("status").textContent = S.status; $("status").classList.toggle("busy", S.busy);
+  $("go").disabled = S.busy || !S.ready;
+  $("ver").textContent = S.version; $("src").textContent = S.src || "—"; $("org").textContent = S.org ? "("+S.org+")" : "";
+  const ds = $("dst");
+  const opts = S.stores.map(s=>`<option value="${s.key}" ${s.key===S.dst?"selected":""}>${esc(s.name)}</option>`).join("");
+  if (ds.dataset.sig !== opts){ ds.innerHTML = opts; ds.dataset.sig = opts; }
+  if (document.activeElement !== ds) ds.value = S.dst || "";
+  const sig = JSON.stringify(S.items);
+  if (sig !== itemsSig && !(document.activeElement && document.activeElement.type==="number")){ itemsSig = sig; render(); }
+  $("msgs").textContent = S.messages.join("\n"); $("msgs").scrollTop = 1e9;
+  if (S.result){ $("result").textContent = S.result.text; $("result").className = S.result.ok ? "ok" : "bad"; }
+  $("err").classList.toggle("hidden", !(S.error && !S.ready)); $("err").textContent = S.error ? "Ошибка: "+S.error : "";
+}
+poll(); setInterval(poll, 2000);
+</script>
+</body>
+</html>
