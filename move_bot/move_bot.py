@@ -351,7 +351,22 @@ class OData:
                     rows = self.get_by_field(rt, "Номенклатура_Key", keys, pt_flt)
                 except RuntimeError as e:
                     log(f"Цены: {rt} по списку позиций не прочитан — {e}")
-            if rows is None:   # общий способ — вся таблица
+            if rows is None and keys is not None and reg in self.sets:
+                # регистр доступен только наборами записей — отбираем наборы, где есть наши позиции
+                rows = []
+                try:
+                    for i in range(0, len(keys), 10):
+                        cond = " or ".join(f"d/Номенклатура_Key eq guid'{k}'" for k in keys[i:i + 10])
+                        rows += self.get(reg, {"$filter": f"RecordSet/any(d: {cond})"})
+                        if self.progress:
+                            self.progress(f"Цены: проверено {min(i + 10, len(keys))} из {len(keys)} позиций…")
+                except RuntimeError as e:
+                    log(f"Цены: отбор наборов {reg} не поддерживается — {e}")
+                    rows = None
+                if rows is None:
+                    info.append(f"{reg.split('_', 1)[1]}: пропущен (только документы)")
+                    continue
+            if rows is None and keys is None:   # общий способ — вся таблица
                 for path, params, page in ((rt, {"$filter": pt_flt}, 2000),
                                            (reg + "/SliceLast", None, 2000),
                                            (reg, None, 200)):
