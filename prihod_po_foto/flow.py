@@ -46,7 +46,9 @@ MODELS = [m for m in config.MODELS if m.get("enabled", True) and m.get("api_key"
 HISTORY = os.path.join(HERE, "history")
 
 B_TABLE, B_REFRESH, B_RESET = "📋 Таблица сопоставлений", "🔄 Обновить товары из 1С", "✖ Начать заново"
-MENU_KB = [[(B_TABLE, "m:table")], [(B_REFRESH, "m:refresh"), (B_RESET, "m:reset")]]
+B_RESTART = "⚙ Перезапустить бота"
+MENU_KB = [[(B_TABLE, "m:table")], [(B_REFRESH, "m:refresh"), (B_RESET, "m:reset")], [(B_RESTART, "m:restart")]]
+RESTART_WORDS = {"/restart", "перезапуск", "перезапустить", "перезагрузка", "перезагрузить", "рестарт"}
 CANCEL = [("✖ Отменить приход", "cancel")]          # ряд с отменой — под каждым шагом прихода
 STOP_WORDS = {"отмена", "отменить", "стоп", "сброс", "cancel", "/cancel", "/stop", "выход"}
 GO_WORDS = {"далее", "дальше", "продолжить", "продолжай", "next", "/next"}
@@ -132,7 +134,8 @@ async def on_start(uid, chat):
                         f"{ui.file_hint}\n\n"
                         f"{B_TABLE} — бот пришлёт таблицу; исправьте её в Excel и отправьте файл обратно\n"
                         f"{B_REFRESH} — если в 1С завели новый товар\n"
-                        f"{B_RESET} — бросить текущую накладную\n\n"
+                        f"{B_RESET} — бросить текущую накладную\n"
+                        f"{B_RESTART} — если бот завис или нужно срочно обновить\n\n"
                         "Отменить приход можно в любой момент: кнопка «✖ Отменить приход» или слово «отмена».",
                         menu=True)
 
@@ -496,6 +499,9 @@ async def on_text(uid, chat, text):
     if t in (B_RESET,) or t.lower().strip(" .!") in STOP_WORDS:
         await cmd_cancel(uid, chat)
         return
+    if t == B_RESTART or t.lower().strip(" .!") in RESTART_WORDS:
+        await ask_restart(uid, chat)
+        return
     if t in ("/sopost", B_TABLE):
         await cmd_table(uid, chat)
         return
@@ -566,6 +572,20 @@ async def on_callback(uid, chat, ref, data, cb):
     s = st(uid)
     if not allowed(uid):
         await ui.toast(cb)
+        return
+    if data == "m:restart":
+        await ui.toast(cb)
+        await ask_restart(uid, chat)
+        return
+    if data == "restart_yes":
+        await ui.toast(cb, "Перезапускаю…")
+        await ui.drop_kb(cb)
+        await restart(uid, chat)
+        return
+    if data == "restart_no":
+        await ui.toast(cb)
+        await ui.drop_kb(cb)
+        await ui.send(chat, "Хорошо, бот работает дальше.")
         return
     if data.startswith("m:"):
         await ui.toast(cb)
@@ -859,6 +879,36 @@ async def load_items_bg():
 
 
 STARTED = time.time()
+
+
+async def ask_restart(uid, chat):
+    others = any((v.get("photos") or v.get("rec")) for u, v in S.items() if u != uid)
+    mine = bool(st(uid).get("photos") or st(uid).get("rec"))
+    warn = ""
+    if mine:
+        warn += "\n⚠️ Ваш начатый приход сбросится (в 1С ничего не записано)."
+    if others:
+        warn += "\n⚠️ Сейчас кто-то ещё проводит приход — он прервётся."
+    await ui.send(chat, "Перезапустить бота? Он проверит обновления на GitHub, перезапустится и "
+                        "через минуту снова будет на связи." + warn,
+                  [[("✅ Да, перезапустить", "restart_yes"), ("✖ Нет", "restart_no")]])
+
+
+async def restart(uid, chat):
+    """Проверить обновления и выйти — пульт BotPanel (или start.bat) запустит бота заново."""
+    note = "обновлений нет"
+    try:
+        import update
+        if await asyncio.to_thread(update.main):
+            note = f"обновился до версии {update.local_version()}"
+    except Exception as ex:
+        note = f"обновления не проверены: {ex}"
+    log.info("Перезапуск по кнопке (%s)", note)
+    await ui.send(chat, f"🔄 Перезапускаюсь ({note}). Через минуту напишите «/start» или пришлите фото.")
+    await asyncio.sleep(1.5)
+    # пульт BotPanel: быстрый выход с кодом 0 он считает «разовым скриптом» — поэтому код 3,
+    # если бот проработал меньше 30 минут; пульт перезапустит его как после сбоя
+    os._exit(0 if time.time() - STARTED > 1800 else 3)
 
 
 def busy():

@@ -20,7 +20,8 @@ log = flow.log
 
 # постоянные кнопки внизу экрана (в Telegram они есть, в MAX — нет)
 MENU = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=flow.B_TABLE)],
-                                     [KeyboardButton(text=flow.B_REFRESH), KeyboardButton(text=flow.B_RESET)]],
+                                     [KeyboardButton(text=flow.B_REFRESH), KeyboardButton(text=flow.B_RESET)],
+                                     [KeyboardButton(text=flow.B_RESTART)]],
                            resize_keyboard=True, is_persistent=True,
                            input_field_placeholder="Пришлите фото накладной")
 
