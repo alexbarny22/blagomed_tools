@@ -47,6 +47,9 @@ HISTORY = os.path.join(HERE, "history")
 
 B_TABLE, B_REFRESH, B_RESET = "📋 Таблица сопоставлений", "🔄 Обновить товары из 1С", "✖ Начать заново"
 MENU_KB = [[(B_TABLE, "m:table")], [(B_REFRESH, "m:refresh"), (B_RESET, "m:reset")]]
+CANCEL = [("✖ Отменить приход", "cancel")]          # ряд с отменой — под каждым шагом прихода
+STOP_WORDS = {"отмена", "отменить", "стоп", "сброс", "cancel", "/cancel", "/stop", "выход"}
+GO_WORDS = {"далее", "дальше", "продолжить", "продолжай", "next", "/next"}
 
 S = {}   # user_id -> состояние сеанса
 
@@ -93,6 +96,24 @@ async def send_long(chat, text, kb=None, menu=False):
     return ref
 
 
+# ------------------------------------------------------------------ защита от «тихих» ошибок
+def run(coro, chat=None):
+    """Запустить обработчик в фоне. Если он упал — записать в лог и показать человеку, что делать дальше."""
+    async def guard():
+        try:
+            await coro
+        except Exception as ex:
+            log.exception("Ошибка в обработчике")
+            if chat is not None:
+                try:
+                    await ui.send(chat, f"⚠️ Что-то пошло не так: {e(str(ex)[:300])}\n\n"
+                                        "Можно продолжить с того же места или отменить приход.",
+                                  [[("▶ Продолжить", "next")], CANCEL])
+                except Exception:
+                    log.exception("Не удалось сообщить об ошибке")
+    return asyncio.create_task(guard())
+
+
 # ------------------------------------------------------------------ команды и меню
 async def on_start(uid, chat):
     if not allowed(uid):
@@ -104,12 +125,14 @@ async def on_start(uid, chat):
                         f"{ui.file_hint}\n\n"
                         f"{B_TABLE} — бот пришлёт таблицу; исправьте её в Excel и отправьте файл обратно\n"
                         f"{B_REFRESH} — если в 1С завели новый товар\n"
-                        f"{B_RESET} — бросить текущую накладную", menu=True)
+                        f"{B_RESET} — бросить текущую накладную\n\n"
+                        "Отменить приход можно в любой момент: кнопка «✖ Отменить приход» или слово «отмена».",
+                        menu=True)
 
 
 async def cmd_cancel(uid, chat):
     reset(uid)
-    await ui.send(chat, "Сброшено. Присылайте фото новой накладной.", menu=True)
+    await ui.send(chat, "✖ Приход отменён, в 1С ничего не записано. Присылайте фото новой накладной.", menu=True)
 
 
 async def cmd_table(uid, chat):
@@ -160,7 +183,7 @@ async def show_photo_status(uid, chat):
         except Exception:
             pass
     s["status"] = await ui.send(chat, f"Фото получено: {len(s['photos'])}. Если это все страницы — жмите «Распознать».",
-                                [[("🔍 Распознать", "go"), ("✖ Сбросить", "cancel")]])
+                                [[("🔍 Распознать", "go")], CANCEL])
 
 
 async def on_image(uid, chat, data):
@@ -340,6 +363,7 @@ async def ask_line(uid, chat, i, cands=None):
     rows = [[((f"🤖 {it['name'][:55]}" if it.get("ai") else f"{it['name'][:55]} ({sc}%)"), f"pick:{i}:{k}")]
             for k, (it, sc) in enumerate(cands)]
     rows.append([("🔎 Найти по слову", f"find:{i}"), ("⏭ Не приходовать", f"skip:{i}")])
+    rows.append(CANCEL)
     ln = L["line"]
     art = f"\nКод поставщика: {e(ln['article'])}" if ln.get("article") else ""
     await ui.send(
@@ -460,7 +484,7 @@ async def on_text(uid, chat, text):
     if not allowed(uid):
         await on_start(uid, chat)
         return
-    if t in ("/cancel", B_RESET):
+    if t in (B_RESET,) or t.lower().strip(" .!") in STOP_WORDS:
         await cmd_cancel(uid, chat)
         return
     if t in ("/sopost", B_TABLE):
@@ -470,6 +494,9 @@ async def on_text(uid, chat, text):
         await cmd_refresh(uid, chat)
         return
     s = st(uid)
+    if t.lower().strip(" .!") in GO_WORDS:
+        await resume(uid, chat)
+        return
     if s.get("await_num"):
         i, field = s["await_num"]
         val = rec_mod.num(t)
@@ -544,9 +571,9 @@ async def on_callback(uid, chat, ref, data, cb):
         return
     if data == "cancel":
         reset(uid)
-        await ui.toast(cb)
+        await ui.toast(cb, "Приход отменён")
         await ui.drop_kb(cb)
-        await ui.send(chat, "Отменено. Присылайте фото новой накладной.", menu=True)
+        await ui.send(chat, "✖ Приход отменён, в 1С ничего не записано. Присылайте фото новой накладной.", menu=True)
         return
     if data == "sup_retry":
         await ui.toast(cb)
@@ -567,7 +594,10 @@ async def on_callback(uid, chat, ref, data, cb):
             await ui.toast(cb, "Записал в таблицу")
         except Exception as ex:
             await ui.toast(cb, f"Не записалось в таблицу: {ex}"[:190], True)
-        await ui.edit(chat, ref, f"✅ Строка {L['line']['n']}: {e(L['line']['name'])}\n→ <b>{e(it['name'])}</b>")
+        try:
+            await ui.edit(chat, ref, f"✅ Строка {L['line']['n']}: {e(L['line']['name'])}\n→ <b>{e(it['name'])}</b>")
+        except Exception as ex:
+            log.warning("Не удалось изменить сообщение: %s", ex)
         await next_step(uid, chat)
         return
     if data.startswith("skip:"):
@@ -577,13 +607,21 @@ async def on_callback(uid, chat, ref, data, cb):
             return
         s["lines"][i]["skip"] = True
         await ui.toast(cb)
-        await ui.edit(chat, ref, f"⏭ Строка {s['lines'][i]['line']['n']} не будет оприходована.")
+        try:
+            await ui.edit(chat, ref, f"⏭ Строка {s['lines'][i]['line']['n']} не будет оприходована.")
+        except Exception as ex:
+            log.warning("Не удалось изменить сообщение: %s", ex)
         await next_step(uid, chat)
         return
     if data.startswith("find:"):
         s["search_for"] = int(data.split(":")[1])
         await ui.toast(cb)
-        await ui.send(chat, "Напишите часть названия товара, как он называется у нас в 1С:")
+        await ui.send(chat, "Напишите часть названия товара, как он называется у нас в 1С:", [CANCEL])
+        return
+    if data == "next":
+        await ui.toast(cb)
+        await ui.drop_kb(cb)
+        await resume(uid, chat)
         return
     if data == "reorders":
         await reorders(uid, chat, cb)
@@ -595,6 +633,19 @@ async def on_callback(uid, chat, ref, data, cb):
         await post(uid, chat, ref, data, cb)
         return
     await ui.toast(cb, "Устарело", True)
+
+
+async def resume(uid, chat):
+    """Продолжить приход с того места, где остановились."""
+    s = st(uid)
+    if s.get("lines"):
+        await next_step(uid, chat)
+    elif s.get("rec"):
+        await prepare(uid, chat)
+    elif s.get("photos"):
+        await ui.send(chat, f"Фото получено: {len(s['photos'])}.", [[("🔍 Распознать", "go")], CANCEL])
+    else:
+        await ui.send(chat, "Сейчас нет начатого прихода. Пришлите фото накладной.", menu=True)
 
 
 async def reorders(uid, chat, cb):
@@ -623,6 +674,7 @@ async def fix(uid, chat, ref, data, cb):
         return
     await ui.toast(cb)
     if data == "fixback":
+        s.pop("await_num", None)
         await ui.delete(chat, ref)
         return
     if data == "fix":
@@ -630,6 +682,7 @@ async def fix(uid, chat, ref, data, cb):
         rows = [[((f"{'⚠️' if L['line']['n'] in bad else ('⏭' if L['skip'] else '')} {L['line']['n']}. "
                    f"{L['line']['name'][:40]}").strip(), f"fixl:{i}")] for i, L in enumerate(s["lines"])]
         rows.append([("↩ Назад", "fixback")])
+        rows.append(CANCEL)
         await ui.send(chat, "Какую строку исправить?", rows)
         return
     if data.startswith("fixl:"):
@@ -644,7 +697,7 @@ async def fix(uid, chat, ref, data, cb):
                       [[("Количество", f"fixf:{i}:qty"), ("Цена", f"fixf:{i}:price"), ("Сумма", f"fixf:{i}:sum")],
                        [("🔁 Другой товар", f"fixf:{i}:item")],
                        [("⏭ Не приходовать" if not L["skip"] else "✅ Вернуть в приход", f"fixf:{i}:skip")],
-                       [("↩ Назад", "fixback")]])
+                       [("↩ Назад", "fixback")], CANCEL])
         return
     _, i, field = data.split(":")
     i = int(i)
@@ -665,7 +718,8 @@ async def fix(uid, chat, ref, data, cb):
         await ask_line(uid, chat, i)
     else:
         s["await_num"] = (i, field)
-        await ui.edit(chat, ref, f"Напишите {FIELDS[field]} для строки {L['line']['n']} — только число.")
+        await ui.edit(chat, ref, f"Напишите {FIELDS[field]} для строки {L['line']['n']} — только число.",
+                      [[("↩ Назад", "fixback")], CANCEL])
 
 
 # ------------------------------------------------------------------ проведение

@@ -86,12 +86,13 @@ async def on_file(m: Message):
 
 @dp.message(F.text)
 async def on_text(m: Message):
-    asyncio.create_task(flow.on_text(m.from_user.id, m.chat.id, m.text))
+    flow.run(flow.on_text(m.from_user.id, m.chat.id, m.text), m.chat.id)
 
 
 @dp.callback_query()
 async def on_callback(c: CallbackQuery):
-    asyncio.create_task(flow.on_callback(c.from_user.id, c.message.chat.id, c.message.message_id, c.data or "", c))
+    flow.run(flow.on_callback(c.from_user.id, c.message.chat.id, c.message.message_id, c.data or "", c),
+             c.message.chat.id)
 
 
 async def main():

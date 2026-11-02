@@ -98,7 +98,7 @@ async def on_message(event: MessageCreated):
         name = (getattr(a, "filename", None) or "").lower()
         if kind == "file" and name.endswith(".xlsx"):
             data = await asyncio.to_thread(_download, url)
-            asyncio.create_task(flow.on_xlsx(uid, chat, data))
+            flow.run(flow.on_xlsx(uid, chat, data), chat)
         elif kind == "image" or (kind == "file" and name.endswith((".jpg", ".jpeg", ".png", ".heic", ".webp"))):
             try:
                 data = await asyncio.to_thread(_download, url)
@@ -109,7 +109,7 @@ async def on_message(event: MessageCreated):
         elif kind == "file":
             await flow.ui.send(chat, "Принимаю фото накладных (jpg, png, heic) и таблицу сопоставлений (.xlsx).")
     if m.body.text and not atts:
-        asyncio.create_task(flow.on_text(uid, chat, m.body.text))
+        flow.run(flow.on_text(uid, chat, m.body.text), chat)
 
 
 @dp.message_callback()
@@ -117,7 +117,8 @@ async def on_callback(event: MessageCallback):
     uid = event.callback.user.user_id
     chat = event.message.recipient.chat_id if event.message else None
     ref = event.message.body.mid if event.message and event.message.body else None
-    asyncio.create_task(flow.on_callback(uid, chat, ref, event.callback.payload or "", event))
+    flow.log.info("Кнопка %s от %s", event.callback.payload, uid)
+    flow.run(flow.on_callback(uid, chat, ref, event.callback.payload or "", event), chat)
 
 
 async def main():
