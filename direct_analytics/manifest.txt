@@ -1,0 +1,10 @@
+# файлы, которые обновляются автоматически
+direct_report.py
+xlsx_writer.py
+dashboard_template.html
+apply_template.php
+update.py
+config.example.py
+run.sh
+demo.bat
+README.md

@@ -17,3 +17,10 @@ cost_history.json
 blagomed_cost/*.xlsx
 *.pdf
 prices_cache.json
+# direct_analytics — рабочие файлы и токен
+direct_analytics/report/
+direct_analytics/data_cache.json
+direct_analytics/proposals.json
+direct_analytics/actions_log.json
+direct_analytics/apply_settings.json
+direct_analytics/.htpasswd_direct

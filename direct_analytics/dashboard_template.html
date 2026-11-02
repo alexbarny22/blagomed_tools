@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Яндекс Директ — Благомед</title>
+<style>
+:root{
+  color-scheme:light;
+  --bg:#f4f3f0; --surface:#fcfcfb; --surface-2:#efeee9; --line:#e2e1db;
+  --text:#0b0b0b; --text-2:#52514e; --text-3:#7c7b76;
+  --series-1:#2a78d6; --accent:#2a78d6; --accent-ink:#ffffff;
+  --good:#0f7b3f; --good-bg:#e4f3ea; --warn:#9a6200; --warn-bg:#fbf0d9;
+  --serious:#b4501c; --serious-bg:#fbe8de; --crit:#b42323; --crit-bg:#fbe3e3;
+  --radius:10px;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#121211; --surface:#1a1a19; --surface-2:#242422; --line:#33332f;
+    --text:#f0efec; --text-2:#c3c2b7; --text-3:#94938c;
+    --series-1:#3987e5; --accent:#3987e5; --accent-ink:#ffffff;
+    --good:#5cc98a; --good-bg:#16301f; --warn:#e8b54d; --warn-bg:#33270f;
+    --serious:#ef8f5c; --serious-bg:#3a2015; --crit:#f07070; --crit-bg:#3a1717;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#121211; --surface:#1a1a19; --surface-2:#242422; --line:#33332f;
+  --text:#f0efec; --text-2:#c3c2b7; --text-3:#94938c;
+  --series-1:#3987e5; --accent:#3987e5; --accent-ink:#ffffff;
+  --good:#5cc98a; --good-bg:#16301f; --warn:#e8b54d; --warn-bg:#33270f;
+  --serious:#ef8f5c; --serious-bg:#3a2015; --crit:#f07070; --crit-bg:#3a1717;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+.wrap{max-width:1240px;margin:0 auto;padding:20px 16px 60px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;justify-content:space-between;margin-bottom:16px}
+h1{font-size:22px;margin:0 0 2px;letter-spacing:-.01em}
+h2{font-size:17px;margin:0 0 4px}
+.sub{color:var(--text-2);font-size:13px}
+.muted{color:var(--text-3)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:16px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+.seg button{border:0;background:none;padding:6px 12px;color:var(--text-2);font:inherit;cursor:pointer}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--text);color:var(--surface)}
+a.btn,button.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--surface);color:var(--text);
+  padding:6px 12px;border-radius:8px;font:inherit;text-decoration:none;cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+button:disabled{opacity:.5;cursor:default}
+.banner{border-radius:8px;padding:10px 12px;margin-bottom:8px;display:flex;gap:8px;align-items:flex-start}
+.banner b{white-space:nowrap}
+.st-critical{background:var(--crit-bg);color:var(--crit)}
+.st-serious{background:var(--serious-bg);color:var(--serious)}
+.st-warning{background:var(--warn-bg);color:var(--warn)}
+.st-good{background:var(--good-bg);color:var(--good)}
+.st-info{background:var(--surface-2);color:var(--text-2)}
+.banner span{color:var(--text)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:10px;margin-bottom:16px}
+.kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px}
+.kpi .l{color:var(--text-2);font-size:12px}
+.kpi .v{font-size:22px;font-weight:650;margin:2px 0;font-variant-numeric:tabular-nums}
+.kpi .d{font-size:12px;font-variant-numeric:tabular-nums}
+.up-good,.down-good{color:var(--good)} .up-bad,.down-bad{color:var(--crit)} .flat{color:var(--text-3)}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:820px){.charts{grid-template-columns:1fr}}
+.chart{position:relative}
+.chart svg{display:block;width:100%;height:auto}
+.tip{position:absolute;pointer-events:none;background:var(--text);color:var(--surface);padding:6px 8px;border-radius:6px;font-size:12px;
+  white-space:nowrap;transform:translate(-50%,-110%);display:none;z-index:2}
+.tblwrap{overflow-x:auto;margin:0 -4px}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:7px 8px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-weight:600;color:var(--text-2);font-size:12px;cursor:pointer;user-select:none;position:sticky;top:0;background:var(--surface)}
+th:first-child,td:first-child,td.l,th.l{text-align:left}
+td.wrap{white-space:normal;min-width:180px;text-align:left}
+tr:hover td{background:var(--surface-2)}
+.share{display:inline-block;height:6px;border-radius:3px;background:var(--series-1);vertical-align:middle;margin-left:6px}
+.tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:10px;background:var(--surface-2);color:var(--text-2)}
+.grp{margin-top:14px}
+.grp h3{font-size:14px;margin:0 0 6px;display:flex;gap:8px;align-items:center}
+.prop{display:grid;grid-template-columns:24px 1fr auto;gap:8px;padding:9px 6px;border-bottom:1px solid var(--line);align-items:start}
+.prop:hover{background:var(--surface-2)}
+.prop input{margin-top:3px;width:16px;height:16px}
+.prop .t{font-weight:600}
+.prop .r{color:var(--text-2);font-size:13px}
+.prop .s{text-align:right;font-size:13px;color:var(--text-2);font-variant-numeric:tabular-nums}
+.prop.applied{opacity:.6}
+.res{font-size:12px;margin-top:2px}
+.res.ok{color:var(--good)} .res.err{color:var(--crit)}
+.sticky{position:sticky;bottom:0;background:var(--surface);border-top:1px solid var(--line);margin:12px -16px -16px;padding:12px 16px;
+  border-radius:0 0 var(--radius) var(--radius);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+details summary{cursor:pointer;color:var(--text-2);margin:6px 0}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px}
+.tabs button{border:1px solid var(--line);background:var(--surface);color:var(--text-2);padding:5px 10px;border-radius:16px;font:inherit;cursor:pointer}
+.tabs button.on{background:var(--text);color:var(--surface);border-color:var(--text)}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--text);max-width:560px;width:calc(100% - 32px)}
+dialog::backdrop{background:rgba(0,0,0,.4)}
+dialog ul{max-height:50vh;overflow:auto;padding-left:18px}
+footer{color:var(--text-3);font-size:12px;margin-top:20px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div>
+    <h1>Яндекс Директ — Благомед</h1>
+    <div class="sub" id="sub"></div>
+  </div>
+  <div class="row">
+    <div class="seg" id="period"></div>
+    <div class="seg" id="net"></div>
+    <a class="btn" id="xls" href="#">⬇ Excel</a>
+  </div>
+</header>
+
+<div id="banners"></div>
+<div class="kpis" id="kpis"></div>
+
+<div class="charts">
+  <div class="card"><h2>Расход по дням, ₽</h2><div class="sub" id="c1s"></div><div class="chart" id="c1"></div></div>
+  <div class="card"><h2>Конверсии по дням</h2><div class="sub" id="c2s"></div><div class="chart" id="c2"></div></div>
+</div>
+
+<div class="card">
+  <h2>Кампании</h2>
+  <div class="sub" id="campsub"></div>
+  <div class="tblwrap"><table id="camps"></table></div>
+  <div id="excluded" class="sub" style="margin-top:8px"></div>
+</div>
+
+<div class="card" id="propcard">
+  <h2>Что улучшить — предложения бота</h2>
+  <div class="sub" id="propsub"></div>
+  <div id="props"></div>
+  <div class="sticky">
+    <button class="btn primary" id="applyBtn" disabled>Применить выбранные</button>
+    <span class="sub" id="selinfo">Ничего не выбрано</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Журнал изменений</h2>
+  <div class="sub">Всё, что бот поменял в Директе по вашей кнопке. Любое действие можно откатить.</div>
+  <div class="tblwrap"><table id="log"></table></div>
+</div>
+
+<div class="card">
+  <h2>Детали за <span id="adays"></span> дней</h2>
+  <div class="tabs" id="dtabs"></div>
+  <div class="tblwrap" style="max-height:520px;overflow:auto"><table id="detail"></table></div>
+</div>
+
+<footer id="foot"></footer>
+</div>
+
+<dialog id="dlg">
+  <h2>Применить изменения в Директе?</h2>
+  <div class="sub" id="dlgsub"></div>
+  <ul id="dlglist"></ul>
+  <div class="row" style="justify-content:flex-end">
+    <button class="btn" id="dlgNo">Отмена</button>
+    <button class="btn primary" id="dlgYes">Да, применить</button>
+  </div>
+</dialog>
+
+<script>
+const D = /*__DATA__*/null;
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt = (v, d=0) => (v==null||!isFinite(v)) ? '—' : v.toLocaleString('ru-RU',{minimumFractionDigits:d,maximumFractionDigits:d});
+const rub = (v, d=0) => (v==null||!isFinite(v)) ? '—' : fmt(v,d)+' ₽';
+const pct = v => (v==null||!isFinite(v)) ? '—' : fmt(v*100,2)+'%';
+const cname = id => (D.campaigns[id]||{}).name || id;
+const ss = {get(k){try{return localStorage.getItem('dir_'+k)}catch(e){return null}}, set(k,v){try{localStorage.setItem('dir_'+k,v)}catch(e){}}};
+
+let days = +(ss.get('days')||30), net = ss.get('net')||'all';
+const endD = new Date(D.end+'T00:00:00');
+const iso = d => d.toISOString().slice(0,10);
+function addDays(d,n){const x=new Date(d);x.setDate(x.getDate()+n);return x}
+function dmy(s){const [y,m,d]=s.split('-');return d+'.'+m}
+
+function sum(rows){const a={imp:0,clicks:0,cost:0,conv:0,rev:0};for(const r of rows){a.imp+=r[3];a.clicks+=r[4];a.cost+=r[5];a.conv+=r[6];a.rev+=r[7]}
+  a.ctr=a.imp?a.clicks/a.imp:null;a.cpc=a.clicks?a.cost/a.clicks:null;a.cpa=a.conv?a.cost/a.conv:null;a.cr=a.clicks?a.conv/a.clicks:null;return a}
+function rowsIn(from,to){return D.daily.filter(r=>r[0]>=from&&r[0]<=to&&(net==='all'||r[2]===net))}
+
+function header(){
+  $('#sub').innerHTML = `Данные по ${dmy(D.end)}.${D.end.slice(0,4)} · обновлено ${esc(D.generated)}${D.demo?' · <b>ДЕМО-данные</b>':''}`;
+  const P=$('#period'); P.innerHTML='';
+  for(const n of [7,14,30,90]){const b=document.createElement('button');b.textContent=n+' дн';b.className=n===days?'on':'';
+    b.onclick=()=>{days=n;ss.set('days',n);renderAll()};P.appendChild(b)}
+  const N=$('#net'); N.innerHTML='';
+  for(const [k,t] of [['all','Всё'],['S','Поиск'],['N','Сети']]){const b=document.createElement('button');b.textContent=t;b.className=k===net?'on':'';
+    b.onclick=()=>{net=k;ss.set('net',k);renderAll()};N.appendChild(b)}
+  const x=$('#xls'); if(D.excel){x.href=D.excel}else{x.style.display='none'}
+  $('#adays').textContent=D.analysis_days;
+}
+
+function banners(){
+  const B=$('#banners'); let h='';
+  const lab={critical:'Критично',serious:'Важно',warning:'Внимание',info:'Заметка'};
+  const ic={critical:'⛔',serious:'▲',warning:'!',info:'i'};
+  for(const e of D.errors) h+=`<div class="banner st-critical"><b>⛔ Ошибка</b><span>${esc(e)}</span></div>`;
+  for(const [s,t] of D.alerts) h+=`<div class="banner st-${s}"><b>${ic[s]} ${lab[s]}</b><span>${esc(t)}</span></div>`;
+  for(const t of D.notes) h+=`<div class="banner st-info"><b>i Заметка</b><span>${esc(t)}</span></div>`;
+  B.innerHTML=h;
+}
+
+function kpis(){
+  const to=iso(endD), from=iso(addDays(endD,-(days-1)));
+  const pto=iso(addDays(endD,-days)), pfrom=iso(addDays(endD,-(2*days-1)));
+  const cur=sum(rowsIn(from,to)), prev=sum(rowsIn(pfrom,pto));
+  const hasPrev = D.daily.some(r=>r[0]<=pto&&r[0]>=pfrom);
+  const items=[['Расход','cost',rub,0],['Показы','imp',fmt,0],['Клики','clicks',fmt,0],['CTR','ctr',pct,1],
+    ['Цена клика','cpc',v=>rub(v,2),-1],['Конверсии','conv',fmt,1],['Цена конверсии','cpa',rub,-1],['Конверсия сайта','cr',pct,1]];
+  if(cur.rev>0) items.push(['Доход (по Директу)','rev',rub,1]);
+  $('#kpis').innerHTML=items.map(([l,k,f,good])=>{
+    let d='<span class="flat">нет данных для сравнения</span>';
+    if(hasPrev&&prev[k]!=null&&prev[k]!==0&&cur[k]!=null){
+      const ch=(cur[k]-prev[k])/Math.abs(prev[k]);const arrow=ch>0?'▲':ch<0?'▼':'■';
+      const cls=Math.abs(ch)<0.02||good===0?'flat':((ch>0)===(good>0)?'up-good':'up-bad');
+      d=`<span class="${cls}">${arrow} ${fmt(Math.abs(ch*100),0)}%</span> <span class="muted">к прошлым ${days} дн</span>`}
+    return `<div class="kpi"><div class="l">${l}</div><div class="v">${f(cur[k])}</div><div class="d">${d}</div></div>`}).join('');
+}
+
+function barChart(el, tipEl, series, valFmt){
+  const W=560,H=220,L=48,R=8,T=10,B=26;
+  const max=Math.max(1,...series.map(s=>s.v));
+  const step=niceStep(max/4), top=Math.ceil(max/step)*step;
+  const n=series.length, bw=(W-L-R)/n, gap=n>40?1:2;
+  let g='';
+  for(let v=0;v<=top+1e-9;v+=step){const y=T+(H-T-B)*(1-v/top);
+    g+=`<line x1="${L}" x2="${W-R}" y1="${y}" y2="${y}" stroke="var(--line)" stroke-width="1"/><text x="${L-6}" y="${y+4}" text-anchor="end" font-size="11" fill="var(--text-3)">${shortN(v)}</text>`}
+  let bars='', hits='';
+  series.forEach((s,i)=>{const h=(H-T-B)*s.v/top, x=L+i*bw+gap/2, w=Math.max(1,bw-gap), y=H-B-h;
+    const r=Math.min(4,w/2,h);
+    bars+= h>0?`<path d="M${x},${H-B} V${y+r} Q${x},${y} ${x+r},${y} H${x+w-r} Q${x+w},${y} ${x+w},${y+r} V${H-B} Z" fill="var(--series-1)"/>`:'';
+    hits+=`<rect x="${L+i*bw}" y="${T}" width="${bw}" height="${H-T-B}" fill="transparent" data-i="${i}"/>`});
+  const lblEvery=Math.ceil(n/7); let xl='';
+  series.forEach((s,i)=>{if(i%lblEvery===0)xl+=`<text x="${L+i*bw+bw/2}" y="${H-8}" text-anchor="middle" font-size="11" fill="var(--text-3)">${dmy(s.d)}</text>`});
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img">${g}${bars}${xl}${hits}</svg>`;
+  const tip=document.createElement('div');tip.className='tip';el.appendChild(tip);
+  el.querySelectorAll('rect[data-i]').forEach(r=>{
+    r.addEventListener('mousemove',ev=>{const s=series[+r.dataset.i];const b=el.getBoundingClientRect();
+      tip.style.display='block';tip.style.left=(ev.clientX-b.left)+'px';tip.style.top=(ev.clientY-b.top)+'px';
+      tip.innerHTML=`${dmy(s.d)} · <b>${valFmt(s.v)}</b>${s.extra?'<br>'+s.extra:''}`});
+    r.addEventListener('mouseleave',()=>tip.style.display='none')});
+}
+function niceStep(x){const p=Math.pow(10,Math.floor(Math.log10(x||1)));for(const m of [1,2,2.5,5,10])if(m*p>=x)return m*p;return 10*p}
+function shortN(v){return v>=1e6?fmt(v/1e6,1)+' млн':v>=1e3?fmt(v/1e3,v%1000?1:0)+' тыс':fmt(v)}
+
+function charts(){
+  const from=iso(addDays(endD,-(days-1))), rows=rowsIn(from,iso(endD));
+  const by={}; for(const r of rows){(by[r[0]]=by[r[0]]||[]).push(r)}
+  const ser=[]; for(let i=days-1;i>=0;i--){const d=iso(addDays(endD,-i));const a=sum(by[d]||[]);ser.push({d,cost:a.cost,conv:a.conv,cl:a.clicks,cpa:a.cpa})}
+  barChart($('#c1'),null,ser.map(s=>({d:s.d,v:s.cost,extra:`${fmt(s.cl)} кликов`})),v=>rub(v));
+  barChart($('#c2'),null,ser.map(s=>({d:s.d,v:s.conv,extra:s.cpa?`цена конверсии ${rub(s.cpa)}`:''})),v=>fmt(v,0));
+  const t=sum(rows); $('#c1s').textContent=`Итого ${rub(t.cost)} за ${days} дн · в среднем ${rub(t.cost/days)} в день`;
+  $('#c2s').textContent=`Итого ${fmt(t.conv)} · цена конверсии ${rub(t.cpa)}`;
+}
+
+let campSort=['cost',-1];
+function camps(){
+  const to=iso(endD), from=iso(addDays(endD,-(days-1))), pto=iso(addDays(endD,-days)), pfrom=iso(addDays(endD,-(2*days-1)));
+  const ids=[...new Set(D.daily.map(r=>r[1]))];
+  const total=sum(rowsIn(from,to)).cost||1;
+  let list=ids.map(id=>{const a=sum(rowsIn(from,to).filter(r=>r[1]===id));const p=sum(rowsIn(pfrom,pto).filter(r=>r[1]===id));
+    a.id=id;a.name=cname(id);a.share=a.cost/total;a.dcost=p.cost?(a.cost-p.cost)/p.cost:null;a.strategy=(D.campaigns[id]||{}).strategy||'';
+    a.props=D.proposals.filter(x=>String(x.campaign_id)===id).length;return a}).filter(a=>a.imp||a.cost);
+  const [k,dir]=campSort; list.sort((a,b)=>((a[k]??-1e18)>(b[k]??-1e18)?1:-1)*dir);
+  const cols=[['name','Кампания'],['cost','Расход'],['share','Доля'],['dcost','Δ расхода'],['imp','Показы'],['clicks','Клики'],
+    ['ctr','CTR'],['cpc','Цена клика'],['conv','Конв.'],['cr','CR'],['cpa','Цена конв.'],['props','Предл.']];
+  let h='<thead><tr>'+cols.map(([k,t])=>`<th data-k="${k}" class="${k==='name'?'l':''}">${t}${campSort[0]===k?(campSort[1]>0?' ↑':' ↓'):''}</th>`).join('')+'</tr></thead><tbody>';
+  for(const a of list){
+    const dc=a.dcost==null?'—':`${a.dcost>0?'▲':'▼'} ${fmt(Math.abs(a.dcost*100))}%`;
+    h+=`<tr><td class="l"><div>${esc(a.name)}</div><div class="muted" style="font-size:12px">${esc(a.strategy)}</div></td><td>${rub(a.cost)}</td>
+      <td>${fmt(a.share*100,0)}%<span class="share" style="width:${Math.round(a.share*60)}px"></span></td><td>${dc}</td><td>${fmt(a.imp)}</td>
+      <td>${fmt(a.clicks)}</td><td>${pct(a.ctr)}</td><td>${rub(a.cpc,2)}</td><td>${fmt(a.conv)}</td><td>${pct(a.cr)}</td><td>${rub(a.cpa)}</td>
+      <td>${a.props?`<span class="tag">${a.props}</span>`:''}</td></tr>`}
+  $('#camps').innerHTML=h+'</tbody>';
+  $('#camps').querySelectorAll('th').forEach(th=>th.onclick=()=>{const k=th.dataset.k;campSort=[k,campSort[0]===k?-campSort[1]:-1];camps()});
+  $('#campsub').textContent=`За ${days} дн${net==='S'?', только поиск':net==='N'?', только сети':''}. Δ — изменение к предыдущим ${days} дн.`;
+  $('#excluded').innerHTML=D.excluded.length?`Не анализируются (по настройкам): ${D.excluded.map(esc).join(', ')}`:'';
+}
+
+/* ---------- предложения ---------- */
+const TYPES={exclude_site:['Исключить площадки РСЯ','Площадки в рекламной сети, которые тратят деньги без конверсий или дают подозрительно много кликов.'],
+  add_negative:['Добавить минус-слова','Слова из поисковых запросов, по которым люди кликали, но ничего не делали на сайте. Слова из ваших ключевых фраз и из «хороших» запросов бот не предлагает.'],
+  suspend_keyword:['Остановить фразы','Ключевые фразы с заметным расходом и ни одной конверсией. Остановка обратима.'],
+  set_bid:['Изменить ставки','Только для кампаний с ручной стратегией. Шаг — не больше заданного в настройках.'],
+  mobile_adjust:['Корректировка на смартфоны','Если со смартфонов конверсия заметно дороже, чем с компьютеров.']};
+let LOG = D.actions||[];
+const applied = () => new Set(LOG.filter(a=>a.status==='ok'&&!a.undone).map(a=>a.proposal_id));
+const selected = new Set();
+const results = {};
+
+function props(){
+  const ap=applied(); const P=D.proposals;
+  const total=P.reduce((s,p)=>s+p.saving,0);
+  $('#propsub').innerHTML = P.length
+    ? `Бот нашёл ${P.length} предложений по данным за ${D.analysis_days} дней. Ничего не меняется без вашей галочки и кнопки «Применить». `+
+      `Экономия — сколько потрачено на это за период (ориентир, не гарантия).${D.target_cpa?` Целевая цена конверсии: ${rub(D.target_cpa)}.`:''}`
+    : 'Сейчас предложений нет — бот не нашёл явных «сливов». Отчёт обновляется каждый день.';
+  let h='';
+  for(const t of Object.keys(TYPES)){
+    const items=P.filter(p=>p.type===t); if(!items.length) continue;
+    const s=items.reduce((a,p)=>a+p.saving,0);
+    h+=`<div class="grp"><h3>${TYPES[t][0]} <span class="tag">${items.length}</span>${s?`<span class="muted" style="font-weight:400">· ${rub(s)} за период</span>`:''}
+      <button class="btn" style="margin-left:auto;font-size:12px;padding:3px 8px" data-all="${t}">Выбрать все</button></h3>
+      <div class="sub" style="margin-bottom:4px">${TYPES[t][1]}</div>`;
+    for(const p of items){
+      const done=ap.has(p.id), r=results[p.id];
+      h+=`<label class="prop ${done?'applied':''}"><input type="checkbox" data-id="${p.id}" ${selected.has(p.id)?'checked':''} ${done?'disabled':''}>
+        <div><div class="t">${esc(p.title)}</div><div class="r">${esc(p.campaign)} · ${esc(p.reason)}</div>
+        ${done?'<div class="res ok">✓ Применено</div>':''}${r&&!done?`<div class="res ${r.status==='ok'?'ok':'err'}">${r.status==='ok'?'✓':'✕'} ${esc(r.message)}</div>`:''}</div>
+        <div class="s">${p.saving?rub(p.saving):''}</div></label>`}
+    h+='</div>'}
+  $('#props').innerHTML=h;
+  $('#props').querySelectorAll('input[data-id]').forEach(c=>c.onchange=()=>{c.checked?selected.add(c.dataset.id):selected.delete(c.dataset.id);selInfo()});
+  $('#props').querySelectorAll('button[data-all]').forEach(b=>b.onclick=e=>{e.preventDefault();
+    const ids=P.filter(p=>p.type===b.dataset.all&&!ap.has(p.id)).map(p=>p.id);const all=ids.every(i=>selected.has(i));
+    ids.forEach(i=>all?selected.delete(i):selected.add(i));props();selInfo()});
+  selInfo();
+}
+function selInfo(){
+  const n=selected.size, s=D.proposals.filter(p=>selected.has(p.id)).reduce((a,p)=>a+p.saving,0);
+  $('#selinfo').textContent=n?`Выбрано: ${n}${s?` · за период на это ушло ${rub(s)}`:''}`:'Ничего не выбрано';
+  $('#applyBtn').disabled=!n;
+}
+const local = location.protocol==='file:';
+async function call(body){
+  const r=await fetch('apply.php',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:D.apply_key,...body})});
+  const j=await r.json().catch(()=>({ok:false,error:'Сервер ответил ошибкой '+r.status}));
+  if(!j.ok) throw new Error(j.error||'ошибка'); return j;
+}
+$('#applyBtn').onclick=()=>{
+  if(local){alert('Кнопки работают, когда страница открыта с хостинга (Timeweb). Здесь — только просмотр.');return}
+  const items=D.proposals.filter(p=>selected.has(p.id));
+  $('#dlgsub').textContent=`Будет изменено в Яндекс Директе: ${items.length}. Каждое действие можно потом откатить в журнале.`;
+  $('#dlglist').innerHTML=items.map(p=>`<li>${esc(p.title)} <span class="muted">— ${esc(p.campaign)}</span></li>`).join('');
+  $('#dlg').showModal();
+};
+$('#dlgNo').onclick=()=>$('#dlg').close();
+$('#dlgYes').onclick=async()=>{
+  $('#dlg').close(); const btn=$('#applyBtn'); btn.disabled=true; btn.textContent='Применяю…';
+  try{const j=await call({action:'apply',ids:[...selected]});Object.assign(results,j.results);LOG=j.log;
+    for(const [id,r] of Object.entries(j.results)) if(r.status==='ok') selected.delete(id);
+    const bad=Object.values(j.results).filter(r=>r.status!=='ok').length;
+    if(bad) alert(`Не получилось: ${bad}. Причина написана под каждым пунктом.`);
+  }catch(e){alert('Не удалось применить: '+e.message)}
+  btn.textContent='Применить выбранные'; props(); logTable();
+};
+
+function logTable(){
+  const L=[...LOG].reverse();
+  if(!L.length){$('#log').innerHTML='<tbody><tr><td class="l muted">Пока ничего не применялось.</td></tr></tbody>';return}
+  let h='<thead><tr><th class="l">Когда</th><th class="l">Кампания</th><th class="l">Действие</th><th class="l">Результат</th><th></th></tr></thead><tbody>';
+  for(const a of L.slice(0,100)){
+    const st=a.status!=='ok'?`<span class="res err">✕ ${esc(a.message)}</span>`:a.undone?`<span class="muted">↶ откачено ${esc(a.undone)}</span>`:`<span class="res ok">✓ ${esc(a.message)}</span>`;
+    h+=`<tr><td class="l">${esc(a.time)}</td><td class="l">${esc(a.campaign)}</td><td class="wrap">${esc(a.title)}</td><td class="wrap">${st}</td>
+      <td>${a.status==='ok'&&!a.undone?`<button class="btn" data-undo="${a.log_id}" style="font-size:12px;padding:3px 8px">Откатить</button>`:''}</td></tr>`}
+  $('#log').innerHTML=h+'</tbody>';
+  $('#log').querySelectorAll('[data-undo]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('Вернуть как было до этого изменения?'))return; b.disabled=true;
+    try{const j=await call({action:'undo',log_id:b.dataset.undo});LOG=j.log;props();logTable()}catch(e){alert(e.message);b.disabled=false}});
+}
+
+/* ---------- детали ---------- */
+const DT={keywords:['Фразы',['Кампания','Группа','Фраза','Показы','Клики','Расход','Конв.','Цена конв.','Ставка'],r=>[cname(r[0]),r[1],r[2],fmt(r[3]),fmt(r[4]),rub(r[5]),fmt(r[6]),r[7]?rub(r[7]):'—',r[8]?rub(r[8],2):'—'],r=>-r[5]],
+  queries:['Поисковые запросы',['Кампания','Запрос','Показы','Клики','Расход','Конв.'],r=>[cname(r[0]),r[1],fmt(r[2]),fmt(r[3]),rub(r[4]),fmt(r[5])],r=>-r[4]],
+  placements:['Площадки РСЯ',['Кампания','Площадка','Показы','Клики','Расход','Конв.','CTR'],r=>[cname(r[0]),r[1],fmt(r[2]),fmt(r[3]),rub(r[4]),fmt(r[5]),pct(r[6])],r=>-r[4]],
+  devices:['Устройства',['Кампания','Устройство','Показы','Клики','Расход','Конв.','Цена конв.'],r=>[cname(r[0]),r[1],fmt(r[2]),fmt(r[3]),rub(r[4]),fmt(r[5]),r[6]?rub(r[6]):'—'],r=>0]};
+let dtab=ss.get('dtab')||'keywords';
+function detail(){
+  $('#dtabs').innerHTML=Object.entries(DT).map(([k,v])=>`<button class="${k===dtab?'on':''}" data-t="${k}">${v[0]} (${(D.tables[k]||[]).length})</button>`).join('');
+  $('#dtabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{dtab=b.dataset.t;ss.set('dtab',dtab);detail()});
+  const [,cols,row,key]=DT[dtab]; const rows=[...(D.tables[dtab]||[])].sort((a,b)=>key(a)-key(b)).slice(0,300);
+  const textCols=new Set([0,1,2].slice(0,dtab==='keywords'?3:2));
+  $('#detail').innerHTML='<thead><tr>'+cols.map((c,i)=>`<th class="${textCols.has(i)?'l':''}">${c}</th>`).join('')+'</tr></thead><tbody>'+
+    (rows.length?rows.map(r=>'<tr>'+row(r).map((v,i)=>`<td class="${textCols.has(i)?'l':''}">${esc(v)}</td>`).join('')+'</tr>').join(''):'<tr><td class="l muted">Нет данных</td></tr>')+
+    '</tbody>'+(D.tables[dtab].length>300?'':'');
+}
+
+function renderAll(){header();kpis();charts();camps()}
+if(!D){document.body.innerHTML='<p style="padding:20px">Нет данных. Запустите direct_report.py.</p>'}
+else{
+  renderAll();banners();props();logTable();detail();
+  $('#foot').textContent=`Версия ${D.version} · Целевая цена конверсии ${D.target_cpa?rub(D.target_cpa):'—'} · полные таблицы в Excel`;
+  if(!local&&!D.demo) call({action:'log'}).then(j=>{LOG=j.log;props();logTable()}).catch(()=>{});
+}
+</script>
+</body>
+</html>
