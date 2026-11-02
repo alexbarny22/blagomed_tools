@@ -1327,14 +1327,30 @@ class App(tk.Tk):
                   "СкладОтправитель_Key": s["src_key"], "СкладПолучатель_Key": s["dst_key"],
                   "ХозяйственнаяОперация": "ПеремещениеТоваров",
                   "Комментарий": comment + f" (к передаче № {n_tr})"}
-            if config.MOVE_STATUS:
-                mv["Статус"] = config.MOVE_STATUS
-            mv = od.only_existing(DOC_MOVE, mv)
+            mv = od.only_existing(DOC_MOVE, dict(mv, Статус=""))
             mv["Товары"] = [od.only_existing(DOC_MOVE + "_Товары_RowType", {
                 "LineNumber": str(n), "Номенклатура_Key": pair,
                 "Количество": qty, "КоличествоУпаковок": qty})
                 for n, (key, pair, qty, name) in enumerate(lines, 1)]
-            step("Перемещение товаров", DOC_MOVE, mv)
+            # статус: из настроек, затем «Принято», затем без статуса (как поставит 1С)
+            statuses = []
+            for st in (getattr(config, "MOVE_STATUS", None), "Принято", None):
+                if st not in statuses:
+                    statuses.append(st)
+            for i, st in enumerate(statuses):
+                body = dict(mv)
+                body.pop("Статус", None)
+                if st and "Статус" in (od.props.get(DOC_MOVE) or {"Статус"}):
+                    body["Статус"] = st
+                try:
+                    step("Перемещение товаров", DOC_MOVE, body)
+                    break
+                except RuntimeError as e:
+                    if i < len(statuses) - 1 and ("Статус" in str(e) or "Перечисление" in str(e)) \
+                            and "создан, но" not in str(e):
+                        log(f"Перемещение: статус «{st}» не подошёл — пробую следующий")
+                        continue
+                    raise
 
         return {"done": done, "count": len(lines), "total": total, "template": bool(tpl)}
 
