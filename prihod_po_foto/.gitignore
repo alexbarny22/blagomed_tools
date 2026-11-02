@@ -9,3 +9,4 @@ __pycache__/
 Сопоставления.xlsx
 mapping_pending.json
 sessions.pkl
+max_ca.pem

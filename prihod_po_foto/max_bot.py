@@ -6,6 +6,8 @@ MAX работает в России без VPN, поэтому бот може�
 """
 import asyncio
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -80,10 +82,19 @@ class MaxUI:
             log.debug("drop_kb: %s", ex)
 
     async def toast(self, cb, text="", alert=False):
+        """Ответ на нажатие кнопки (всплывающая подсказка). На одно нажатие — один ответ."""
+        if cb is None or getattr(cb, "_answered", False):
+            return
         try:
-            await cb.ack(notification=text or None)
+            object.__setattr__(cb, "_answered", True)
         except Exception:
-            pass                # на одно нажатие — один ответ; повторный просто пропускаем
+            pass
+        try:
+            loop = asyncio.get_running_loop()
+            await asyncio.wait_for(loop.run_in_executor(NET_POOL, _answer_callback, cb.callback.callback_id, text),
+                                   timeout=25)
+        except Exception as ex:
+            log.debug("Ответ на нажатие: %s", ex)
 
     async def send_file(self, chat, path, filename, caption):
         await bot.send_message(chat_id=chat, text=caption, attachments=[InputMedia(path)])
@@ -163,7 +174,93 @@ async def on_callback(event: MessageCallback):
     flow.run(flow.on_callback(uid, chat, ref, event.callback.payload or "", event), chat)
 
 
+# ------------------------------------------------------------------ получение событий от MAX
+# Свой цикл вместо встроенного в maxapi: короткие запросы с жёстким таймаутом, отдельный поток,
+# каждое событие и каждая ошибка — в лог. Встроенный цикл мог молча зависать до 2,5 минут.
+API = "https://platform-api2.max.ru"
+HERE = os.path.dirname(os.path.abspath(__file__))
+POLL_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="max-poll")
+NET_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="max-net")
+_http = requests.Session()
+_http.headers["Authorization"] = config.MAX_TOKEN
+
+
+def _ca_bundle():
+    """Обычные сертификаты + сертификаты Минцифры (MAX работает на них)."""
+    path = os.path.join(HERE, "max_ca.pem")
+    try:
+        import certifi
+        import maxapi.client.ssl as mssl
+        if not os.path.exists(path):
+            with open(path, "wb") as out:
+                out.write(open(certifi.where(), "rb").read() + b"\n" +
+                          open(mssl.RUSSIAN_TRUSTED_CA_BUNDLE, "rb").read())
+        return path
+    except Exception as ex:
+        log.warning("Сертификаты Минцифры не подключены: %s", ex)
+        return True
+
+
+_http.verify = _ca_bundle()
+
+
+def _get_updates(marker):
+    params = {"timeout": 25, "limit": 100, "types": "message_created,message_callback,bot_started"}
+    if marker is not None:
+        params["marker"] = marker
+    r = _http.get(API + "/updates", params=params, timeout=(10, 45))
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+    return r.json()
+
+
+def _answer_callback(callback_id, text):
+    r = _http.post(API + "/answers", params={"callback_id": callback_id},
+                   json={"notification": text or "✓"}, timeout=(10, 20))
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+
+
+async def dispatch(u):
+    kind = u.get("update_type")
+    if kind == "message_created":
+        await on_message(MessageCreated.model_validate(u))
+    elif kind == "message_callback":
+        ev = MessageCallback.model_validate(u)
+        await on_callback(ev)
+    elif kind == "bot_started":
+        await on_bot_started(BotStarted.model_validate(u))
+
+
+async def poll():
+    loop = asyncio.get_running_loop()
+    marker, errors, beat = None, 0, time.time()
+    while True:
+        try:
+            data = await asyncio.wait_for(loop.run_in_executor(POLL_POOL, _get_updates, marker), timeout=60)
+            if errors:
+                log.info("MAX: связь восстановлена")
+            errors = 0
+        except Exception as ex:
+            errors += 1
+            log.warning("MAX: события не получены (%s раз подряд): %r", errors, ex)
+            await asyncio.sleep(min(30, 2 * errors))
+            continue
+        marker = data.get("marker", marker)
+        for u in data.get("updates") or []:
+            log.info("MAX: событие %s", u.get("update_type"))
+            try:
+                await dispatch(u)
+            except Exception:
+                log.exception("MAX: событие не обработано")
+        if time.time() - beat > 600:
+            log.info("MAX: связь работает, события приходят")
+            beat = time.time()
+
+
 async def main():
+    # запас потоков для 1С, нейросетей и таблицы — чтобы долгие запросы не занимали все потоки
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=32))
     flow.ui = MaxUI()
     flow.banner("MAX")
     print("  Проверяю связь с MAX…")
@@ -176,7 +273,7 @@ async def main():
     print(f"  ✔ MAX: бот «{getattr(me, 'first_name', None) or getattr(me, 'name', '')}» на связи.")
     print("  Напишите боту в MAX «/start». Окно не закрывайте — бот работает, пока оно открыто.\n")
     flow.start_background()
-    await dp.start_polling(bot)
+    await poll()
 
 
 def run():
