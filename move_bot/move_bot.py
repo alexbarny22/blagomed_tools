@@ -421,8 +421,8 @@ class OData:
             try:
                 has_pt = self.has(tab + "_RowType", "ВидЦены_Key") or not self.props.get(tab + "_RowType")
                 if keys is not None:
-                    rows = self.get_by_field(tab, "Номенклатура_Key", keys,
-                                             pt_flt if has_pt else "")
+                    rows = self.get_by_field(tab, "Номенклатура_Key", keys)
+                    rows = [r for r in rows if r.get("ВидЦены_Key", price_type_key) == price_type_key]
                     heads = self.get_by_keys(doc, {r.get("Ref_Key") for r in rows if r.get("Ref_Key")},
                                              "Ref_Key,Date,Posted,DeletionMark")
                 else:
@@ -446,6 +446,13 @@ class OData:
             info.append("документы установки цен: не опубликованы в OData")
 
         res = self._latest_prices(all_rows, price_type_key)
+        if keys is not None:
+            left = [k for k in keys if k not in res]
+            if left:
+                got = self.slice_last_prices(price_type_key, left)
+                if got:
+                    info.append(f"срез последних по позициям: {len(got)}")
+                    res.update(got)
         if keys is not None and not res:
             sample = all_rows[:3]
             log(f"Цены: ничего не найдено. Ключ вида цены {price_type_key}; строк получено {len(all_rows)}; "
@@ -459,6 +466,34 @@ class OData:
             info.append(f"цена найдена у {len(res)} из {len(keys)} позиций")
         self.price_info = "; ".join(info)
         log("Источники закупочных цен — " + self.price_info)
+        return res
+
+    def slice_last_prices(self, price_type_key, keys):
+        """Последняя цена по каждой позиции отдельным коротким запросом к срезу последних."""
+        res = {}
+        for reg in PRICE_REGS:
+            if reg not in self.sets:
+                continue
+            todo = [k for k in keys if k not in res]
+            if not todo:
+                break
+            for n, k in enumerate(todo, 1):
+                cond = f"ВидЦены_Key eq guid'{price_type_key}' and Номенклатура_Key eq guid'{k}'"
+                rows = None
+                for c in (cond, cond.replace("'", "''")):
+                    try:
+                        rows = self.get(f"{reg}/SliceLast(Condition='{c}')")
+                        break
+                    except RuntimeError as e:
+                        err = e
+                if rows is None:
+                    log(f"Цены: срез последних {reg} недоступен — {str(err)[:300]}")
+                    break
+                got = self._latest_prices(rows, price_type_key)
+                if got.get(k):
+                    res[k] = got[k]
+                if self.progress:
+                    self.progress(f"Цены (срез): {n} из {len(todo)} позиций…")
         return res
 
     @staticmethod
