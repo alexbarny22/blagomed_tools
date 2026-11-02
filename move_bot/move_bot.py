@@ -277,12 +277,36 @@ class OData:
             raise RuntimeError(self._err(r))
         return r.json()
 
+    def is_posted(self, entity, key):
+        try:
+            r = self.s.get(f"{self.base}{entity}(guid'{key}')",
+                           params={"$format": "json", "$select": "Posted"}, timeout=120)
+            return r.status_code == 200 and bool(r.json().get("Posted"))
+        except Exception:
+            return False
+
     def post_doc(self, entity, key):
-        r = self.s.post(f"{self.base}{entity}(guid'{key}')/Post",
-                        params={"PostingModeOperational": "false", "$format": "json"},
-                        timeout=600)
-        if r.status_code not in (200, 204):
-            raise RuntimeError(self._err(r))
+        """Проведение. Если веб-сервер 1С не дождался ответа (502/503/504 или обрыв),
+        проверяем, не провёлся ли документ всё-таки, и при необходимости повторяем."""
+        last = None
+        for attempt in range(3):
+            try:
+                r = self.s.post(f"{self.base}{entity}(guid'{key}')/Post",
+                                params={"PostingModeOperational": "false", "$format": "json"},
+                                timeout=600)
+                if r.status_code in (200, 204):
+                    return
+                last = self._err(r)
+                if r.status_code not in (500, 502, 503, 504):
+                    break
+            except requests.RequestException as e:
+                last = f"нет ответа от 1С ({e})"
+            time.sleep(10 * (attempt + 1))
+            if self.is_posted(entity, key):
+                log(f"{entity}: ответ 1С потерялся, но документ проведён")
+                return
+            log(f"{entity}: проведение не прошло ({last}) — повтор")
+        raise RuntimeError(last)
 
     def _balance(self, reg, condition, label=None):
         """Остатки виртуальной таблицы с условием отбора на стороне 1С.
