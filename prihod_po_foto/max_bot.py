@@ -154,8 +154,17 @@ async def on_message(event: MessageCreated):
         flow.run(flow.on_text(uid, chat, m.body.text), chat)
 
 
+_SEEN_CB = []        # последние нажатия: MAX иногда присылает одно и то же нажатие дважды
+
+
 @dp.message_callback()
 async def on_callback(event: MessageCallback):
+    cid = event.callback.callback_id
+    if cid in _SEEN_CB:
+        flow.log.info("Повтор нажатия %s — пропускаю", event.callback.payload)
+        return
+    _SEEN_CB.append(cid)
+    del _SEEN_CB[:-200]
     uid = event.callback.user.user_id
     msg = event.message
     chat = msg.recipient.chat_id if msg and msg.recipient else None
