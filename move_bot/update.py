@@ -3,9 +3,13 @@
 Автообновление бота из GitHub. Запускается из start.bat перед ботом.
 Сверяет version.txt; если на GitHub версия новее — скачивает файлы из manifest.txt.
 config.py, settings.json, кэш и журнал никогда не трогаются.
-Если интернета/GitHub нет — просто запускается текущая версия.
+
+GitHub из России открывается не везде одинаково (raw.githubusercontent.com часто режется),
+поэтому файлы пробуются по очереди из нескольких адресов. Если ни один не ответил —
+просто запускается текущая версия.
 """
 import os
+import ssl
 import sys
 import urllib.request
 
@@ -14,6 +18,7 @@ BRANCH = "main"
 FOLDER = "move_bot"          # папка проекта внутри репозитория
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROTECTED = {"config.py", "settings.json", "cache_1c.json", "move_bot.log", "start.bat"}
+UA = {"User-Agent": "blagomed-updater", "Cache-Control": "no-cache"}
 
 
 def token():
@@ -25,19 +30,51 @@ def token():
         return ""
 
 
+def sources(name, tok):
+    path = f"{FOLDER}/{name}"
+    api = {"Accept": "application/vnd.github.raw", **UA}
+    if tok:
+        api["Authorization"] = "Bearer " + tok
+    yield "api.github.com", f"https://api.github.com/repos/{REPO}/contents/{path}?ref={BRANCH}", api
+    yield "raw.githubusercontent.com", f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{path}", UA
+    yield "github.com", f"https://github.com/{REPO}/raw/{BRANCH}/{path}", UA
+    if not tok:  # зеркало (только для публичного репозитория, может отставать на несколько минут)
+        yield "jsdelivr", f"https://cdn.jsdelivr.net/gh/{REPO}@{BRANCH}/{path}", UA
+
+
+def _get(url, headers):
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.read()
+    except (ssl.SSLError, urllib.error.URLError) as e:
+        # запасной путь — requests (свои сертификаты), если установлен
+        try:
+            import requests
+            r = requests.get(url, headers=headers, timeout=15)
+            r.raise_for_status()
+            return r.content
+        except ImportError:
+            raise e
+
+
+_good = []   # источник, который сработал — дальше пробуем его первым
+
+
 def fetch(name, tok):
-    if tok:   # приватный репозиторий — через API с ключом
-        url = f"https://api.github.com/repos/{REPO}/contents/{FOLDER}/{name}?ref={BRANCH}"
-        req = urllib.request.Request(url, headers={
-            "Authorization": "Bearer " + tok,
-            "Accept": "application/vnd.github.raw",
-            "User-Agent": "move_bot-updater"})
-    else:     # публичный репозиторий
-        url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{FOLDER}/{name}"
-        req = urllib.request.Request(url, headers={"User-Agent": "move_bot-updater",
-                                                   "Cache-Control": "no-cache"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return r.read()
+    errors = []
+    srcs = list(sources(name, tok))
+    if _good:
+        srcs.sort(key=lambda s: s[0] != _good[0])
+    for title, url, headers in srcs:
+        try:
+            data = _get(url, headers)
+            if title not in _good:
+                _good[:] = [title]
+            return data
+        except Exception as e:
+            errors.append(f"{title}: {str(e)[:120]}")
+    raise RuntimeError("; ".join(errors))
 
 
 def local_version():
@@ -56,9 +93,9 @@ def main():
         print(f"Проверка обновлений пропущена (нет связи с GitHub): {e}")
         return
     if remote == local_version():
-        print(f"Версия {remote} — актуальная.")
+        print(f"Версия {remote} — актуальная (через {_good[0]}).")
         return
-    print(f"Найдено обновление: {local_version() or '—'} -> {remote}")
+    print(f"Найдено обновление: {local_version() or '—'} -> {remote} (через {_good[0]})")
     try:
         files = [x.strip() for x in fetch("manifest.txt", tok).decode("utf-8").splitlines()
                  if x.strip() and not x.startswith("#")]
