@@ -292,6 +292,10 @@ class OData:
             raise RuntimeError("В OData нет регистров остатков (запустите setup_odata_move.bat).")
         self._need_local_filter = False
         rows = self._balance(reg, f"Склад_Key eq guid'{src_key}'", label="Остатки общего склада")
+        if any(r.get("Склад_Key") not in (src_key, None) for r in rows):
+            # 1С приняла запрос, но отбор не применила — вернулись все склады; дальше не дублируем
+            log("Остатки: отбор по складу 1С проигнорировала — фильтрую сам")
+            self._need_local_filter = True
         store_keys, mg_keys = list(store_keys), list(mg_keys)
         if store_keys and mg_keys and not self._need_local_filter:
             whs = " or ".join(f"Склад_Key eq guid'{k}'" for k in store_keys)
@@ -302,8 +306,12 @@ class OData:
                     self.progress(f"Остатки магазинов: {min(i + 20, len(mg_keys))} из {len(mg_keys)} позиций (МГ)…")
         allowed_wh = {src_key} | set(store_keys)
         allowed_mg = set(mg_keys)
-        res = {}
+        res, seen = {}, set()
         for row in rows:
+            sig = json.dumps(row, sort_keys=True, ensure_ascii=False)
+            if sig in seen:          # одна и та же строка из разных запросов — считаем один раз
+                continue
+            seen.add(sig)
             nom, wh = row.get("Номенклатура_Key"), row.get("Склад_Key")
             if not nom or not wh:
                 continue
@@ -415,6 +423,15 @@ class OData:
             info.append("документы установки цен: не опубликованы в OData")
 
         res = self._latest_prices(all_rows, price_type_key)
+        if keys is not None and not res:
+            sample = all_rows[:3]
+            log(f"Цены: ничего не найдено. Ключ вида цены {price_type_key}; строк получено {len(all_rows)}; "
+                f"пример: {json.dumps(sample, ensure_ascii=False)[:1500]}")
+            for name in (PRICE_REGS + ["Document_УстановкаЦенНоменклатуры_Товары"]):
+                for t in (name + "_RecordType", name + "_RowType", name):
+                    if t in self.props:
+                        log(f"Поля {t}: {', '.join(sorted(self.props[t]))}")
+                        break
         if keys is not None:
             info.append(f"цена найдена у {len(res)} из {len(keys)} позиций")
         self.price_info = "; ".join(info)
