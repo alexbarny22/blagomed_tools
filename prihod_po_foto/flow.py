@@ -51,7 +51,13 @@ CANCEL = [("✖ Отменить приход", "cancel")]          # ряд с 
 STOP_WORDS = {"отмена", "отменить", "стоп", "сброс", "cancel", "/cancel", "/stop", "выход"}
 GO_WORDS = {"далее", "дальше", "продолжить", "продолжай", "next", "/next"}
 
-S = {}   # user_id -> состояние сеанса
+S = {}       # user_id -> состояние сеанса
+CHATS = {}   # user_id -> чат с ним (куда сообщить об обновлении бота)
+
+
+def seen(uid, chat):
+    if chat is not None:
+        CHATS[uid] = chat
 
 
 def st(uid):
@@ -116,6 +122,7 @@ def run(coro, chat=None):
 
 # ------------------------------------------------------------------ команды и меню
 async def on_start(uid, chat):
+    seen(uid, chat)
     if not allowed(uid):
         await ui.send(chat, f"Ваш ID в {ui.name}: {uid}\nДобавьте его в config.py "
                             f"({'MAX_ALLOWED_IDS' if ui.name == 'MAX' else 'ALLOWED_IDS'}).")
@@ -187,6 +194,7 @@ async def show_photo_status(uid, chat):
 
 
 async def on_image(uid, chat, data):
+    seen(uid, chat)
     if not allowed(uid):
         return
     s = st(uid)
@@ -477,6 +485,7 @@ def line_by_n(s, n):
 
 
 async def on_text(uid, chat, text):
+    seen(uid, chat)
     t = (text or "").strip()
     if t.split("@")[0] in ("/start", "start", "Начать", "/menu", "меню", "Меню"):
         await on_start(uid, chat)
@@ -552,6 +561,7 @@ async def on_text(uid, chat, text):
 
 # ------------------------------------------------------------------ нажатия кнопок
 async def on_callback(uid, chat, ref, data, cb):
+    seen(uid, chat)
     """Все кнопки. ref — сообщение с кнопкой, cb — нажатие (для toast/drop_kb)."""
     s = st(uid)
     if not allowed(uid):
@@ -848,9 +858,48 @@ async def load_items_bg():
         log.error("Номенклатура не загрузилась: %s", ex)
 
 
+STARTED = time.time()
+
+
+def busy():
+    """Кто-то сейчас проводит приход (есть фото или распознанная накладная)."""
+    return any(v.get("photos") or v.get("rec") for v in S.values())
+
+
+async def auto_update_loop():
+    """
+    Раз в AUTO_UPDATE_MINUTES проверяет GitHub. Новая версия и никто не проводит приход —
+    скачивает её, предупреждает в мессенджере и завершается: пульт (или start.bat) запускает бота заново.
+    """
+    if not getattr(config, "AUTO_UPDATE", True):
+        return
+    import update
+    every = max(10, getattr(config, "AUTO_UPDATE_MINUTES", 60)) * 60
+    await asyncio.sleep(max(every, 35 * 60))     # первые 35 минут не трогаем (пульт так спокойнее перезапускает)
+    while True:
+        try:
+            remote = await asyncio.to_thread(update.remote_version)
+            if remote and remote != update.local_version():
+                while busy():
+                    await asyncio.sleep(60)
+                if await asyncio.to_thread(update.main):
+                    log.info("Обновлён до версии %s — перезапуск", remote)
+                    for chat in {c for u, c in CHATS.items() if allowed(u)}:
+                        try:
+                            await ui.send(chat, f"🔄 Бот обновился до версии {remote} и перезапускается — "
+                                                "через минуту снова на связи.")
+                        except Exception:
+                            pass
+                    os._exit(0)
+        except Exception as ex:
+            log.warning("Проверка обновлений: %s", ex)
+        await asyncio.sleep(every)
+
+
 def start_background():
     asyncio.create_task(load_items_bg())
     asyncio.create_task(warm_orders_loop())
+    asyncio.create_task(auto_update_loop())
 
 
 def banner(platform):

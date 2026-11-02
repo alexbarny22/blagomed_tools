@@ -51,16 +51,25 @@ def local_version():
         return ""
 
 
+def remote_version():
+    """Версия на GitHub (или None, если GitHub недоступен)."""
+    try:
+        return fetch("version.txt", token()).decode("utf-8").strip()
+    except Exception:
+        return None
+
+
 def main():
+    """Скачивает новую версию, если она есть. Возвращает True, если файлы обновились."""
     tok = token()
     try:
         remote = fetch("version.txt", tok).decode("utf-8").strip()
     except Exception as e:
         print(f"Проверка обновлений пропущена (нет связи с GitHub): {e}")
-        return
+        return False
     if remote == local_version():
         print(f"Версия {remote} — актуальная.")
-        return
+        return False
     print(f"Найдено обновление: {local_version() or '—'} -> {remote}")
     try:
         files = [x.strip() for x in fetch("manifest.txt", tok).decode("utf-8").splitlines()
@@ -72,7 +81,7 @@ def main():
             data[name] = fetch(name, tok)
     except Exception as e:
         print(f"Обновление не скачалось, запускаю текущую версию: {e}")
-        return
+        return False
     # записываем только когда всё скачалось — чтобы не получить половину новой версии
     for name, body in data.items():
         tmp = os.path.join(HERE, name + ".new")
@@ -83,6 +92,7 @@ def main():
     with open(os.path.join(HERE, "version.txt"), "w", encoding="utf-8") as f:
         f.write(remote)
     print("Обновление установлено.")
+    return True
 
 
 if __name__ == "__main__":
