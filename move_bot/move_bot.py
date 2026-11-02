@@ -280,6 +280,8 @@ class OData:
             return self.get_all(reg + "/Balance", {"$filter": condition}, page=2000, label=label)
         except RuntimeError as e:
             log(f"Остатки: $filter не подошёл — {e}")
+        if self._need_local_filter:      # всё уже загружено предыдущим запросом
+            return []
         self._need_local_filter = True
         return self.get_all(reg + "/Balance", page=2000, label=label,
                             order="Номенклатура_Key,Склад_Key")
@@ -298,12 +300,15 @@ class OData:
             self._need_local_filter = True
         store_keys, mg_keys = list(store_keys), list(mg_keys)
         if store_keys and mg_keys and not self._need_local_filter:
-            whs = " or ".join(f"Склад_Key eq guid'{k}'" for k in store_keys)
-            for i in range(0, len(mg_keys), 20):
-                noms = " or ".join(f"Номенклатура_Key eq guid'{k}'" for k in mg_keys[i:i + 20])
-                rows += self._balance(reg, f"({whs}) and ({noms})")
+            # по одному складу магазина за запрос: адрес короткий (веб-сервер 1С режет длинные),
+            # а товаров в магазине немного; лишнее (не МГ) отбрасывается ниже
+            for n, wh in enumerate(store_keys, 1):
+                part = self._balance(reg, f"Склад_Key eq guid'{wh}'")
+                rows += part
+                if self._need_local_filter:   # отбор не сработал — уже загружено всё
+                    break
                 if self.progress:
-                    self.progress(f"Остатки магазинов: {min(i + 20, len(mg_keys))} из {len(mg_keys)} позиций (МГ)…")
+                    self.progress(f"Остатки магазинов: склад {n} из {len(store_keys)}…")
         allowed_wh = {src_key} | set(store_keys)
         allowed_mg = set(mg_keys)
         res, seen = {}, set()
@@ -742,7 +747,7 @@ class App(tk.Tk):
         if force or c.get("date") != today or c.get("price_type") != self.price_type:
             c = {"date": today, "price_type": self.price_type, "prices": {}}
         known = c["prices"]                       # ключ -> цена или None (цены в 1С нет)
-        missing = [k for k in need if k not in known]
+        missing = [k for k in need if not known.get(k)]   # без цены — спрашиваем 1С снова
         if missing:
             got = self.od.prices(self.price_type, missing)
             for k in missing:
