@@ -286,51 +286,80 @@ class OData:
             cur[1] += nal - rez
         return res
 
-    def prices(self, price_type_key):
+    def get_by_field(self, entity, field, keys, extra_filter="", select=None, page=20):
+        """Строки, где field равно одному из keys (пачками по 20 — короткие запросы)."""
+        res, keys = [], list(keys)
+        for i in range(0, len(keys), page):
+            flt = "(" + " or ".join(f"{field} eq guid'{k}'" for k in keys[i:i + page]) + ")"
+            if extra_filter:
+                flt = extra_filter + " and " + flt
+            p = {"$filter": flt}
+            if select:
+                p["$select"] = select
+            res += self.get(entity, p)
+            if self.progress and len(keys) > page:
+                self.progress(f"Цены: проверено {min(i + page, len(keys))} из {len(keys)} позиций…")
+        return res
+
+    def prices(self, price_type_key, keys=None):
         """{номенклатура: цена} — последняя действующая цена указанного вида.
-        Собирает цены из ВСЕХ источников (оба регистра цен + документы «Установка цен
-        номенклатуры») и по каждому товару берёт самую позднюю."""
-        flt = {"$filter": f"ВидЦены_Key eq guid'{price_type_key}'"}
+        keys — только для этих позиций (быстро); None — по всей базе (медленно).
+        Источники: оба регистра цен + проведённые документы «Установка цен номенклатуры»."""
+        pt_flt = f"ВидЦены_Key eq guid'{price_type_key}'"
+        keys = list(keys) if keys is not None else None
+        if keys is not None and not keys:
+            self.price_info = "нет позиций для поиска цен"
+            return {}
         all_rows, info = [], []
 
-        # 1. регистры цен (у каждого — первый рабочий способ чтения)
+        # 1. регистры цен
         for reg in PRICE_REGS:
-            for path, params, page in ((reg + "_RecordType", flt, 2000),
-                                       (reg + "/SliceLast", None, 2000),
-                                       (reg, None, 200)):
-                if path.split("/")[0] not in self.sets:
-                    continue
+            rt = reg + "_RecordType"
+            rows = None
+            if keys is not None and rt in self.sets:
                 try:
-                    rows = self.get_all(path, params, page=page, label="Цены")
+                    rows = self.get_by_field(rt, "Номенклатура_Key", keys, pt_flt)
                 except RuntimeError as e:
-                    log(f"Цены: {path} не подошёл — {e}")
-                    continue
-                n = len(self._latest_prices(rows, price_type_key))
-                info.append(f"{reg.split('_', 1)[1]}: {n}")
-                all_rows += rows
-                break
+                    log(f"Цены: {rt} по списку позиций не прочитан — {e}")
+            if rows is None:   # общий способ — вся таблица
+                for path, params, page in ((rt, {"$filter": pt_flt}, 2000),
+                                           (reg + "/SliceLast", None, 2000),
+                                           (reg, None, 200)):
+                    if path.split("/")[0] not in self.sets:
+                        continue
+                    try:
+                        rows = self.get_all(path, params, page=page, label="Цены")
+                        break
+                    except RuntimeError as e:
+                        log(f"Цены: {path} не подошёл — {e}")
+            if rows is None:
+                continue
+            info.append(f"{reg.split('_', 1)[1]}: {len(self._latest_prices(rows, price_type_key))}")
+            all_rows += rows
 
         # 2. документы «Установка цен номенклатуры» (проведённые)
         doc = "Document_УстановкаЦенНоменклатуры"
         tab = doc + "_Товары"
         if doc in self.sets and tab in self.sets:
             try:
-                docs = self.get_all(doc, {"$select": "Ref_Key,Date,Posted,DeletionMark"},
-                                    page=2000, label="Установки цен", order="Ref_Key")
-                dates = {d["Ref_Key"]: d.get("Date") for d in docs
+                has_pt = self.has(tab + "_RowType", "ВидЦены_Key") or not self.props.get(tab + "_RowType")
+                if keys is not None:
+                    rows = self.get_by_field(tab, "Номенклатура_Key", keys,
+                                             pt_flt if has_pt else "")
+                    heads = self.get_by_keys(doc, {r.get("Ref_Key") for r in rows if r.get("Ref_Key")},
+                                             "Ref_Key,Date,Posted,DeletionMark")
+                else:
+                    heads = self.get_all(doc, {"$select": "Ref_Key,Date,Posted,DeletionMark"},
+                                         page=2000, label="Установки цен", order="Ref_Key")
+                    rows = self.get_all(tab, {"$filter": pt_flt} if has_pt else None,
+                                        page=2000, label="Строки установок цен")
+                dates = {d["Ref_Key"]: d.get("Date") for d in heads
                          if d.get("Posted") and not d.get("DeletionMark")}
-                params = flt if self.has(tab + "_RowType", "ВидЦены_Key") or \
-                    not self.props.get(tab + "_RowType") else None
-                rows = self.get_all(tab, params, page=2000, label="Строки установок цен")
-                conv = []
-                for r in rows:
-                    d = dates.get(r.get("Ref_Key"))
-                    if not d:
-                        continue
-                    conv.append({"ВидЦены_Key": r.get("ВидЦены_Key", price_type_key),
-                                 "Номенклатура_Key": r.get("Номенклатура_Key"),
-                                 "Характеристика_Key": r.get("Характеристика_Key"),
-                                 "Цена": r.get("Цена"), "Period": d})
+                conv = [{"ВидЦены_Key": r.get("ВидЦены_Key", price_type_key),
+                         "Номенклатура_Key": r.get("Номенклатура_Key"),
+                         "Характеристика_Key": r.get("Характеристика_Key"),
+                         "Цена": r.get("Цена"), "Period": dates[r["Ref_Key"]]}
+                        for r in rows if dates.get(r.get("Ref_Key"))]
                 info.append(f"документы установки цен: {len(self._latest_prices(conv, price_type_key))}")
                 all_rows += conv
             except RuntimeError as e:
@@ -339,9 +368,12 @@ class OData:
         else:
             info.append("документы установки цен: не опубликованы в OData")
 
+        res = self._latest_prices(all_rows, price_type_key)
+        if keys is not None:
+            info.append(f"цена найдена у {len(res)} из {len(keys)} позиций")
         self.price_info = "; ".join(info)
         log("Источники закупочных цен — " + self.price_info)
-        return self._latest_prices(all_rows, price_type_key)
+        return res
 
     @staticmethod
     def _latest_prices(rows, price_type_key):
@@ -712,6 +744,13 @@ class App(tk.Tk):
         self.run_bg(self.load_stock_and_prices,
                     self.refresh_done, "Загружаю остатки и закупочные цены…")
 
+    def find_pair(self, name):
+        """Ключ карточки (МГ) для позиции общего склада: сначала mapping.csv, потом по названию."""
+        mapped = self.mapping.get(norm(name))
+        if mapped:
+            return self.mg_by_name.get(mapped)
+        return self.pairs.get(mg_base(norm(name)))
+
     def load_stock_and_prices(self):
         stock = self.od.stock()
         whs = {self.settings["src_key"], self.settings["dst_key"]}
@@ -723,7 +762,19 @@ class App(tk.Tk):
             log(f"Позиций с остатком нет в сохранённой номенклатуре: {len(unknown)} — догружаю")
             extra = self.od.get_by_keys("Catalog_Номенклатура", unknown,
                                         "Ref_Key,Description,IsFolder,DeletionMark")
-        prices = self.od.prices(self.price_type)
+        # цены нужны только для позиций, которые реально можно передать:
+        # есть на общем складе и у них есть пара (МГ)
+        src = self.settings["src_key"]
+        extra_names = {n["Ref_Key"]: n.get("Description") or "" for n in extra
+                       if not SUFFIX_RE.search(norm(n.get("Description")))}
+        need = set()
+        for (k, wh), v in stock.items():
+            if wh != src or v[0] <= 0:
+                continue
+            name = self.noms.get(k) or extra_names.get(k)
+            if name is not None and self.find_pair(name):
+                need.add(k)
+        prices = self.od.prices(self.price_type, need)
         return stock, prices, extra
 
     def refresh_done(self, res):
@@ -746,9 +797,7 @@ class App(tk.Tk):
             st = stock.get((key, src))
             if not st or st[0] <= 0:
                 continue
-            mapped = self.mapping.get(norm(name))
-            pair = (self.mg_by_name.get(mapped) if mapped
-                    else self.pairs.get(mg_base(norm(name))))
+            pair = self.find_pair(name)
             if not pair:            # нет карточки (МГ) — в списке не показываем
                 no_pair += 1
                 continue
@@ -946,7 +995,7 @@ class App(tk.Tk):
                                "ничего не создано. Поля строки: " +
                                ", ".join(sorted(od.props[sort_row])))
         stock = od.stock()
-        prices = od.prices(self.price_type)
+        prices = od.prices(self.price_type, [l[0] for l in lines])
         problems = []
         for key, pair, qty, name in lines:
             free = stock.get((key, s["src_key"]), [0.0, 0.0])[1]
