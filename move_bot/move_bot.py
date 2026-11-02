@@ -861,8 +861,8 @@ class App(tk.Tk):
     def update_price_db(self, force=False, only_cached=False):
         db = {"v": self.PRICE_DB_VERSION, "price_type": self.price_type,
               "last": None, "day": None, "items": {}} if force else self.load_price_db()
-        if force:
-            db["no_date_filter"] = self.load_price_db().get("no_date_filter")
+        # «Обновить цены» читает всё заново и заодно снова проверяет, разрешает ли 1С отбор по дате
+        # (после снятия ограничений доступа он начинает работать)
         today = datetime.date.today().isoformat()
         since = db.get("last")
         no_filter = db.get("no_date_filter")       # 1С не даёт отбирать документы по дате
