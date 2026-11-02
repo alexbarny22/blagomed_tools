@@ -8,3 +8,4 @@ test_result.txt
 __pycache__/
 Сопоставления.xlsx
 mapping_pending.json
+sessions.pkl

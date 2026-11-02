@@ -15,7 +15,7 @@ BRANCH = "main"
 FOLDER = "prihod_po_foto"    # папка проекта внутри репозитория
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROTECTED = {"config.py", "mapping.json", "nomenclature.json", "prihod_bot.log", "start.bat",
-             "Сопоставления.xlsx", "mapping_pending.json"}
+             "Сопоставления.xlsx", "mapping_pending.json", "sessions.pkl"}
 
 
 def token():

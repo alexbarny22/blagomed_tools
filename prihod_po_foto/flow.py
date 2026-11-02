@@ -57,6 +57,43 @@ S = {}       # user_id -> состояние сеанса
 CHATS = {}   # user_id -> чат с ним (куда сообщить об обновлении бота)
 
 
+SESS_FILE = os.path.join(HERE, "sessions.pkl")
+SKIP_KEYS = {"timer", "live", "status"}
+
+
+def save_sessions():
+    """Начатые приходы — на диск (фото, распознанное, выбранные товары)."""
+    import pickle
+    try:
+        data = {"S": {u: {k: v for k, v in d.items() if k not in SKIP_KEYS} for u, d in S.items()
+                      if d.get("photos") or d.get("rec")},
+                "CHATS": dict(CHATS), "t": time.time()}
+        tmp = SESS_FILE + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(data, f)
+        os.replace(tmp, SESS_FILE)
+    except Exception as ex:
+        log.warning("Сеансы не сохранены: %s", ex)
+
+
+def load_sessions():
+    import pickle
+    try:
+        with open(SESS_FILE, "rb") as f:
+            data = pickle.load(f)
+        if time.time() - data.get("t", 0) > 2 * 86400:      # старше двух суток — не поднимаем
+            return
+        for u, d in data.get("S", {}).items():
+            S[u] = dict(d, timer=None, status=None)
+        CHATS.update(data.get("CHATS", {}))
+        if S:
+            log.info("Восстановлены начатые приходы: %d", len(S))
+    except FileNotFoundError:
+        pass
+    except Exception as ex:
+        log.warning("Сеансы не восстановлены: %s", ex)
+
+
 def seen(uid, chat):
     if chat is not None:
         CHATS[uid] = chat
@@ -110,6 +147,7 @@ def run(coro, chat=None):
     async def guard():
         try:
             await coro
+            save_sessions()
         except Exception as ex:
             log.exception("Ошибка в обработчике")
             if chat is not None:
@@ -614,7 +652,7 @@ async def on_callback(uid, chat, ref, data, cb):
         _, i, k = data.split(":")
         i, k = int(i), int(k)
         if "lines" not in s or i >= len(s["lines"]) or k >= len(s.get("shown", [])):
-            await ui.toast(cb, "Устарело", True)
+            await stale(uid, chat, cb)
             return
         it = s["shown"][k]
         L = s["lines"][i]
@@ -633,7 +671,7 @@ async def on_callback(uid, chat, ref, data, cb):
     if data.startswith("skip:"):
         i = int(data.split(":")[1])
         if "lines" not in s or i >= len(s["lines"]):
-            await ui.toast(cb, "Устарело", True)
+            await stale(uid, chat, cb)
             return
         s["lines"][i]["skip"] = True
         await ui.toast(cb)
@@ -662,7 +700,20 @@ async def on_callback(uid, chat, ref, data, cb):
     if data in ("post", "post_force"):
         await post(uid, chat, ref, data, cb)
         return
-    await ui.toast(cb, "Устарело", True)
+    await stale(uid, chat, cb)
+
+
+async def stale(uid, chat, cb):
+    """Нажали кнопку из старого сообщения (бот перезапускался или приход уже завершён)."""
+    await ui.toast(cb, "Эта кнопка уже не действует")
+    s = st(uid)
+    if s.get("lines") or s.get("rec") or s.get("photos"):
+        await ui.send(chat, "Эта кнопка из старого сообщения. Продолжить текущий приход?",
+                      [[("▶ Продолжить", "next")], CANCEL])
+    else:
+        await ui.send(chat, "Эта кнопка из старого сообщения — начатого прихода сейчас нет "
+                            "(бот перезапускался или приход уже завершён).\n"
+                            "Пришлите фото накладной заново.", menu=True)
 
 
 async def resume(uid, chat):
@@ -682,7 +733,7 @@ async def reorders(uid, chat, cb):
     """Перечитать заказы поставщику из 1С (после того как завели/поправили заказ)."""
     s = st(uid)
     if not s.get("ka"):
-        await ui.toast(cb, "Устарело", True)
+        await stale(uid, chat, cb)
         return
     await ui.toast(cb, "Читаю заказы из 1С…")
     wait = await ui.send(chat, "⏳ Читаю заказы поставщику из 1С…")
@@ -700,7 +751,7 @@ async def reorders(uid, chat, cb):
 async def fix(uid, chat, ref, data, cb):
     s = st(uid)
     if not s.get("lines"):
-        await ui.toast(cb, "Устарело", True)
+        await stale(uid, chat, cb)
         return
     await ui.toast(cb)
     if data == "fixback":
@@ -947,6 +998,7 @@ async def auto_update_loop():
 
 
 def start_background():
+    load_sessions()
     asyncio.create_task(load_items_bg())
     asyncio.create_task(warm_orders_loop())
     asyncio.create_task(auto_update_loop())
