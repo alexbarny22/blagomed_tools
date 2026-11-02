@@ -37,12 +37,34 @@ class MaxUI:
     file_hint = ("Лучше отправлять фото «файлом» (скрепка → Файл) — без сжатия цифры читаются точнее.")
 
     async def send(self, chat, text, kb=None, menu=False):
-        r = await bot.send_message(chat_id=chat, text=text, attachments=_markup(kb, menu), format=ParseMode.HTML)
-        return r.message.body.mid if r and r.message and r.message.body else None
+        """Отправить сообщение. Если MAX его не принял — повторить простым текстом, потом без кнопок."""
+        last = None
+        for how in ("html", "text", "text_nokb"):
+            try:
+                if how == "html":
+                    r = await bot.send_message(chat_id=chat, text=text, attachments=_markup(kb, menu),
+                                               format=ParseMode.HTML)
+                else:
+                    r = await bot.send_message(chat_id=chat, text=_plain(text),
+                                               attachments=_markup(kb, menu) if how == "text" else [])
+                mid = getattr(getattr(getattr(r, "message", None), "body", None), "mid", None)
+                if not mid:
+                    raise RuntimeError(f"MAX не принял сообщение: {str(r)[:300]}")
+                if how != "html":
+                    log.warning("Сообщение ушло только способом «%s» (до этого: %s)", how, last)
+                return mid
+            except Exception as ex:
+                last = ex
+                log.warning("MAX: отправка (%s) не прошла: %s | текст: %s", how, ex, text[:120].replace("\n", " "))
+        raise last
 
     async def edit(self, chat, ref, text, kb=None):
         if ref:
-            await bot.edit_message(message_id=ref, text=text, attachments=_markup(kb), format=ParseMode.HTML)
+            try:
+                await bot.edit_message(message_id=ref, text=text, attachments=_markup(kb), format=ParseMode.HTML)
+            except Exception as ex:
+                log.warning("MAX: правка (html) не прошла: %s — пробую простым текстом", ex)
+                await bot.edit_message(message_id=ref, text=_plain(text), attachments=_markup(kb))
 
     async def delete(self, chat, ref):
         if ref:
@@ -65,6 +87,13 @@ class MaxUI:
 
     async def send_file(self, chat, path, filename, caption):
         await bot.send_message(chat_id=chat, text=caption, attachments=[InputMedia(path)])
+
+
+def _plain(text):
+    """HTML -> простой текст (на случай, если MAX не принял разметку)."""
+    import html as _h
+    import re as _re
+    return _h.unescape(_re.sub(r"<[^>]+>", "", text or ""))[:3900]
 
 
 def _download(url):

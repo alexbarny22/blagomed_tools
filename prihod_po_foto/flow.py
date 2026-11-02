@@ -396,8 +396,11 @@ async def next_step(uid, chat):
     s = st(uid)
     for i, L in enumerate(s["lines"]):
         if not L["key"] and not L["skip"]:
+            log.info("Следующий вопрос: строка %s (чат %s)", L["line"]["n"], chat)
             await ask_line(uid, chat, i)
+            log.info("Вопрос по строке %s отправлен", L["line"]["n"])
             return
+    log.info("Все строки сопоставлены — итог (чат %s)", chat)
     await summary(uid, chat)
 
 
@@ -656,11 +659,15 @@ async def on_callback(uid, chat, ref, data, cb):
             return
         it = s["shown"][k]
         L = s["lines"][i]
+        log.info("Выбор: строка %s -> %s", L["line"]["n"], it["name"])
         L.update(key=it["key"], name1c=it["name"], how="выбрано", skip=False)
         try:
-            await asyncio.to_thread(onec.remember, s["ka"]["Description"], s["inn"], L["line"], it)
+            await asyncio.wait_for(asyncio.to_thread(onec.remember, s["ka"]["Description"], s["inn"], L["line"], it),
+                                   timeout=20)
+            log.info("Записано в таблицу сопоставлений")
             await ui.toast(cb, "Записал в таблицу")
         except Exception as ex:
+            log.warning("Таблица сопоставлений: %r", ex)
             await ui.toast(cb, f"Не записалось в таблицу: {ex}"[:190], True)
         try:
             await ui.edit(chat, ref, f"✅ Строка {L['line']['n']}: {e(L['line']['name'])}\n→ <b>{e(it['name'])}</b>")
