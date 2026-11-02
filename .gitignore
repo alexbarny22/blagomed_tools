@@ -16,3 +16,4 @@ blagomed_cost/wb_catalog.json
 cost_history.json
 blagomed_cost/*.xlsx
 *.pdf
+prices_cache.json

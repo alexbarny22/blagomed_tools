@@ -31,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(HERE, "settings.json")
 LOG_FILE = os.path.join(HERE, "move_bot.log")
 CACHE_FILE = os.path.join(HERE, "cache_1c.json")   # сохранённые номенклатура и описание базы
+PRICE_CACHE = os.path.join(HERE, "prices_cache.json")  # закупочные цены, обновляются раз в день
 CACHE_DAYS = getattr(config, "CACHE_DAYS", 30)
 CACHE_VERSION = 2                                   # старые (неполные) файлы перезагружаются       # полная перезагрузка не чаще раза в N дней
 EMPTY = "00000000-0000-0000-0000-000000000000"
@@ -522,6 +523,8 @@ class App(tk.Tk):
         self.btn_refresh = ttk.Button(bot, text="Обновить остатки", command=self.refresh)
         self.btn_refresh.pack(side="left")
         ttk.Button(bot, text="Снять отметки", command=self.clear_checks).pack(side="left", padx=6)
+        self.btn_prices = ttk.Button(bot, text="Обновить цены", command=self.reload_prices)
+        self.btn_prices.pack(side="left", padx=(0, 6))
         self.btn_noms = ttk.Button(bot, text="Обновить номенклатуру", command=self.reload_noms)
         self.btn_noms.pack(side="left")
         self.lbl_sum = ttk.Label(bot, text="")
@@ -546,6 +549,7 @@ class App(tk.Tk):
         self.btn_move.configure(state=st)
         self.btn_refresh.configure(state=st)
         self.btn_noms.configure(state=st)
+        self.btn_prices.configure(state=st)
         self.configure(cursor="watch" if on else "")
         if msg:
             self.say(msg)
@@ -704,6 +708,58 @@ class App(tk.Tk):
         else:
             self.choose_warehouses()
 
+    def reload_prices(self):
+        if self.busy:
+            return
+        self._force_prices = True
+        self.refresh()
+
+    # ---------- кэш закупочных цен (раз в день; при «Передать» цены всё равно сверяются с 1С)
+    def cached_prices(self, need, force=False):
+        today = datetime.date.today().isoformat()
+        try:
+            with open(PRICE_CACHE, encoding="utf-8") as f:
+                c = json.load(f)
+        except Exception:
+            c = {}
+        if force or c.get("date") != today or c.get("price_type") != self.price_type:
+            c = {"date": today, "price_type": self.price_type, "prices": {}}
+        known = c["prices"]                       # ключ -> цена или None (цены в 1С нет)
+        missing = [k for k in need if k not in known]
+        if missing:
+            got = self.od.prices(self.price_type, missing)
+            for k in missing:
+                known[k] = got.get(k)
+            self.save_price_cache(c)
+            src = (f"из 1С по {len(missing)} поз." + ("" if len(missing) == len(need)
+                   else f", остальные {len(need) - len(missing)} — из сохранённых за сегодня"))
+        else:
+            src = "сохранённые за сегодня (кнопка «Обновить цены» — загрузить заново)"
+            self.od.price_info = ""
+        res = {k: known[k] for k in need if known.get(k)}
+        self.price_src = f"Закупочные цены: {src}; цена есть у {len(res)} из {len(need)} позиций."
+        return res
+
+    def save_price_cache(self, c):
+        try:
+            tmp = PRICE_CACHE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(c, f, ensure_ascii=False)
+            os.replace(tmp, PRICE_CACHE)
+        except Exception as e:
+            log("Не удалось сохранить цены: " + str(e))
+
+    def update_price_cache(self, fresh):
+        """После сверки при передаче — обновляем сохранённые цены свежими."""
+        try:
+            with open(PRICE_CACHE, encoding="utf-8") as f:
+                c = json.load(f)
+            if c.get("price_type") == self.price_type:
+                c["prices"].update(fresh)
+                self.save_price_cache(c)
+        except Exception:
+            pass
+
     def reload_noms(self):
         if self.busy:
             return
@@ -820,7 +876,9 @@ class App(tk.Tk):
             name = self.noms.get(k) or extra_names.get(k)
             if name is not None and self.find_pair(name):
                 need.add(k)
-        prices = self.od.prices(self.price_type, need)
+        force = getattr(self, "_force_prices", False)
+        self._force_prices = False
+        prices = self.cached_prices(need, force)
         return stock, prices, extra
 
     def refresh_done(self, res):
@@ -859,7 +917,11 @@ class App(tk.Tk):
             }
         no_price = sum(1 for i in self.items.values() if i["pair"] and not i["price"])
         if getattr(self.od, "price_info", ""):
-            self.say("Закупочные цены найдены — " + self.od.price_info + ".")
+            self.say("Источники цен в 1С — " + self.od.price_info + ".")
+            self.od.price_info = ""
+        if getattr(self, "price_src", ""):
+            self.say(self.price_src)
+            self.price_src = ""
         msg = f"Остатки обновлены: к передаче доступно {len(self.items)} позиций"
         if no_pair:
             msg += f" (ещё {no_pair} без карточки {config.SUFFIX} скрыты)"
@@ -1042,6 +1104,7 @@ class App(tk.Tk):
                                ", ".join(sorted(od.props[sort_row])))
         stock = od.stock(s["src_key"])
         prices = od.prices(self.price_type, [l[0] for l in lines])
+        self.update_price_cache({l[0]: prices.get(l[0]) for l in lines})
         problems = []
         for key, pair, qty, name in lines:
             free = stock.get((key, s["src_key"]), [0.0, 0.0])[1]

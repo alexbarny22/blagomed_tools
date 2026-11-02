@@ -17,7 +17,7 @@ REPO = "alexbarny22/blagomed_tools"
 BRANCH = "main"
 FOLDER = "move_bot"          # папка проекта внутри репозитория
 HERE = os.path.dirname(os.path.abspath(__file__))
-PROTECTED = {"config.py", "settings.json", "cache_1c.json", "move_bot.log", "start.bat"}
+PROTECTED = {"config.py", "settings.json", "cache_1c.json", "prices_cache.json", "move_bot.log", "start.bat"}
 UA = {"User-Agent": "blagomed-updater", "Cache-Control": "no-cache"}
 
 
