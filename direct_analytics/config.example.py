@@ -53,9 +53,8 @@ MOBILE_MIN = 50
 
 # --- 6. Куда сохранять отчёт ------------------------------------------
 # Папка, куда кладутся index.html (дашборд) и Excel-файлы.
-# На Timeweb это папка внутри public_html сайта, например:
-#   OUTPUT_DIR = "/home/c/cl123456/blagomedi.ru/public_html/direct-a7k3p9"
-# Название папки сделайте «непонятным» — это часть адреса страницы.
+# На Timeweb — папка ОТДЕЛЬНОГО сайта / поддомена (не основной сайт blagomedi.ru), например:
+#   OUTPUT_DIR = "/home/c/cl123456/direct_report/public_html"   (поддомен direct.blagomedi.ru)
 # Для проверки у себя на компьютере можно оставить "report" — появится рядом со скриптом.
 OUTPUT_DIR = "report"
 
