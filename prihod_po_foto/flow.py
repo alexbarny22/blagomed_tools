@@ -412,8 +412,12 @@ async def ask_line(uid, chat, i, cands=None):
     cands = cands if cands is not None else L["cands"]
     s["shown"] = [it for it, _ in cands]
     left = sum(1 for x in s["lines"] if not x["key"] and not x["skip"])
-    rows = [[((f"🤖 {it['name'][:55]}" if it.get("ai") else f"{it['name'][:55]} ({sc}%)"), f"pick:{i}:{k}")]
-            for k, (it, sc) in enumerate(cands)]
+    NUM = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
+    # полные названия — в тексте под номерами, на кнопках только номера (длинные названия на кнопках обрезаются)
+    opts = "\n".join(f"{NUM[k]} {'🤖 ' if it.get('ai') else ''}<b>{e(it['name'])}</b>"
+                      + (f" · код {e(it['code'])}" if it.get("code") else "")
+                      for k, (it, sc) in enumerate(cands[:len(NUM)]))
+    rows = [[(NUM[k], f"pick:{i}:{k}") for k in range(min(len(cands), len(NUM)))]] if cands else []
     rows.append([("🔎 Найти по слову", f"find:{i}"), ("⏭ Не приходовать", f"skip:{i}")])
     rows.append(CANCEL)
     ln = L["line"]
@@ -422,7 +426,9 @@ async def ask_line(uid, chat, i, cands=None):
         chat,
         f"❓ Строка {ln['n']} (осталось неясных: {left})\n<b>{e(ln['name'])}</b>{art}\n"
         f"{ln['qty']:g} {e(ln['unit'])} × {money(ln['price'])} = {money(ln['sum'])}\n\n"
-        f"Что это у нас в 1С? Выбор запишется в таблицу сопоставлений — в следующий раз не спрошу."
+        + (f"Что это у нас в 1С? Нажмите номер:\n\n{opts}\n\n" if cands else
+           "Похожих товаров не нашёл — нажмите «🔎 Найти по слову».\n\n")
+        + "Выбор запишется в таблицу сопоставлений — в следующий раз не спрошу."
         + ("\n🤖 — вариант, который предложила нейросеть." if any(it.get("ai") for it, _ in cands) else ""),
         rows)
 
