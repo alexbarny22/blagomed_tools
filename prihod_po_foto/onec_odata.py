@@ -170,8 +170,18 @@ class OneC:
         """Похожие позиции нашей номенклатуры: [(item, score)]."""
         if not self._choices:
             self.load_items()
-        res = process.extract(norm(text), self._choices, scorer=fuzz.WRatio, limit=limit)
-        return [(self.items[i], round(sc)) for _, sc, i in res]
+        q = norm(text)
+        words = [w for w in q.split() if len(w) >= 3 and not w.isdigit()]
+        pool = process.extract(q, self._choices, scorer=fuzz.token_set_ratio, limit=max(60, limit * 10))
+        def rank(hit):
+            _, sc, i = hit
+            name = self._choices[i]
+            # главное — совпадение целых слов (чехол, подушка…), потом общая похожесть
+            same = sum(1 for w in words if w in name.split() or (len(w) >= 5 and w[:5] in name))
+            first = 1 if words and words[0][:5] in name else 0
+            return (first, same, fuzz.WRatio(q, name), sc)
+        best = sorted(pool, key=rank, reverse=True)[:limit]
+        return [(self.items[i], round(fuzz.WRatio(q, self._choices[i]))) for _, _, i in best]
 
     def match_line(self, inn, line):
         """

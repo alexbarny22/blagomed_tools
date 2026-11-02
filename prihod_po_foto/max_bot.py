@@ -78,6 +78,7 @@ def _download(url):
 
 @dp.bot_started()
 async def on_bot_started(event: BotStarted):
+    flow.seen(event.user.user_id, event.chat_id)
     await flow.on_start(event.user.user_id, event.chat_id)
 
 
@@ -87,6 +88,7 @@ async def on_message(event: MessageCreated):
     if not m.sender or not m.body:
         return
     uid, chat = m.sender.user_id, m.recipient.chat_id
+    flow.seen(uid, chat)
     if getattr(m.sender, "is_bot", False):
         return
     atts = m.body.attachments or []
@@ -115,9 +117,20 @@ async def on_message(event: MessageCreated):
 @dp.message_callback()
 async def on_callback(event: MessageCallback):
     uid = event.callback.user.user_id
-    chat = event.message.recipient.chat_id if event.message else None
-    ref = event.message.body.mid if event.message and event.message.body else None
-    flow.log.info("Кнопка %s от %s", event.callback.payload, uid)
+    msg = event.message
+    chat = msg.recipient.chat_id if msg and msg.recipient else None
+    if not chat:
+        # MAX не всегда присылает исходное сообщение с нажатой кнопкой — берём чат из прошлых сообщений
+        chat = flow.CHATS.get(uid) or flow.CHATS.get(("max_chat", uid))
+    ref = msg.body.mid if msg and msg.body else None
+    flow.log.info("Кнопка %s от %s (чат %s, сообщение %s)", event.callback.payload, uid, chat, ref)
+    if not chat:
+        try:
+            await bot.send_message(user_id=uid, text="Не понял, в какой чат отвечать. Напишите боту «/start» "
+                                                     "и повторите.")
+        except Exception:
+            flow.log.exception("Не удалось ответить на кнопку")
+        return
     flow.run(flow.on_callback(uid, chat, ref, event.callback.payload or "", event), chat)
 
 
