@@ -267,16 +267,46 @@ class OData:
         if r.status_code not in (200, 204):
             raise RuntimeError(self._err(r))
 
-    def stock(self):
-        """{(номенклатура, склад): [в наличии, свободно]}."""
+    def _balance(self, reg, condition, label=None):
+        """Остатки виртуальной таблицы с условием отбора на стороне 1С.
+        Пробует Condition (быстро), затем $filter, затем всё целиком (медленно)."""
+        for cond in (condition.replace("'", "''"), condition):   # два варианта записи кавычек
+            try:
+                return self.get_all(f"{reg}/Balance(Condition='{cond}')", page=2000, label=label)
+            except RuntimeError as e:
+                log(f"Остатки: Condition не подошёл — {e}")
+        try:
+            return self.get_all(reg + "/Balance", {"$filter": condition}, page=2000, label=label)
+        except RuntimeError as e:
+            log(f"Остатки: $filter не подошёл — {e}")
+        self._need_local_filter = True
+        return self.get_all(reg + "/Balance", page=2000, label=label,
+                            order="Номенклатура_Key,Склад_Key")
+
+    def stock(self, src_key, store_keys=(), mg_keys=()):
+        """{(номенклатура, склад): [в наличии, свободно]}.
+        Общий склад — все позиции; склады магазинов — только позиции (МГ)."""
         reg = next((r for r in STOCK_REGS if r in self.sets), None)
         if not reg:
             raise RuntimeError("В OData нет регистров остатков (запустите setup_odata_move.bat).")
+        self._need_local_filter = False
+        rows = self._balance(reg, f"Склад_Key eq guid'{src_key}'", label="Остатки общего склада")
+        store_keys, mg_keys = list(store_keys), list(mg_keys)
+        if store_keys and mg_keys and not self._need_local_filter:
+            whs = " or ".join(f"Склад_Key eq guid'{k}'" for k in store_keys)
+            for i in range(0, len(mg_keys), 20):
+                noms = " or ".join(f"Номенклатура_Key eq guid'{k}'" for k in mg_keys[i:i + 20])
+                rows += self._balance(reg, f"({whs}) and ({noms})")
+                if self.progress:
+                    self.progress(f"Остатки магазинов: {min(i + 20, len(mg_keys))} из {len(mg_keys)} позиций (МГ)…")
+        allowed_wh = {src_key} | set(store_keys)
+        allowed_mg = set(mg_keys)
         res = {}
-        for row in self.get_all(reg + "/Balance", page=2000, label="Остатки",
-                                order="Номенклатура_Key,Склад_Key"):
+        for row in rows:
             nom, wh = row.get("Номенклатура_Key"), row.get("Склад_Key")
             if not nom or not wh:
+                continue
+            if wh != src_key and (wh not in allowed_wh or nom not in allowed_mg):
                 continue
             nal = float(row.get("ВНаличииBalance") or 0)
             rez = sum(float(v or 0) for k, v in row.items()
@@ -752,11 +782,12 @@ class App(tk.Tk):
         return self.pairs.get(mg_base(norm(name)))
 
     def load_stock_and_prices(self):
-        stock = self.od.stock()
-        whs = {self.settings["src_key"], self.settings["dst_key"]}
-        whs |= {self.warehouses[n] for n in self.store_names() if n in self.warehouses}
+        stores = {self.settings["dst_key"]}
+        stores |= {self.warehouses[n] for n in self.store_names() if n in self.warehouses}
+        stores.discard(self.settings["src_key"])
+        stock = self.od.stock(self.settings["src_key"], stores, self.mg_keys)
         unknown = {k for (k, wh), v in stock.items()
-                   if wh in whs and k not in self.noms and k not in self.mg_keys}
+                   if k not in self.noms and k not in self.mg_keys}
         extra = []
         if unknown:
             log(f"Позиций с остатком нет в сохранённой номенклатуре: {len(unknown)} — догружаю")
@@ -994,7 +1025,7 @@ class App(tk.Tk):
             raise RuntimeError("У «Пересортицы товаров» в вашей конфигурации другая структура, "
                                "ничего не создано. Поля строки: " +
                                ", ".join(sorted(od.props[sort_row])))
-        stock = od.stock()
+        stock = od.stock(s["src_key"])
         prices = od.prices(self.price_type, [l[0] for l in lines])
         problems = []
         for key, pair, qty, name in lines:
