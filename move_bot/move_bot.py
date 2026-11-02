@@ -297,8 +297,8 @@ class OData:
                 if r.status_code in (200, 204):
                     return
                 last = self._err(r)
-                if r.status_code not in (500, 502, 503, 504):
-                    break
+                if r.status_code not in (502, 503, 504) or "Не удалось провести" in last:
+                    break       # отказ самой 1С (остатки, незаполненные поля…) — повтор не поможет
             except requests.RequestException as e:
                 last = f"нет ответа от 1С ({e})"
             time.sleep(10 * (attempt + 1))
@@ -1282,7 +1282,9 @@ class App(tk.Tk):
                 od.post_doc(entity, d["Ref_Key"])
             except Exception as e:
                 raise RuntimeError(f"{prefix}«{title}» № {num} создан, но НЕ проведён. Дальнейшие "
-                                   f"документы не создавались — проверьте его в 1С.\n\n{e}")
+                                   f"документы не создавались.\n\nОткройте его в 1С и нажмите «Провести» — "
+                                   f"1С покажет причину. Если исправить нельзя, пометьте его на удаление "
+                                   f"и повторите передачу в боте.\n\n{e}")
             done.append((title, num))
             return num
 
