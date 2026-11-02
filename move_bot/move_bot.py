@@ -1230,6 +1230,54 @@ class App(tk.Tk):
         self.run_bg(lambda: self.move_work(lines), self.move_done,
                     "Проверяю остатки и создаю документы…")
 
+    def pick_article(self, entities, prefer):
+        """Первая подходящая статья из справочника (предпочтительно с «Прочие…» в названии)."""
+        od = self.od
+        for ent in entities:
+            if ent not in od.sets:
+                continue
+            try:
+                rows = od.get(ent, {"$select": "Ref_Key,Description,IsFolder,DeletionMark"})
+            except RuntimeError as e:
+                log(f"Статьи {ent} не прочитаны — {e}")
+                continue
+            rows = [r for r in rows if not r.get("IsFolder") and not r.get("DeletionMark")]
+            want = norm(prefer) if prefer else ""
+            for test in ([lambda r: norm(r["Description"]) == want] if want else []) + \
+                        [lambda r: "проч" in norm(r["Description"]), lambda r: True]:
+                hit = next((r for r in rows if test(r)), None)
+                if hit:
+                    return hit["Ref_Key"], hit["Description"]
+        return None, None
+
+    def sort_articles(self):
+        """Статьи доходов/расходов для пересортицы (1С требует их, если стоимость позиций
+        различается) + «приходовать по себестоимости списания», если такой реквизит есть."""
+        if getattr(self, "_sort_art", None) is not None:
+            return self._sort_art
+        od, res = self.od, {}
+        fields = od.props.get(DOC_SORT, set())
+        for f in fields:
+            if "Себестоимост" in f and not f.endswith("_Key") and "Списан" in f:
+                res[f] = True
+        exp_key, exp_name = self.pick_article(
+            ["ChartOfCharacteristicTypes_СтатьиРасходов", "Catalog_СтатьиРасходов"],
+            getattr(config, "SORT_EXPENSE_ITEM", ""))
+        inc_key, inc_name = self.pick_article(
+            ["Catalog_СтатьиДоходов", "ChartOfCharacteristicTypes_СтатьиДоходов"],
+            getattr(config, "SORT_INCOME_ITEM", ""))
+        if exp_key:
+            res["СтатьяРасходов_Key"] = exp_key
+        if inc_key:
+            res["СтатьяДоходов_Key"] = inc_key
+        log(f"Пересортица: статья расходов «{exp_name}», статья доходов «{inc_name}», "
+            f"доп. реквизиты {[k for k in res if not k.endswith('_Key')]}")
+        if not exp_key or not inc_key:
+            log("Статьи доходов/расходов не опубликованы в OData — "
+                "отметьте «Статьи расходов» и «Статьи доходов» в настройке OData")
+        self._sort_art = res
+        return res
+
     def find_template(self):
         """Последняя проведённая передача между этими же организациями — образец шапки."""
         flt = (f"Организация_Key eq guid'{self.org_from[0]}' and Posted eq true "
@@ -1295,6 +1343,7 @@ class App(tk.Tk):
               "Комментарий": comment}
         if config.PERESORT_STATUS:
             ps["Статус"] = config.PERESORT_STATUS
+        ps.update(self.sort_articles())
         ps = od.only_existing(DOC_SORT, ps)
         ps["Товары"] = [od.only_existing(sort_row, {
             "LineNumber": str(n), "Номенклатура_Key": key,
