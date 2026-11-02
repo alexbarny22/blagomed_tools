@@ -19,6 +19,7 @@ import re
 import threading
 import time
 import traceback
+import urllib.parse
 import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -213,13 +214,28 @@ class OData:
                 return res
             skip += page
 
+    @staticmethod
+    def or_batches(keys, make, limit=1400):
+        """Делит ключи на пачки так, чтобы закодированный адрес запроса был короче limit
+        (веб-сервер 1С по умолчанию отбрасывает запросы длиннее ~2000 символов,
+        а каждая русская буква в адресе занимает 6 символов)."""
+        batch = []
+        for k in keys:
+            trial = batch + [k]
+            if batch and len(urllib.parse.quote(make(trial))) > limit:
+                yield batch
+                batch = [k]
+            else:
+                batch = trial
+        if batch:
+            yield batch
+
     def get_by_keys(self, entity, keys, select):
         """Карточки по списку ключей (небольшими пачками)."""
-        res, keys = [], list(keys)
-        for i in range(0, len(keys), 20):
-            part = keys[i:i + 20]
-            flt = " or ".join(f"Ref_Key eq guid'{k}'" for k in part)
-            res += self.get(entity, {"$filter": flt, "$select": select})
+        res = []
+        make = lambda part: " or ".join(f"Ref_Key eq guid'{k}'" for k in part)
+        for part in self.or_batches(list(keys), make):
+            res += self.get(entity, {"$filter": make(part), "$select": select})
         return res
 
     def load_meta(self):
@@ -332,17 +348,20 @@ class OData:
 
     def get_by_field(self, entity, field, keys, extra_filter="", select=None, page=20):
         """Строки, где field равно одному из keys (пачками по 20 — короткие запросы)."""
-        res, keys = [], list(keys)
-        for i in range(0, len(keys), page):
-            flt = "(" + " or ".join(f"{field} eq guid'{k}'" for k in keys[i:i + page]) + ")"
-            if extra_filter:
-                flt = extra_filter + " and " + flt
-            p = {"$filter": flt}
+        res, keys, done = [], list(keys), 0
+
+        def make(part):
+            flt = "(" + " or ".join(f"{field} eq guid'{k}'" for k in part) + ")"
+            return (extra_filter + " and " + flt) if extra_filter else flt
+
+        for part in self.or_batches(keys, make):
+            p = {"$filter": make(part)}
             if select:
                 p["$select"] = select
             res += self.get(entity, p)
-            if self.progress and len(keys) > page:
-                self.progress(f"Цены: проверено {min(i + page, len(keys))} из {len(keys)} позиций…")
+            done += len(part)
+            if self.progress:
+                self.progress(f"Цены: проверено {done} из {len(keys)} позиций…")
         return res
 
     def prices(self, price_type_key, keys=None):
@@ -369,11 +388,10 @@ class OData:
                 # регистр доступен только наборами записей — отбираем наборы, где есть наши позиции
                 rows = []
                 try:
-                    for i in range(0, len(keys), 10):
-                        cond = " or ".join(f"d/Номенклатура_Key eq guid'{k}'" for k in keys[i:i + 10])
-                        rows += self.get(reg, {"$filter": f"RecordSet/any(d: {cond})"})
-                        if self.progress:
-                            self.progress(f"Цены: проверено {min(i + 10, len(keys))} из {len(keys)} позиций…")
+                    make = lambda part: "RecordSet/any(d: " + " or ".join(
+                        f"d/Номенклатура_Key eq guid'{k}'" for k in part) + ")"
+                    for part in self.or_batches(keys, make):
+                        rows += self.get(reg, {"$filter": make(part)})
                 except RuntimeError as e:
                     log(f"Цены: отбор наборов {reg} не поддерживается — {e}")
                     rows = None
@@ -422,7 +440,7 @@ class OData:
                 info.append(f"документы установки цен: {len(self._latest_prices(conv, price_type_key))}")
                 all_rows += conv
             except RuntimeError as e:
-                log("Цены из документов не прочитаны — " + str(e))
+                log("Цены из документов не прочитаны — " + str(e)[:500])
                 info.append("документы установки цен: ошибка чтения")
         else:
             info.append("документы установки цен: не опубликованы в OData")
