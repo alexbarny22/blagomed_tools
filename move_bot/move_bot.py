@@ -1435,11 +1435,19 @@ class App(tk.Tk):
 
         # ---- 3. Передача позиций (МГ) между организациями, по закупочной цене исходного товара
         tpl = self.find_template()
+        want_op = getattr(config, "TRANSFER_OPERATION", "commission")
+        ops = (["ПередачаНаКомиссиюВДругуюОрганизацию", "ПередачаНаКомиссию"]
+               if want_op == "commission" else [want_op] if want_op else [])
+        same_op = bool(tpl) and (not ops or tpl.get("ХозяйственнаяОперация") in ops)
         head = {}
         if tpl:
             for k, v in tpl.items():
                 if (k in TPL_SKIP or "@" in k or isinstance(v, list)
                         or "Сумма" in k or "Основание" in k or "Дата" in k):
+                    continue
+                # образец с другой операцией (продажа): не берём договор и условия оплаты
+                if not same_op and any(w in k for w in ("Договор", "Оплат", "Платеж", "Расчет",
+                                                        "Соглашение", "ХозяйственнаяОперация")):
                     continue
                 head[k] = v
         has_dst = od.has(DOC_TRANSFER, "СкладПолучатель_Key")
@@ -1481,7 +1489,21 @@ class App(tk.Tk):
         head["СуммаДокумента"] = round(total, 2)
         head = od.only_existing(DOC_TRANSFER, head)
         head["Товары"] = rows
-        n_tr = step("Передача товаров между организациями", DOC_TRANSFER, head)
+        n_tr = None
+        variants = [op for op in ops if not same_op or op == head.get("ХозяйственнаяОперация")] or [None]
+        for i, op in enumerate(variants):
+            body = dict(head)
+            if op:
+                body["ХозяйственнаяОперация"] = op
+            try:
+                n_tr = step("Передача товаров между организациями", DOC_TRANSFER, body)
+                break
+            except RuntimeError as e:
+                if i < len(variants) - 1 and "создан, но" not in str(e) and \
+                        ("Перечисление" in str(e) or "ХозяйственнаяОперация" in str(e)):
+                    log(f"Операция «{op}» не подошла — пробую следующую")
+                    continue
+                raise
 
         # ---- 4. Перемещение позиций (МГ) на склад магазина — только если передача
         #         сама не переносит товар на склад магазина
