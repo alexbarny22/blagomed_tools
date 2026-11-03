@@ -8,6 +8,9 @@
 """
 import base64
 import datetime
+import socket
+import subprocess
+import urllib.parse
 import functools
 import json
 import os
@@ -373,8 +376,56 @@ def api_reinstall():
     return jsonify({"ok": True})
 
 
+def find_odata_url():
+    """IIS может быть привязан к конкретному адресу сервера, и 127.0.0.1 тогда отвечает 404.
+    Пробуем адрес из config.py, затем имя и все адреса этого компьютера."""
+    base = config.ODATA_URL.rstrip("/")
+    u = urllib.parse.urlsplit(base)
+    hosts = [u.hostname]
+    try:
+        name = socket.gethostname()
+        hosts += [name] + socket.gethostbyname_ex(name)[2]
+    except Exception:
+        pass
+    for h in ["server1c"] + hosts:
+        if h not in hosts:
+            hosts.append(h)
+    seen = []
+    for h in hosts:
+        if not h or h in seen:
+            continue
+        seen.append(h)
+        url = f"{u.scheme}://{h}{':' + str(u.port) if u.port else ''}{u.path}"
+        try:
+            r = core.od.s.get(url + "/odata/standard.odata/", timeout=15)
+            if r.status_code in (200, 401):
+                if url != base:
+                    mb.log(f"1С отвечает по адресу {url} (адрес из config.py {base} не подошёл)")
+                return url
+            mb.log(f"Адрес {url}: HTTP {r.status_code}")
+        except Exception as e:
+            mb.log(f"Адрес {url}: нет ответа ({e})")
+    return base
+
+
+def fix_task():
+    """Снимает ограничение «останавливать задачу через 3 дня» с задачи автозапуска."""
+    if os.name != "nt":
+        return
+    ps = ("$t=Get-ScheduledTask -TaskName 'move_bot_web' -ErrorAction SilentlyContinue; "
+          "if($t -and $t.Settings.ExecutionTimeLimit -ne 'PT0S'){"
+          "$t.Settings.ExecutionTimeLimit='PT0S'; Set-ScheduledTask -InputObject $t | Out-Null}")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps], timeout=60,
+                       capture_output=True)
+    except Exception as e:
+        mb.log("Настройка задачи автозапуска не изменена: " + str(e))
+
+
 def boot():
     def go():
+        url = find_odata_url()
+        core.od.base = url.rstrip("/") + "/odata/standard.odata/"
         core.init()
         core.refresh()
     core.run("Подключаюсь к 1С и загружаю справочники…", go)
@@ -382,6 +433,7 @@ def boot():
 
 if __name__ == "__main__":
     mb.log(f"Веб-бот запущен, версия {version()}, порт {PORT}")
+    threading.Thread(target=fix_task, daemon=True).start()
     boot()
     try:
         from waitress import serve

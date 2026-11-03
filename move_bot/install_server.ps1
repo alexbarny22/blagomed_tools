@@ -79,10 +79,28 @@ netsh advfirewall firewall add rule name="move_bot web" dir=in action=allow prot
 Write-Host "  порт открыт"
 
 Step "6. Автозапуск (задача Windows «move_bot_web»)"
-schtasks /End /TN "move_bot_web" 2>$null | Out-Null
-schtasks /Delete /TN "move_bot_web" /F 2>$null | Out-Null
-schtasks /Create /TN "move_bot_web" /TR "`"$Target\server_run.bat`"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F | Out-Null
-schtasks /Run /TN "move_bot_web" | Out-Null
+Stop-ScheduledTask -TaskName "move_bot_web" -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName "move_bot_web" -Confirm:$false -ErrorAction SilentlyContinue
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like "*web.py*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+$act  = New-ScheduledTaskAction -Execute "$Target\server_run.bat" -WorkingDirectory $Target
+$trg  = New-ScheduledTaskTrigger -AtStartup
+$set  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 `
+          -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -StartWhenAvailable
+$prin = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName "move_bot_web" -Action $act -Trigger $trg -Settings $set -Principal $prin | Out-Null
+Start-ScheduledTask -TaskName "move_bot_web"
+Start-Sleep -Seconds 20
+try {
+    Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing -TimeoutSec 10 | Out-Null
+    Write-Host "  страница бота отвечает" -ForegroundColor Green
+} catch {
+    if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) {
+        Write-Host "  страница бота отвечает (просит пароль — так и должно быть)" -ForegroundColor Green
+    } else {
+        Write-Host "  страница пока не отвечает — посмотрите move_bot.log и server_run.log в $Target" -ForegroundColor Yellow
+    }
+}
 Write-Host "  бот запущен и будет стартовать вместе с сервером"
 
 Step "Готово"
