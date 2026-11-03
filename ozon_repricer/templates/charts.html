@@ -34,6 +34,8 @@
     <option value="changes">Больше всего изменений</option>
     <option value="name">По названию</option>
   </select>
+  <label class="switch muted" id="show-hidden-wrap" style="display:none">
+    <input type="checkbox" id="show-hidden"><span>показать скрытые (<span id="n-hidden">0</span>)</span></label>
   <span class="muted" id="count"></span>
 </div>
 <div class="chartgrid" id="grid"><div class="empty">Загрузка…</div></div>
@@ -56,7 +58,10 @@ async function load(p) {
 }
 
 function drawSummary() {
-  const P = D.products;
+  const P = D.products.filter(p => !p.hidden);
+  const nHidden = D.products.length - P.length;
+  document.getElementById('n-hidden').textContent = nHidden;
+  document.getElementById('show-hidden-wrap').style.display = nHidden ? '' : 'none';
   const moved = P.filter(p => p.delta_pct !== 0 || p.changes.length);
   document.getElementById('k-moved').textContent = moved.length;
   document.getElementById('k-up').textContent = P.filter(p => p.delta_pct > 0).length;
@@ -92,7 +97,9 @@ function drawSummary() {
 function visible() {
   const q = document.getElementById('q').value.trim().toLowerCase();
   const f = document.getElementById('flt').value, so = document.getElementById('sort').value;
+  const sh = document.getElementById('show-hidden').checked;
   let L = D.products.filter(p => {
+    if (p.hidden && !sh) return false;
     if (q && !(p.name.toLowerCase().includes(q) || String(p.offer_id).toLowerCase().includes(q))) return false;
     if (f === 'moved') return p.delta_pct !== 0 || p.changes.length > 0 || (p.lo !== p.hi);
     if (f === 'managed') return p.mode !== 'watch' && !p.locked;
@@ -117,13 +124,15 @@ function renderGrid() {
   if (!L.length) { g.innerHTML = '<div class="empty">Нет товаров для показа</div>'; return; }
   g.innerHTML = L.map(p => {
     const dcls = p.delta_pct > 0 ? 'up' : p.delta_pct < 0 ? 'down' : '';
-    return `<a class="chartcard ${p.locked ? 'locked' : ''}" href="/product/${p.product_id}" data-id="${p.product_id}">
-      <div class="cc-head"><div class="cc-name">${esc(p.name) || '(без названия)'}</div>
-        <div class="cc-delta ${dcls}">${p.delta_pct > 0 ? '+' : ''}${p.delta_pct}%</div></div>
+    return `<a class="chartcard ${p.locked ? 'locked' : ''} ${p.hidden ? 'hidden-card' : ''}" href="/product/${p.product_id}" data-id="${p.product_id}">
+      <div class="cc-head">${imgTag(p.image, 100, 'cc-img')}
+        <div style="flex:1;min-width:0"><div class="cc-name">${esc(p.name) || '(без названия)'}</div>
       <div class="cc-sub"><span class="mono">${esc(p.offer_id)}</span>
+        ${p.hidden ? '<span class="pill nodata">скрыт</span>' : ''}
         ${p.locked ? '<span class="pill mp">MPSpace</span>' : ''}
         ${p.changes.length ? `<span class="pill real">изменений: ${p.changes.length}</span>` : ''}
-        ${['low','high','off'].includes(p.status) ? `<span class="pill ${p.status}">${esc(p.status_text)}</span>` : ''}</div>
+        ${['low','high','off'].includes(p.status) ? `<span class="pill ${p.status}">${esc(p.status_text)}</span>` : ''}</div></div>
+        <div class="cc-delta ${dcls}">${p.delta_pct > 0 ? '+' : ''}${p.delta_pct}%</div></div>
       <div class="cc-chart"><canvas></canvas></div>
       <div class="cc-foot"><span>было <b>${rub(p.first)}</b></span><span>стало <b>${rub(p.last)}</b></span>
         <span class="muted">мин ${rub(p.lo)} · макс ${rub(p.hi)}</span></div></a>`;
@@ -144,6 +153,7 @@ function renderGrid() {
 document.getElementById('q').oninput = renderGrid;
 document.getElementById('flt').onchange = renderGrid;
 document.getElementById('sort').onchange = renderGrid;
+document.getElementById('show-hidden').onchange = renderGrid;
 window.onRunFinished = () => load(period);
 periodPicker(document.getElementById('period'), load, 7);
 </script>

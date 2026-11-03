@@ -84,6 +84,11 @@ def init():
         cols = [r[1] for r in con.execute("PRAGMA table_info(rules)")]
         if "locked" not in cols:  # обновление старой базы: отметка «Под MPSpace»
             con.execute("ALTER TABLE rules ADD COLUMN locked INTEGER DEFAULT 0")
+        if "hidden" not in cols:  # скрытые из таблиц товары
+            con.execute("ALTER TABLE rules ADD COLUMN hidden INTEGER DEFAULT 0")
+        pcols = [r[1] for r in con.execute("PRAGMA table_info(products)")]
+        if "image" not in pcols:  # фото товара
+            con.execute("ALTER TABLE products ADD COLUMN image TEXT")
 
 
 def q(sql, args=(), one=False):
@@ -118,7 +123,7 @@ def log(level, message):
 def get_rule(pid):
     r = q("SELECT * FROM rules WHERE product_id=?", (pid,), one=True)
     return r or {"product_id": pid, "mode": "watch", "min_price": None, "max_price": None,
-                 "target": None, "tolerance": 2, "note": None, "locked": 0}
+                 "target": None, "tolerance": 2, "note": None, "locked": 0, "hidden": 0}
 
 
 def save_rule(pid, mode="watch", min_price=None, max_price=None, target=None, tolerance=2, note=None):
@@ -135,6 +140,12 @@ def set_locked(pid, locked: bool):
        "ON CONFLICT(product_id) DO UPDATE SET locked=excluded.locked", (pid, int(bool(locked))))
     if locked:
         ex("UPDATE rules SET mode='watch' WHERE product_id=?", (pid,))
+
+
+def set_hidden(pid, hidden: bool):
+    """Скрыть товар из таблиц и графиков. Только отображение — правила продолжают работать."""
+    ex("INSERT INTO rules(product_id, mode, hidden) VALUES(?, 'watch', ?) "
+       "ON CONFLICT(product_id) DO UPDATE SET hidden=excluded.hidden", (pid, int(bool(hidden))))
 
 
 def is_locked(pid) -> bool:

@@ -22,6 +22,22 @@ def _f(v):
         return None
 
 
+def main_image(inf: dict) -> str:
+    """Главное фото товара из ответа /v3/product/info/list (поле бывает строкой, списком или объектом)."""
+    def first(v):
+        if isinstance(v, str):
+            return v
+        if isinstance(v, list):
+            for x in v:
+                r = first(x)
+                if r:
+                    return r
+        if isinstance(v, dict):
+            return first(v.get("primary")) or first(v.get("url")) or first(v.get("images"))
+        return ""
+    return first(inf.get("primary_image")) or first(inf.get("images")) or first(inf.get("color_image")) or ""
+
+
 def buyer_estimate(item: dict):
     """Расчётная цена покупателя по индексу цен (Ozon больше не отдаёт её напрямую)."""
     pi = item.get("price_indexes") or {}
@@ -219,7 +235,7 @@ class Repricer:
             db.ex(f"UPDATE products SET active=0 WHERE product_id NOT IN ({','.join(map(str, seen))})")
         # названия — для новых товаров и раз в сутки для всех
         need = [r["product_id"] for r in db.q("SELECT product_id FROM products WHERE active=1 AND "
-                                              "(name IS NULL OR name='')")]
+                                              "(name IS NULL OR name='' OR image IS NULL)")]
         last_names = db.get_settings().get("names_synced_at", "")
         if not last_names or last_names < (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"):
             need = list(seen)
@@ -227,8 +243,9 @@ class Repricer:
         if need:
             try:
                 for inf in client.get_product_info(need):
-                    db.ex("UPDATE products SET name=?, sku=? WHERE product_id=?",
-                          (inf.get("name"), inf.get("sku"), int(inf.get("id"))))
+                    sku = inf.get("sku") or next((x.get("sku") for x in inf.get("sources") or [] if x.get("sku")), None)
+                    db.ex("UPDATE products SET name=?, sku=COALESCE(?, sku), image=? WHERE product_id=?",
+                          (inf.get("name"), sku, main_image(inf), int(inf.get("id"))))
             except Exception as e:
                 db.log("warn", f"Не удалось получить названия товаров: {e}")
         return len(items)

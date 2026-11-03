@@ -33,7 +33,48 @@ rp = Repricer()
 @app.context_processor
 def inject():
     s = db.get_settings()
-    return {"S": s, "ST": rp.status, "MODES": MODES, "has_keys": bool(s["client_id"] and s["api_key"])}
+    return {"S": s, "ST": rp.status, "MODES": MODES, "has_keys": bool(s["client_id"] and s["api_key"]),
+            "VERSION": app_version()}
+
+
+def app_version():
+    try:
+        with open(os.path.join(BASE, "version.txt"), encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return "—"
+
+
+UPDATE_MARK = os.path.join(BASE, "data", "last_update.txt")
+
+
+def self_update():
+    """Проверка обновлений на GitHub при запуске. Если обновилось — перезапуск уже новой версией."""
+    if "--no-update" in sys.argv:
+        return
+    try:
+        import update
+        res = update.main()
+    except Exception as e:
+        print(f"Автообновление не сработало: {e}")
+        return
+    if not res:
+        return
+    os.makedirs(os.path.dirname(UPDATE_MARK), exist_ok=True)
+    with open(UPDATE_MARK, "w", encoding="utf-8") as f:
+        f.write(f"{res[0] or '—'} -> {res[1]}")
+    import subprocess
+    subprocess.Popen([sys.executable, os.path.abspath(__file__)] + sys.argv[1:] + ["--no-update"], cwd=BASE)
+    os._exit(0)
+
+
+def log_update():
+    try:
+        with open(UPDATE_MARK, encoding="utf-8") as f:
+            db.log("info", f"Программа обновлена с GitHub: версия {f.read().strip()}")
+        os.remove(UPDATE_MARK)
+    except FileNotFoundError:
+        pass
 
 
 def fmt(v):
@@ -127,6 +168,7 @@ def api_products():
             "target": rule.get("target"), "tolerance": rule.get("tolerance") or 2,
             "status": st, "status_text": st_text, "last_change": (last.get(p["product_id"]) or {}).get("ts"),
             "n_actions": len(json.loads(p["actions"] or "[]")), "locked": bool(rule.get("locked")),
+            "hidden": bool(rule.get("hidden")), "image": p.get("image") or "",
         })
     return jsonify(out)
 
@@ -215,6 +257,17 @@ def api_rules_bulk():
         except ValueError as e:
             errors.append(f"{p['offer_id']}: {e}")
     return jsonify({"ok": True, "done": done, "errors": errors[:20], "skipped": skipped})
+
+
+@app.route("/api/hide", methods=["POST"])
+def api_hide():
+    d = request.get_json(force=True)
+    ids = [int(x) for x in d.get("ids") or []]
+    hidden = bool(d.get("hidden"))
+    for pid in ids:
+        db.set_hidden(pid, hidden)
+    db.log("info", f"{'Скрыто' if hidden else 'Возвращено'} в таблицах товаров: {len(ids)}")
+    return jsonify({"ok": True, "done": len(ids)})
 
 
 @app.route("/api/lock", methods=["POST"])
@@ -325,6 +378,7 @@ def api_charts():
             "min": rule.get("min_price"), "max": rule.get("max_price"),
             "target": rule.get("target") if rule.get("mode") == "hold" else None,
             "mode": rule.get("mode") or "watch", "locked": bool(rule.get("locked")),
+            "hidden": bool(rule.get("hidden")), "image": p.get("image") or "",
             "first": first, "last": last,
             "delta_pct": round((last - first) / first * 100, 1) if first and last else 0,
             "lo": min(ctrl) if ctrl else None, "hi": max(ctrl) if ctrl else None,
@@ -471,7 +525,9 @@ if __name__ == "__main__":
         # репрайсер уже запущен — просто открываем интерфейс
         webbrowser.open(url)
         sys.exit(0)
-    db.log("info", "Репрайсер запущен")
+    self_update()
+    log_update()
+    db.log("info", f"Репрайсер запущен, версия {app_version()}")
     rp.start()
     if "--no-browser" not in sys.argv:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
