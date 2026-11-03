@@ -1439,7 +1439,7 @@ class App(tk.Tk):
         if tpl:
             for k, v in tpl.items():
                 if (k in TPL_SKIP or "@" in k or isinstance(v, list)
-                        or "Сумма" in k or "Основание" in k):
+                        or "Сумма" in k or "Основание" in k or "Дата" in k):
                     continue
                 head[k] = v
         has_dst = od.has(DOC_TRANSFER, "СкладПолучатель_Key")
@@ -1451,6 +1451,10 @@ class App(tk.Tk):
             "ВидЦены_Key": self.price_type,
             "Комментарий": comment + f" (после пересортицы № {n_ps})",
         })
+        # даты из образца не переносим: все даты документа — сегодняшние
+        for f in od.props.get(DOC_TRANSFER, set()):
+            if f.startswith("Дата") and not f.endswith("_Key") and f not in head:
+                head[f] = now
         if has_dst:
             head["СкладПолучатель_Key"] = s["dst_key"]
         if not tpl:
