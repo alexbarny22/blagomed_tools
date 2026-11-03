@@ -1,0 +1,5 @@
+# файлы, которые обновляются автоматически
+VK_bot.py
+update.py
+deps.py
+config.example.py
