@@ -1295,6 +1295,43 @@ class App(tk.Tk):
         self._sort_art = res
         return res
 
+    def vat_fields(self, row_type, row, key, pair):
+        """Ставка НДС строки, если образец её не дал: из карточки товара, иначе «Без НДС»."""
+        od, known = self.od, self.od.props.get(row_type, set())
+        empty = (None, "", EMPTY)
+        res = {}
+        if "СтавкаНДС_Key" in known and row.get("СтавкаНДС_Key") in empty:
+            cache = self.__dict__.setdefault("_vat_cache", {})
+            for nom in (pair, key):
+                if nom not in cache:
+                    try:
+                        r = od.s.get(f"{od.base}Catalog_Номенклатура(guid'{nom}')",
+                                     params={"$format": "json", "$select": "СтавкаНДС_Key"}, timeout=60)
+                        cache[nom] = r.json().get("СтавкаНДС_Key") if r.status_code == 200 else None
+                    except Exception:
+                        cache[nom] = None
+                if cache[nom] not in empty:
+                    res["СтавкаНДС_Key"] = cache[nom]
+                    break
+            if "СтавкаНДС_Key" not in res:
+                no_vat = cache.get("__без_ндс__")
+                if no_vat is None and "Catalog_СтавкиНДС" in od.sets:
+                    try:
+                        rates = od.get("Catalog_СтавкиНДС", {"$select": "Ref_Key,Description,DeletionMark"})
+                        no_vat = next((x["Ref_Key"] for x in rates if not x.get("DeletionMark")
+                                       and "без" in norm(x.get("Description"))), "")
+                    except RuntimeError as e:
+                        log("Ставки НДС не прочитаны: " + str(e)[:200])
+                        no_vat = ""
+                    cache["__без_ндс__"] = no_vat
+                if no_vat:
+                    res["СтавкаНДС_Key"] = no_vat
+                else:
+                    log("Ставка НДС для строки не найдена — отметьте «Ставки НДС» в настройке OData")
+        if "СтавкаНДС" in known and row.get("СтавкаНДС") in (None, ""):
+            res["СтавкаНДС"] = "БезНДС"
+        return res
+
     def find_template(self):
         """Последняя проведённая передача между этими же организациями — образец шапки
         (договор, налогообложение НДС и т.п.). Сначала с отбором в 1С; если 1С отбор
@@ -1435,6 +1472,7 @@ class App(tk.Tk):
                       "Количество": qty, "КоличествоУпаковок": qty,
                       "Цена": price, "Сумма": summ, "СуммаСНДС": summ,
                       "ВидЦены_Key": self.price_type, "Склад_Key": s["src_key"]})
+            r.update(self.vat_fields(row_type, r, key, pair))
             rows.append(od.only_existing(row_type, r))
         head["СуммаДокумента"] = round(total, 2)
         head = od.only_existing(DOC_TRANSFER, head)

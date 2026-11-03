@@ -43,7 +43,8 @@ class Core:
 
     BORROW = ["PRICE_DB_VERSION", "store_names", "find_pair", "load_stock_and_prices",
               "get_prices", "load_price_db", "save_price_db", "fetch_price_docs",
-              "update_price_db", "pick_article", "sort_articles", "find_template", "move_work"]
+              "update_price_db", "pick_article", "sort_articles", "find_template", "vat_fields",
+              "move_work"]
 
     def __init__(self):
         self.od = mb.OData()
