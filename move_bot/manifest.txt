@@ -10,3 +10,5 @@ web_page.html
 server_run.bat
 install_server.bat
 install_server.ps1
+setup_iis_proxy.bat
+setup_iis_proxy.ps1

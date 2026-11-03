@@ -108,6 +108,8 @@
 
 <script>
 let S = {items:[]}, sel = {}, itemsSig = "", curTab = 1;
+// базовый адрес: работает и на :8090/, и через IIS по адресу …/movebot
+const B = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
 const $ = id => document.getElementById(id);
 const val = id => $(id).value;
 const fmt = v => v==null ? "—" : (Math.abs(v-Math.round(v))<1e-9 ? String(Math.round(v)) : v.toFixed(3).replace(/0+$/,"").replace(/\.$/,""));
@@ -118,7 +120,7 @@ function tab(n){ curTab=n; $("p1").classList.toggle("hidden",n!==1); $("p2").cla
   $("t1").classList.toggle("on",n===1); $("t2").classList.toggle("on",n===2); if(n===2) loadLog(); }
 
 async function post(url, body){
-  const r = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
+  const r = await fetch(B+url.replace(/^\//,""),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
   const j = await r.json().catch(()=>({}));
   if (j.started===false) alert("Бот сейчас занят — дождитесь окончания операции.");
   if (j.ok===false && j.msg) alert(j.msg);
@@ -130,7 +132,7 @@ async function admin(url, q){
   const j = await post(url,{});
   if (j.ok) { $("status").textContent = "Перезапуск… страница обновится сама"; setTimeout(()=>location.reload(), 20000); }
 }
-async function loadLog(){ const r = await fetch("/api/log"); $("log").textContent = await r.text(); $("log").scrollTop = 1e9; }
+async function loadLog(){ const r = await fetch(B+"api/log"); $("log").textContent = await r.text(); $("log").scrollTop = 1e9; }
 
 function render(){
   const q = val("q").toLowerCase().replace(/ё/g,"е"), only = $("onlySel").checked;
@@ -171,7 +173,7 @@ async function doMove(){
 
 async function poll(){
   try{
-    const r = await fetch("/api/state"); S = await r.json();
+    const r = await fetch(B+"api/state"); S = await r.json();
   }catch(e){ $("status").textContent = "Нет связи с ботом (перезапускается?)"; return; }
   $("status").textContent = S.status; $("status").classList.toggle("busy", S.busy);
   $("go").disabled = S.busy || !S.ready;
