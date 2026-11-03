@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}{{ p.name or p.offer_id }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('index') }}">← Все товары</a></p>
+<h1>{{ p.name or '(без названия)' }}{% if rule.locked %} <span class="pill mp" style="vertical-align:middle">Под MPSpace</span>{% endif %}</h1>
+<p class="sub mono">Артикул {{ p.offer_id }} · product_id {{ p.product_id }}{% if p.sku %} · SKU {{ p.sku }}
+  · <a href="https://www.ozon.ru/product/{{ p.sku }}/" target="_blank">открыть на Ozon ↗</a>{% endif %}</p>
+
+<div class="grid2">
+  <div>
+    <div class="panel">
+      <div class="toolbar"><h2 style="margin:0">История цен</h2><span style="flex:1"></span>
+</div>
+      <div class="ranges" id="period" style="margin-bottom:10px"></div>
+      <div style="height:340px"><canvas id="chart"></canvas></div>
+      <p class="muted" style="font-size:12.5px;margin:8px 0 0">Треугольники — изменения цены программой (синие) или в тренировке (жёлтые). Наведите, чтобы увидеть причину. Нажмите на название линии внизу, чтобы скрыть или показать её.</p>
+    </div>
+    <div class="panel">
+      <h2>Изменения цены этого товара</h2>
+      {% if changes %}
+      <div class="tablewrap" style="border:0">
+      <table>
+        <thead><tr><th class="nosort">Когда</th><th class="nosort">Тип</th><th class="nosort num">Было</th><th class="nosort num">Стало</th>
+          <th class="nosort num">Мин. в Ozon</th><th class="nosort">Причина</th></tr></thead>
+        <tbody>{% for c in changes %}
+        <tr><td class="muted">{{ c.ts[5:16] }}</td>
+          <td>{% if c.source == 'отложено' %}<span class="pill dry">отложено</span>
+              {% elif not c.ok %}<span class="pill err">ошибка</span>
+              {% elif c.dry_run %}<span class="pill dry">тренировка</span>{% else %}<span class="pill real">{{ c.source }}</span>{% endif %}</td>
+          <td class="num">{{ c.price_before|rub }}</td><td class="num"><b>{{ c.price_after|rub }}</b></td>
+          <td class="num">{{ c.min_after|rub }}</td>
+          <td style="white-space:normal">{{ c.reason }}{% if c.error %}<br><span class="muted">{{ c.error }}</span>{% endif %}</td></tr>
+        {% endfor %}</tbody>
+      </table></div>
+      {% else %}<p class="muted">Пока изменений не было.</p>{% endif %}
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>Сейчас</h2>
+      <div class="kv">
+        <div>Статус</div><div><span class="pill {{ st }}">{{ st_text }}</span></div>
+        <div>Цена</div><div><b>{{ p.price|rub }} ₽</b></div>
+        <div>Зачёркнутая</div><div>{{ p.old_price|rub if p.old_price else '—' }}</div>
+        <div>Со скидками продавца</div><div>{{ (p.seller_price or p.price)|rub }} ₽</div>
+        <div>≈ Цена покупателя</div><div>{{ ('≈ ' ~ (p.buyer_est|rub) ~ ' ₽') if p.buyer_est else '—' }}</div>
+        <div>Контролируемая</div><div><b>{{ controlled|rub }} ₽</b></div>
+        <div>Мин. цена в Ozon</div><div>{{ p.ozon_min_price|rub if p.ozon_min_price else '—' }}</div>
+        <div>Индекс цен</div><div><span class="dot {{ p.color_index or '' }}"></span> {{ p.color_index or '—' }}
+          {% if p.idx_ozon_min %}<br><span class="muted">мин. у конкурентов на Ozon: {{ p.idx_ozon_min|rub }} ₽</span>{% endif %}
+          {% if p.idx_ext_min %}<br><span class="muted">на других площадках: {{ p.idx_ext_min|rub }} ₽</span>{% endif %}</div>
+        <div>Обновлено</div><div class="muted">{{ p.updated_at }}</div>
+      </div>
+      {% if actions %}<h2 style="margin-top:16px">Акции</h2>
+        {% for a in actions %}<div style="margin-bottom:6px">{{ a.title }}<br><span class="muted">{{ (a['from'] or '')[:10] }} — {{ (a['to'] or '')[:10] }}</span></div>{% endfor %}
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <h2>Правило</h2>
+      <div class="form-row"><label>Под MPSpace</label>
+        <label class="switch"><input type="checkbox" id="r-lock" {{ 'checked' if rule.locked }} onchange="toggleLock(this)">
+          цену ведёт MPSpace — эта программа её не меняет</label></div>
+      {% if rule.locked %}<div class="notice" style="background:#ece8f6;color:#5b4a8b">Программа только наблюдает за этим товаром. Мин/макс можно задать — нарушения будут подсвечены, но цена исправляться не будет.</div>{% endif %}
+      <div class="form-row"><label>Режим</label>
+        {% if rule.locked %}<select id="r-mode" disabled><option value="watch">Под MPSpace — только следить</option></select>
+        {% else %}<select id="r-mode">{% for k, v in MODES.items() %}<option value="{{ k }}" {{ 'selected' if rule.mode==k }}>{{ v }}</option>{% endfor %}</select>{% endif %}</div>
+      <div class="form-row"><label>Минимум, ₽</label><input type="number" id="r-min" value="{{ rule.min_price|int if rule.min_price }}"></div>
+      <div class="form-row"><label>Максимум, ₽</label><input type="number" id="r-max" value="{{ rule.max_price|int if rule.max_price }}"></div>
+      <div class="form-row"><label>Цена удержания, ₽</label><input type="number" id="r-target" value="{{ rule.target|int if rule.target }}"></div>
+      <div class="form-row"><label>Допуск удержания, %</label><input type="number" step="0.5" id="r-tol" value="{{ '%g'|format(rule.tolerance or 2) }}"></div>
+      <p class="muted" style="font-size:12.5px">«Только следить» — подсвечивает нарушения, цену не трогает. «Держать в коридоре» — возвращает цену в границы мин/макс.
+        «Держать цену» — подгоняет базовую цену так, чтобы контролируемая цена (с учётом акций) была равна цене удержания.</p>
+      <button class="btn primary" onclick="saveRule()">Сохранить правило</button>
+    </div>
+
+    <div class="panel">
+      <h2>Поставить цену вручную</h2>
+      <p class="muted" style="font-size:12.5px;margin-top:-6px">Отправляется в Ozon сразу, даже в режиме тренировки.</p>
+      <div class="form-row"><label>Цена, ₽</label><input type="number" id="m-price" value="{{ p.price|int if p.price }}"></div>
+      <div class="form-row"><label>Зачёркнутая, ₽ (0 — без)</label><input type="number" id="m-old" value="{{ p.old_price|int if p.old_price else 0 }}"></div>
+      <div class="form-row"><label>Мин. цена в Ozon, ₽</label><input type="number" id="m-min" value="{{ (rule.min_price or p.ozon_min_price)|int if (rule.min_price or p.ozon_min_price) }}"></div>
+      <button class="btn" onclick="manual()">Отправить в Ozon</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='chart.umd.js') }}"></script>
+<script src="{{ url_for('static', filename='pricechart.js') }}"></script>
+<script>
+const PID = {{ p.product_id }};
+let period = {days: 7};
+async function draw(p) {
+  period = p;
+  const d = await (await fetch(`/api/history/${PID}?` + periodQuery(p))).json();
+  renderPriceChart(document.getElementById('chart'), d);
+}
+async function saveRule() {
+  const v = id => document.getElementById(id).value;
+  const r = await api('/api/rule', {product_id: PID, mode: v('r-mode'), min: v('r-min'), max: v('r-max'), target: v('r-target'), tolerance: v('r-tol')});
+  toast(r.ok ? 'Правило сохранено: ' + r.status_text : r.message);
+  if (r.ok) setTimeout(() => location.reload(), 900);
+}
+async function manual() {
+  const v = id => document.getElementById(id).value;
+  if (!confirm(`Отправить в Ozon цену ${v('m-price')} ₽?`)) return;
+  const body = {price: v('m-price'), old_price: v('m-old'), min_price: v('m-min')};
+  let r = await api('/api/manual/' + PID, body);
+  if (r.need_force) {
+    if (!confirm(r.message + '. Всё равно отправить?')) return;
+    r = await api('/api/manual/' + PID, {...body, force: true});
+  }
+  toast(r.message, 6000); if (r.ok) setTimeout(() => location.reload(), 1500);
+}
+async function toggleLock(el) {
+  const msg = el.checked
+    ? 'Отметить товар «Под MPSpace»? Программа перестанет менять его цену (режим станет «Только следить»).'
+    : 'Снять отметку «Под MPSpace»? Перед этим отключите товар в MPSpace, иначе программы будут перебивать цену.';
+  if (!confirm(msg)) { el.checked = !el.checked; return; }
+  await api('/api/lock', {ids: [PID], locked: el.checked});
+  location.reload();
+}
+periodPicker(document.getElementById('period'), draw, 7);
+window.onRunFinished = () => location.reload();
+</script>
+{% endblock %}

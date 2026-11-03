@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Журнал изменений{% endblock %}
+{% block content %}
+<h1>Журнал изменений цен</h1>
+<p class="sub">Последние 500 записей: что репрайсер изменил, что изменил бы в режиме тренировки и что отложил.</p>
+<div class="toolbar">
+  {% for k, v in [('all','Все'),('real','Изменено в Ozon'),('dry','Тренировка'),('err','Ошибки и отложенные')] %}
+  <a class="btn small {{ 'primary' if kind==k }}" href="?kind={{ k }}">{{ v }}</a>{% endfor %}
+</div>
+<div class="tablewrap">
+<table>
+  <thead><tr><th class="nosort">Когда</th><th class="nosort">Товар</th><th class="nosort">Тип</th>
+    <th class="nosort num">Контролир. была</th><th class="nosort num">Цена была</th><th class="nosort num">Цена стала</th>
+    <th class="nosort num">Зачёркн.</th><th class="nosort num">Мин. в Ozon</th><th class="nosort">Причина</th></tr></thead>
+  <tbody>
+  {% for c in rows %}
+  <tr>
+    <td class="muted">{{ c.ts[5:16] }}</td>
+    <td class="name"><a href="{{ url_for('product', pid=c.product_id) }}">{{ c.name or '(без названия)' }}</a><br><small>{{ c.offer_id }}</small></td>
+    <td>{% if c.source == 'отложено' %}<span class="pill dry">отложено</span>
+        {% elif not c.ok %}<span class="pill err">ошибка</span>
+        {% elif c.dry_run %}<span class="pill dry">тренировка</span>
+        {% else %}<span class="pill real">{{ c.source }}</span>{% endif %}</td>
+    <td class="num">{{ c.controlled_before|rub }}</td>
+    <td class="num">{{ c.price_before|rub }}</td>
+    <td class="num"><b>{{ c.price_after|rub }}</b></td>
+    <td class="num muted">{{ c.old_price_after|rub if c.old_price_after else '—' }}</td>
+    <td class="num">{{ c.min_after|rub }}</td>
+    <td style="white-space:normal;min-width:260px">{{ c.reason }}{% if c.error %}<br><span class="muted">{{ c.error }}</span>{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="9" class="empty">Записей нет</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

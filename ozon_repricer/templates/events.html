@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}События{% endblock %}
+{% block content %}
+<h1>События</h1>
+<p class="sub">Итоги каждой проверки, ошибки связи с Ozon, изменения настроек.</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th class="nosort">Когда</th><th class="nosort">Тип</th><th class="nosort">Сообщение</th></tr></thead>
+  <tbody>
+  {% for e in rows %}
+  <tr><td class="muted">{{ e.ts }}</td>
+    <td><span class="pill {{ 'err' if e.level=='error' else ('dry' if e.level=='warn' else 'ok') }}">{{ {'error':'ошибка','warn':'внимание'}.get(e.level, 'инфо') }}</span></td>
+    <td style="white-space:pre-wrap">{{ e.message }}</td></tr>
+  {% else %}<tr><td colspan="3" class="empty">Событий пока нет</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

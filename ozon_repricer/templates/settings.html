@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Настройки{% endblock %}
+{% block content %}
+<h1>Настройки</h1>
+<p class="sub">Ключи хранятся только на этом компьютере, в файле data/repricer.db.</p>
+<form method="post">
+<div class="panel">
+  <h2>Подключение к Ozon</h2>
+  <div class="form-row"><label>Client-Id</label><input type="text" name="client_id" id="cid" value="{{ S.client_id }}"></div>
+  <div class="form-row"><label>Api-Key</label>
+    <input type="password" name="api_key" id="akey" value="{{ '••••••••' ~ S.api_key[-4:] if S.api_key }}" placeholder="вставьте ключ"></div>
+  <div class="form-row"><span></span><div class="hint">Ozon Seller → Настройки → API-ключи → «Сгенерировать ключ», роль «Admin» или с доступом к ценам.</div></div>
+  <div class="form-row"><span></span><div><button type="button" class="btn" onclick="testConn()">Проверить подключение</button>
+    <span id="test-res" class="muted" style="margin-left:10px"></span></div></div>
+</div>
+
+<div class="panel">
+  <h2>Режим работы</h2>
+  <div class="form-row"><label>Тренировка</label>
+    <label class="switch"><input type="checkbox" name="dry_run" {{ 'checked' if S.dry_run=='1' }}> только показывать, что изменил бы, цены в Ozon не трогать</label></div>
+  {% if S.dry_run != '1' %}<div class="notice bad">Боевой режим включён: репрайсер меняет цены в Ozon. Убедитесь, что репрайсер MPSpace для Ozon отключён, иначе они будут перебивать друг друга.</div>{% endif %}
+  <div class="form-row"><label>Автопроверка</label>
+    <label class="switch"><input type="checkbox" name="auto_enabled" {{ 'checked' if S.auto_enabled=='1' }}> проверять цены по расписанию, пока программа открыта</label></div>
+  <div class="form-row"><label>Проверять каждые, мин</label><input type="number" name="interval_min" min="5" value="{{ S.interval_min }}"></div>
+  <div class="form-row"><label>Контролировать цену</label>
+    <select name="control_basis">
+      <option value="seller" {{ 'selected' if S.control_basis=='seller' }}>Со скидками продавца — точная, из API</option>
+      <option value="buyer" {{ 'selected' if S.control_basis=='buyer' }}>≈ Цену покупателя — расчёт по индексу цен (близко к цене по Ozon Карте)</option>
+    </select></div>
+  <div class="form-row"><span></span><div class="hint">Ozon с ноября 2025 не отдаёт по API цену, которую видит покупатель. Расчётная цена считается по индексу цен и даёт погрешность около 2%.</div></div>
+  <div class="form-row"><label>Минимум → в Ozon</label>
+    <label class="switch"><input type="checkbox" name="push_min_to_ozon" {{ 'checked' if S.push_min_to_ozon=='1' }}> передавать наш минимум в поле «Минимальная цена» Ozon (Ozon не опустит цену в акциях ниже)</label></div>
+</div>
+
+<div class="panel">
+  <h2>Защита от ошибок</h2>
+  <div class="form-row"><label>Пауза после изменения, мин</label><input type="number" name="cooldown_min" min="10" value="{{ S.cooldown_min }}"></div>
+  <div class="form-row"><span></span><div class="hint">Ozon пересчитывает цену со скидками не мгновенно — не трогаем товар, пока не увидим результат.</div></div>
+  <div class="form-row"><label>Макс. шаг за раз, %</label><input type="number" name="max_step_pct" min="1" max="100" value="{{ S.max_step_pct }}"></div>
+  <div class="form-row"><label>Макс. изменений товара в сутки</label><input type="number" name="max_changes_day" min="1" max="40" value="{{ S.max_changes_day }}"></div>
+  <div class="form-row"><label>Какие товары брать</label>
+    <select name="visibility">
+      {% for k, v in [('ALL','Все'),('VISIBLE','Только видимые покупателям'),('IN_SALE','Только в продаже')] %}
+      <option value="{{ k }}" {{ 'selected' if S.visibility==k }}>{{ v }}</option>{% endfor %}
+    </select></div>
+  <div class="form-row"><label>Хранить историю, дней</label><input type="number" name="history_days" min="30" value="{{ S.history_days }}"></div>
+</div>
+<button class="btn primary">Сохранить настройки</button>
+</form>
+<div class="panel" style="margin-top:24px">
+  <h2>Программа</h2>
+  <p class="muted">Пока программа работает, она проверяет цены по расписанию, даже если окно браузера закрыто. Повторно открыть интерфейс — ярлык «Repricer Ozon» на рабочем столе.</p>
+  <button type="button" class="btn danger" onclick="stopApp()">Остановить программу</button>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function stopApp() {
+  if (!confirm('Остановить репрайсер? Цены перестанут проверяться до следующего запуска.')) return;
+  await api('/api/shutdown'); document.body.innerHTML = '<div class="wrap" style="padding:60px 20px"><h1>Репрайсер остановлен</h1><p class="sub">Запустить снова — ярлык «Repricer Ozon» на рабочем столе.</p></div>';
+}
+async function testConn() {
+  const el = document.getElementById('test-res'); el.textContent = 'Проверяю…';
+  const r = await api('/api/test', {client_id: document.getElementById('cid').value, api_key: document.getElementById('akey').value});
+  el.textContent = r.message; el.style.color = r.ok ? 'var(--accent)' : 'var(--bad)';
+}
+</script>
+{% endblock %}

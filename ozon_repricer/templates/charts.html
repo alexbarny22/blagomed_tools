@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}Графики{% endblock %}
+{% block content %}
+<h1>Графики цен</h1>
+<p class="sub">Зелёная линия — цена со скидками продавца, пунктир — ваши мин/макс/цель, треугольники — изменения цены
+  (синие — сделаны программой, жёлтые — тренировка). Нажмите на график, чтобы открыть товар.</p>
+
+<div class="panel">
+  <div class="toolbar"><div class="ranges" id="period"></div><span style="flex:1"></span>
+    <span class="muted" id="period-label"></span></div>
+  <div class="cards" style="margin:4px 0 14px">
+    <div class="card static"><div class="n" id="k-moved">—</div><div class="l">товаров, у которых менялась цена</div></div>
+    <div class="card static good"><div class="n" id="k-up">—</div><div class="l">подорожали</div></div>
+    <div class="card static bad"><div class="n" id="k-down">—</div><div class="l">подешевели</div></div>
+    <div class="card static"><div class="n" id="k-real">—</div><div class="l">изменений сделала программа</div></div>
+    <div class="card static warn"><div class="n" id="k-dry">—</div><div class="l">изменений в тренировке</div></div>
+  </div>
+  <div style="height:200px"><canvas id="summary"></canvas></div>
+</div>
+
+<div class="toolbar">
+  <input type="text" class="search" id="q" placeholder="Поиск по названию или артикулу">
+  <select id="flt">
+    <option value="all">Все товары</option>
+    <option value="moved">Цена менялась за период</option>
+    <option value="managed">Под управлением программы</option>
+    <option value="mpspace">Под MPSpace</option>
+    <option value="bad">Нарушают мин/макс сейчас</option>
+  </select>
+  <select id="sort">
+    <option value="delta_abs">Сортировка: сильнее всего изменилась</option>
+    <option value="delta_up">Сильнее всего подорожала</option>
+    <option value="delta_down">Сильнее всего подешевела</option>
+    <option value="changes">Больше всего изменений</option>
+    <option value="name">По названию</option>
+  </select>
+  <span class="muted" id="count"></span>
+</div>
+<div class="chartgrid" id="grid"><div class="empty">Загрузка…</div></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='chart.umd.js') }}"></script>
+<script src="{{ url_for('static', filename='pricechart.js') }}"></script>
+<script>
+let D = null, summaryChart = null, period = {days: 7};
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const rub = v => v === null || v === undefined ? '—' : Math.round(v).toLocaleString('ru-RU');
+
+async function load(p) {
+  period = p;
+  document.getElementById('grid').innerHTML = '<div class="empty">Загрузка…</div>';
+  D = await (await fetch('/api/charts?' + periodQuery(p))).json();
+  document.getElementById('period-label').textContent = `${D.from.slice(0, 16)} — ${D.to.slice(0, 16)}`;
+  drawSummary(); renderGrid();
+}
+
+function drawSummary() {
+  const P = D.products;
+  const moved = P.filter(p => p.delta_pct !== 0 || p.changes.length);
+  document.getElementById('k-moved').textContent = moved.length;
+  document.getElementById('k-up').textContent = P.filter(p => p.delta_pct > 0).length;
+  document.getElementById('k-down').textContent = P.filter(p => p.delta_pct < 0).length;
+  document.getElementById('k-real').textContent = D.buckets.reduce((a, b) => a + b.real, 0);
+  document.getElementById('k-dry').textContent = D.buckets.reduce((a, b) => a + b.dry, 0);
+
+  // шкала: все часы/дни периода, даже пустые
+  const keys = [], step = D.by_hour ? 3600e3 : 864e5;
+  const pad = n => String(n).padStart(2, '0');
+  const keyOf = d => D.by_hour ? `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}`
+                               : `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  let t = new Date(D.from.replace(' ', 'T')); const end = new Date(D.to.replace(' ', 'T'));
+  if (!D.by_hour) t.setHours(0, 0, 0, 0); else t.setMinutes(0, 0, 0);
+  while (t <= end && keys.length < 800) { keys.push(keyOf(t)); t = new Date(t.getTime() + step); }
+  const map = (arr, f) => { const m = {}; arr.forEach(x => m[x.k] = f(x)); return keys.map(k => m[k] || 0); };
+  const label = k => D.by_hour ? `${k.slice(8, 10)}.${k.slice(5, 7)} ${k.slice(11)}:00` : `${k.slice(8, 10)}.${k.slice(5, 7)}`;
+  if (summaryChart) summaryChart.destroy();
+  summaryChart = new Chart(document.getElementById('summary'), {
+    type: 'bar',
+    data: {labels: keys.map(label), datasets: [
+      {label: 'Товаров с изменением цены в Ozon', data: map(D.moved, x => x.n), backgroundColor: '#9fd9c6'},
+      {label: 'Изменено программой', data: map(D.buckets, x => x.real), backgroundColor: '#2f6fb0'},
+      {label: 'Тренировка (изменила бы)', data: map(D.buckets, x => x.dry), backgroundColor: '#e0a526'},
+    ]},
+    options: {maintainAspectRatio: false, animation: {duration: 200},
+      scales: {x: {ticks: {maxTicksLimit: 16}, grid: {display: false}}, y: {beginAtZero: true, ticks: {precision: 0}}},
+      plugins: {legend: {position: 'bottom', labels: {boxHeight: 10}},
+        title: {display: true, text: D.by_hour ? 'По часам' : 'По дням', align: 'start', color: '#66736e'}}}
+  });
+}
+
+function visible() {
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const f = document.getElementById('flt').value, so = document.getElementById('sort').value;
+  let L = D.products.filter(p => {
+    if (q && !(p.name.toLowerCase().includes(q) || String(p.offer_id).toLowerCase().includes(q))) return false;
+    if (f === 'moved') return p.delta_pct !== 0 || p.changes.length > 0 || (p.lo !== p.hi);
+    if (f === 'managed') return p.mode !== 'watch' && !p.locked;
+    if (f === 'mpspace') return p.locked;
+    if (f === 'bad') return ['low', 'high', 'off'].includes(p.status);
+    return true;
+  });
+  const vol = p => p.lo && p.hi ? (p.hi - p.lo) / p.lo : 0;
+  const cmp = {
+    delta_abs: (a, b) => Math.abs(b.delta_pct) - Math.abs(a.delta_pct) || vol(b) - vol(a),
+    delta_up: (a, b) => b.delta_pct - a.delta_pct, delta_down: (a, b) => a.delta_pct - b.delta_pct,
+    changes: (a, b) => b.changes.length - a.changes.length || vol(b) - vol(a),
+    name: (a, b) => a.name.localeCompare(b.name, 'ru'),
+  }[so];
+  return L.sort(cmp);
+}
+
+let observer;
+function renderGrid() {
+  const L = visible(), g = document.getElementById('grid');
+  document.getElementById('count').textContent = `показано: ${L.length}`;
+  if (!L.length) { g.innerHTML = '<div class="empty">Нет товаров для показа</div>'; return; }
+  g.innerHTML = L.map(p => {
+    const dcls = p.delta_pct > 0 ? 'up' : p.delta_pct < 0 ? 'down' : '';
+    return `<a class="chartcard ${p.locked ? 'locked' : ''}" href="/product/${p.product_id}" data-id="${p.product_id}">
+      <div class="cc-head"><div class="cc-name">${esc(p.name) || '(без названия)'}</div>
+        <div class="cc-delta ${dcls}">${p.delta_pct > 0 ? '+' : ''}${p.delta_pct}%</div></div>
+      <div class="cc-sub"><span class="mono">${esc(p.offer_id)}</span>
+        ${p.locked ? '<span class="pill mp">MPSpace</span>' : ''}
+        ${p.changes.length ? `<span class="pill real">изменений: ${p.changes.length}</span>` : ''}
+        ${['low','high','off'].includes(p.status) ? `<span class="pill ${p.status}">${esc(p.status_text)}</span>` : ''}</div>
+      <div class="cc-chart"><canvas></canvas></div>
+      <div class="cc-foot"><span>было <b>${rub(p.first)}</b></span><span>стало <b>${rub(p.last)}</b></span>
+        <span class="muted">мин ${rub(p.lo)} · макс ${rub(p.hi)}</span></div></a>`;
+  }).join('');
+  // графики рисуются, только когда карточка видна на экране (быстро даже при сотнях товаров)
+  if (observer) observer.disconnect();
+  const byId = Object.fromEntries(L.map(p => [p.product_id, p]));
+  observer = new IntersectionObserver(entries => entries.forEach(e => {
+    if (!e.isIntersecting) return;
+    const card = e.target, p = byId[+card.dataset.id];
+    observer.unobserve(card);
+    if (!p.rows.length) { card.querySelector('.cc-chart').innerHTML = '<div class="empty" style="padding:30px 0">нет данных за период</div>'; return; }
+    renderPriceChart(card.querySelector('canvas'), {...p, from: D.from, to: D.to}, {mini: true});
+  }), {rootMargin: '300px'});
+  g.querySelectorAll('.chartcard').forEach(c => observer.observe(c));
+}
+
+document.getElementById('q').oninput = renderGrid;
+document.getElementById('flt').onchange = renderGrid;
+document.getElementById('sort').onchange = renderGrid;
+window.onRunFinished = () => load(period);
+periodPicker(document.getElementById('period'), load, 7);
+</script>
+{% endblock %}

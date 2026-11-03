@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block title %}Товары{% endblock %}
+{% block content %}
+<h1>Товары и правила цен</h1>
+<p class="sub">Контролируемая цена — {{ 'расчётная цена покупателя (≈ по индексу цен)' if S.control_basis == 'buyer' else 'цена со скидками продавца (marketing_seller_price)' }}.
+  Правила сохраняются сразу при изменении поля.</p>
+
+<div class="cards">
+  <div class="card" data-f="all"><div class="n" id="c-all">—</div><div class="l">Всего товаров</div></div>
+  <div class="card bad" data-f="low"><div class="n" id="c-low">—</div><div class="l">Ниже минимума</div></div>
+  <div class="card warn" data-f="high"><div class="n" id="c-high">—</div><div class="l">Выше максимума / не на цели</div></div>
+  <div class="card good" data-f="managed"><div class="n" id="c-managed">—</div><div class="l">Под управлением</div></div>
+  <div class="card" data-f="norule"><div class="n" id="c-norule">—</div><div class="l">Без правил</div></div>
+  <div class="card mp" data-f="mpspace"><div class="n" id="c-mpspace">—</div><div class="l">Под MPSpace — не меняем</div></div>
+</div>
+
+<div class="toolbar">
+  <input type="text" class="search" id="q" placeholder="Поиск по названию или артикулу">
+  <select id="f-mode">
+    <option value="">Все режимы</option>
+    {% for k, v in MODES.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}
+  </select>
+  <span class="spacer" style="flex:1"></span>
+  <a class="btn" href="{{ url_for('rules_csv') }}">Скачать правила (Excel/CSV)</a>
+  <form method="post" action="{{ url_for('rules_import') }}" enctype="multipart/form-data" id="imp" style="display:inline">
+    <input type="file" name="file" accept=".csv" id="impfile" hidden onchange="document.getElementById('imp').submit()">
+    <button type="button" class="btn" onclick="document.getElementById('impfile').click()">Загрузить правила</button>
+  </form>
+</div>
+
+<div class="bulk" id="bulk">
+  <b id="bulk-n">0</b>&nbsp;выбрано
+  <span class="sep"></span>
+  <label>Режим</label>
+  <select id="b-mode"><option value="">не менять</option>{% for k, v in MODES.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
+  <label>Мин, % от текущей</label><input type="number" id="b-min" placeholder="95">
+  <label>Макс, %</label><input type="number" id="b-max" placeholder="130">
+  <label><input type="checkbox" id="b-target"> цель = текущая цена</label>
+  <button class="btn primary" onclick="bulkApply()">Применить</button>
+  <button class="btn" onclick="bulkClear()">Сбросить правила</button>
+  <span class="sep"></span>
+  <button class="btn" onclick="bulkLock(true)">Отметить «Под MPSpace»</button>
+  <button class="btn" onclick="bulkLock(false)">Снять отметку</button>
+  <span class="spacer" style="flex:1"></span>
+  <button class="btn" onclick="selectNone()">Снять выбор</button>
+</div>
+
+<div class="tablewrap">
+<table id="tbl">
+  <thead><tr>
+    <th class="nosort"><input type="checkbox" id="chk-all"></th>
+    <th data-k="name">Товар</th>
+    <th data-k="price" class="num">Цена</th>
+    <th data-k="old_price" class="num">Зачёркн.</th>
+    <th data-k="seller_price" class="num" title="Цена с учётом скидок и акций продавца">Со скидками</th>
+    <th data-k="buyer_est" class="num" title="Расчёт по индексу цен Ozon — близко к цене по Ozon Карте">≈ Покупатель</th>
+    <th data-k="color" title="Индекс цен Ozon">Индекс</th>
+    <th class="nosort">Режим</th>
+    <th class="nosort num">Мин</th>
+    <th class="nosort num">Макс</th>
+    <th class="nosort num">Цель</th>
+    <th data-k="status">Статус</th>
+    <th data-k="last_change">Изменено</th>
+  </tr></thead>
+  <tbody id="rows"><tr><td colspan="13" class="empty">Загрузка…</td></tr></tbody>
+</table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const MODES = {{ MODES|tojson }};
+let DATA = [], cardFilter = 'all', sortKey = 'name', sortDir = 1;
+const sel = new Set();
+const rub = v => (v === null || v === undefined || v === '') ? '—' : Math.round(v).toLocaleString('ru-RU');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const val = v => (v === null || v === undefined) ? '' : Math.round(v);
+
+async function load() {
+  DATA = await (await fetch('/api/products')).json();
+  render();
+}
+function passes(p) {
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const fm = document.getElementById('f-mode').value;
+  if (q && !(p.name.toLowerCase().includes(q) || String(p.offer_id).toLowerCase().includes(q))) return false;
+  if (fm && p.mode !== fm) return false;
+  if (cardFilter === 'low') return p.status === 'low';
+  if (cardFilter === 'high') return p.status === 'high' || p.status === 'off';
+  if (cardFilter === 'managed') return p.mode !== 'watch' && !p.locked;
+  if (cardFilter === 'mpspace') return p.locked;
+  if (cardFilter === 'norule') return p.status === 'norule';
+  return true;
+}
+function rowClass(p) {
+  if (p.locked) return 'row-locked';
+  return p.status === 'low' ? 'row-low' : (p.status === 'high' || p.status === 'off') ? 'row-high' : '';
+}
+function render() {
+  const cnt = {all: DATA.length, low: 0, high: 0, managed: 0, norule: 0, mpspace: 0};
+  DATA.forEach(p => { if (p.status === 'low') cnt.low++; if (p.status === 'high' || p.status === 'off') cnt.high++;
+    if (p.mode !== 'watch' && !p.locked) cnt.managed++; if (p.status === 'norule') cnt.norule++; if (p.locked) cnt.mpspace++; });
+  for (const k in cnt) document.getElementById('c-' + k).textContent = cnt[k];
+  document.querySelectorAll('.card').forEach(c => c.classList.toggle('sel', c.dataset.f === cardFilter));
+
+  const rows = DATA.filter(passes).sort((a, b) => {
+    let x = a[sortKey], y = b[sortKey];
+    if (x === null || x === undefined) x = ''; if (y === null || y === undefined) y = '';
+    return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), 'ru')) * sortDir;
+  });
+  const tb = document.getElementById('rows');
+  if (!DATA.length) { tb.innerHTML = '<tr><td colspan="13" class="empty">Товаров пока нет. Укажите ключи в Настройках и нажмите «Проверить сейчас».</td></tr>'; return; }
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="13" class="empty">Ничего не найдено</td></tr>'; return; }
+  tb.innerHTML = rows.map(p => `
+    <tr data-id="${p.product_id}" class="${rowClass(p)}">
+      <td><input type="checkbox" class="chk" ${sel.has(p.product_id) ? 'checked' : ''}></td>
+      <td class="name"><a href="/product/${p.product_id}">${esc(p.name) || '(без названия)'}</a><br><small>${esc(p.offer_id)}</small>
+        ${p.locked ? '<span class="pill mp" title="Цену ведёт MPSpace — эта программа её не меняет">MPSpace</span>' : ''}
+        ${p.n_actions ? `<span class="pill real" title="Товар участвует в акциях">акций: ${p.n_actions}</span>` : ''}</td>
+      <td class="num">${rub(p.price)}</td>
+      <td class="num muted">${p.old_price ? rub(p.old_price) : '—'}</td>
+      <td class="num"><b>${rub(p.seller_price || p.price)}</b></td>
+      <td class="num">${p.buyer_est ? '≈ ' + rub(p.buyer_est) : '—'}</td>
+      <td><span class="dot ${p.color || ''}" title="${p.color || 'нет данных'}"></span></td>
+      <td class="edit">${p.locked
+        ? '<select data-f="mode" disabled title="Снимите отметку «Под MPSpace», чтобы управлять ценой"><option value="watch">Под MPSpace</option></select>'
+        : `<select data-f="mode">${Object.entries(MODES).map(([k, v]) => `<option value="${k}" ${k === p.mode ? 'selected' : ''}>${v}</option>`).join('')}</select>`}</td>
+      <td class="edit num"><input type="number" data-f="min" value="${val(p.min)}"></td>
+      <td class="edit num"><input type="number" data-f="max" value="${val(p.max)}"></td>
+      <td class="edit num"><input type="number" data-f="target" value="${val(p.target)}" ${p.mode === 'hold' ? '' : 'placeholder="—"'} ${p.locked ? 'disabled' : ''}></td>
+      <td><span class="pill st ${p.status}" title="${esc(p.status_text)}">${esc(p.status_text)}</span></td>
+      <td class="muted">${p.last_change ? p.last_change.slice(5, 16) : '—'}</td>
+    </tr>`).join('');
+}
+async function saveRow(tr, el) {
+  const id = +tr.dataset.id, p = DATA.find(x => x.product_id === id);
+  const g = f => tr.querySelector(`[data-f="${f}"]`).value;
+  const body = {product_id: id, mode: g('mode'), min: g('min'), max: g('max'), target: g('target'), tolerance: p.tolerance};
+  if (body.mode === 'hold' && !body.target) { body.target = Math.round(p.controlled || p.price); tr.querySelector('[data-f="target"]').value = body.target; }
+  const r = await api('/api/rule', body);
+  if (!r.ok) { el.classList.add('err'); toast(r.message); if (el.tagName === 'SELECT') el.value = p.mode; return; }
+  el.classList.remove('err'); el.classList.add('saved'); setTimeout(() => el.classList.remove('saved'), 900);
+  Object.assign(p, {mode: body.mode, min: body.min === '' ? null : +body.min, max: body.max === '' ? null : +body.max,
+    target: body.target === '' ? null : +body.target, status: r.status, status_text: r.status_text});
+  render();
+}
+document.getElementById('rows').addEventListener('change', e => {
+  const tr = e.target.closest('tr');
+  if (e.target.classList.contains('chk')) { e.target.checked ? sel.add(+tr.dataset.id) : sel.delete(+tr.dataset.id); updBulk(); return; }
+  if (e.target.dataset.f) saveRow(tr, e.target);
+});
+document.getElementById('chk-all').addEventListener('change', e => {
+  DATA.filter(passes).forEach(p => e.target.checked ? sel.add(p.product_id) : sel.delete(p.product_id)); render(); updBulk();
+});
+function updBulk() { document.getElementById('bulk').classList.toggle('show', sel.size > 0); document.getElementById('bulk-n').textContent = sel.size; }
+function selectNone() { sel.clear(); document.getElementById('chk-all').checked = false; render(); updBulk(); }
+async function bulkApply() {
+  const body = {ids: [...sel], mode: document.getElementById('b-mode').value, min_pct: document.getElementById('b-min').value,
+    max_pct: document.getElementById('b-max').value, target_current: document.getElementById('b-target').checked};
+  if (body.min_pct === '') delete body.min_pct; if (body.max_pct === '') delete body.max_pct;
+  const r = await api('/api/rules/bulk', body);
+  toast(`Обновлено правил: ${r.done}` + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')
+    + (r.errors.length ? '. Ошибки: ' + r.errors.join('; ') : ''), 6000);
+  load();
+}
+async function bulkClear() {
+  if (!confirm(`Сбросить правила у ${sel.size} товаров (режим «Только следить», без границ)?`)) return;
+  const r = await api('/api/rules/bulk', {ids: [...sel], clear: true});
+  toast(`Сброшено: ${r.done}` + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')); load();
+}
+async function bulkLock(on) {
+  const msg = on
+    ? `Отметить ${sel.size} товаров «Под MPSpace»? Программа перестанет менять их цены (режим станет «Только следить», границы сохранятся для подсветки).`
+    : `Снять отметку «Под MPSpace» у ${sel.size} товаров? Перед этим отключите их в MPSpace.`;
+  if (!confirm(msg)) return;
+  const r = await api('/api/lock', {ids: [...sel], locked: on});
+  toast((on ? 'Отмечено «Под MPSpace»: ' : 'Отметка снята: ') + r.done); load();
+}
+document.querySelectorAll('.card').forEach(c => c.onclick = () => { cardFilter = c.dataset.f; render(); });
+document.getElementById('q').oninput = render;
+document.getElementById('f-mode').onchange = render;
+document.querySelectorAll('th[data-k]').forEach(th => th.onclick = () => {
+  sortDir = sortKey === th.dataset.k ? -sortDir : 1; sortKey = th.dataset.k; render();
+});
+window.onRunFinished = load;
+load();
+</script>
+{% endblock %}

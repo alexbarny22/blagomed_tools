@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Репрайсер Ozon{% endblock %} — Благомед</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">Благомед <span>· репрайсер Ozon</span></div>
+    <nav>
+      <a href="{{ url_for('index') }}" class="{{ 'on' if request.endpoint in ('index','product') }}">Товары</a>
+      <a href="{{ url_for('charts') }}" class="{{ 'on' if request.endpoint=='charts' }}">Графики</a>
+      <a href="{{ url_for('changes') }}" class="{{ 'on' if request.endpoint=='changes' }}">Журнал изменений</a>
+      <a href="{{ url_for('events') }}" class="{{ 'on' if request.endpoint=='events' }}">События</a>
+      <a href="{{ url_for('settings') }}" class="{{ 'on' if request.endpoint=='settings' }}">Настройки</a>
+    </nav>
+  </div>
+</header>
+<div class="statusbar">
+  <div class="wrap">
+    {% if S.dry_run == '1' %}<span class="mode-badge dry">Тренировка — цены не меняются</span>
+    {% else %}<span class="mode-badge live">Боевой режим — цены меняются</span>{% endif %}
+    <span>Последняя проверка: <b id="st-last">{{ ST.last_run or '—' }}</b></span>
+    <span>Следующая: <b id="st-next">{{ ST.next_run or ('выключено' if S.auto_enabled != '1' else '—') }}</b></span>
+    <span id="st-result" class="muted" title="{{ ST.last_result }}">{{ ST.last_result }}</span>
+    <button class="btn small primary" id="run-now" onclick="runNow()">Проверить сейчас</button>
+  </div>
+</div>
+<main>
+  <div class="wrap">
+    {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
+    {% if not has_keys and request.endpoint != 'settings' %}
+      <div class="notice">Не заданы ключи Ozon. Откройте <a href="{{ url_for('settings') }}">Настройки</a> и вставьте Client-Id и Api-Key.</div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+function toast(msg, ms) {
+  const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(window._tt); window._tt = setTimeout(() => t.classList.remove('show'), ms || 3500);
+}
+async function api(url, data) {
+  const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data || {})});
+  return r.json();
+}
+let wasRunning = false;
+async function pollStatus() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    document.getElementById('st-last').textContent = s.last_run || '—';
+    document.getElementById('st-next').textContent = s.next_run || (s.auto ? '—' : 'выключено');
+    document.getElementById('st-result').textContent = s.running ? 'Идёт проверка…' : s.last_result;
+    document.getElementById('run-now').disabled = s.running;
+    if (wasRunning && !s.running && window.onRunFinished) window.onRunFinished();
+    wasRunning = s.running;
+  } catch (e) {}
+}
+async function runNow() {
+  const r = await api('/api/run'); toast(r.message); wasRunning = true; setTimeout(pollStatus, 800);
+}
+setInterval(pollStatus, 4000);
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
