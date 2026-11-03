@@ -44,6 +44,18 @@ function toast(msg, ms) {
   const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show');
   clearTimeout(window._tt); window._tt = setTimeout(() => t.classList.remove('show'), ms || 3500);
 }
+// Уменьшенная копия фото с CDN Ozon (если не получится — загрузится оригинал)
+function thumb(url, size) {
+  if (!url) return '';
+  const m = url.match(/^(https?:\/\/[^/]*ozone\.ru\/s3\/[^/]+\/)(?:wc\d+\/)?([^/]+)$/);
+  return m ? `${m[1]}wc${size}/${m[2]}` : url;
+}
+function imgTag(url, size, cls) {
+  if (!url) return `<div class="${cls} noimg"></div>`;
+  const e = s => String(s).replace(/"/g, '&quot;');
+  return `<img class="${cls}" loading="lazy" src="${e(thumb(url, size))}" data-orig="${e(url)}"
+    onerror="if(this.dataset.orig&&this.src!==this.dataset.orig){this.src=this.dataset.orig}else{this.replaceWith(Object.assign(document.createElement('div'),{className:'${cls} noimg'}))}">`;
+}
 async function api(url, data) {
   const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data || {})});
   return r.json();

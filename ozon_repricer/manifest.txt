@@ -1,0 +1,19 @@
+# Файлы, которые скачивает update.py (пути относительно папки ozon_repricer).
+# data/ и venv/ не обновляются никогда. .bat-файлы не обновляются (могут быть запущены).
+README.txt
+app.py
+core/db.py
+core/engine.py
+core/ozon.py
+requirements.txt
+static/chart.umd.js
+static/pricechart.js
+static/style.css
+templates/base.html
+templates/changes.html
+templates/charts.html
+templates/events.html
+templates/index.html
+templates/product.html
+templates/settings.html
+update.py

@@ -2,9 +2,16 @@
 {% block title %}{{ p.name or p.offer_id }}{% endblock %}
 {% block content %}
 <p><a href="{{ url_for('index') }}">← Все товары</a></p>
-<h1>{{ p.name or '(без названия)' }}{% if rule.locked %} <span class="pill mp" style="vertical-align:middle">Под MPSpace</span>{% endif %}</h1>
-<p class="sub mono">Артикул {{ p.offer_id }} · product_id {{ p.product_id }}{% if p.sku %} · SKU {{ p.sku }}
-  · <a href="https://www.ozon.ru/product/{{ p.sku }}/" target="_blank">открыть на Ozon ↗</a>{% endif %}</p>
+<div class="phead">
+  <div id="pimg"></div>
+  <div>
+    <h1>{{ p.name or '(без названия)' }}{% if rule.locked %} <span class="pill mp" style="vertical-align:middle">Под MPSpace</span>{% endif %}
+      {% if rule.hidden %} <span class="pill nodata" style="vertical-align:middle">скрыт из таблиц</span>{% endif %}</h1>
+    <p class="sub mono" style="margin-bottom:10px">Артикул {{ p.offer_id }} · product_id {{ p.product_id }}{% if p.sku %} · SKU {{ p.sku }}
+      · <a href="https://www.ozon.ru/product/{{ p.sku }}/" target="_blank">открыть на Ozon ↗</a>{% endif %}</p>
+    <button class="btn small" onclick="toggleHide({{ 'false' if rule.hidden else 'true' }})">{{ 'Вернуть в таблицы' if rule.hidden else 'Скрыть из таблиц' }}</button>
+  </div>
+</div>
 
 <div class="grid2">
   <div>
@@ -114,6 +121,11 @@ async function manual() {
     r = await api('/api/manual/' + PID, {...body, force: true});
   }
   toast(r.message, 6000); if (r.ok) setTimeout(() => location.reload(), 1500);
+}
+document.getElementById('pimg').outerHTML = imgTag({{ (p.image or '')|tojson }}, 200, 'pimg');
+async function toggleHide(on) {
+  if (on && !confirm('Скрыть товар из таблицы и графиков? Правило цены продолжит работать. Вернуть можно здесь же или галочкой «показать скрытые».')) return;
+  await api('/api/hide', {ids: [PID], hidden: on}); location.reload();
 }
 async function toggleLock(el) {
   const msg = el.checked

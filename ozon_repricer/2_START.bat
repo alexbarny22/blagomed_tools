@@ -6,4 +6,5 @@ if not exist venv\Scripts\pythonw.exe (
   pause
   exit /b 1
 )
+rem обновление с GitHub проверяется внутри программы при запуске
 start "" "venv\Scripts\pythonw.exe" "app.py"

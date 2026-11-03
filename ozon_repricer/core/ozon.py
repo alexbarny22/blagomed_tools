@@ -130,7 +130,15 @@ class MockOzonClient:
 
     def get_product_info(self, product_ids):
         st = MockOzonClient._state
-        return [{"id": p, "sku": st[p]["sku"], "name": st[p]["name"], "offer_id": st[p]["offer_id"]}
+        def img(p):
+            hue = (p * 47) % 360
+            svg = (f"<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><rect width='200' height='200' "
+                   f"fill='hsl({hue},45%,85%)'/><circle cx='100' cy='90' r='45' fill='hsl({hue},45%,55%)'/>"
+                   f"<rect x='50' y='140' width='100' height='22' rx='6' fill='hsl({hue},45%,55%)'/></svg>")
+            import urllib.parse
+            return "data:image/svg+xml," + urllib.parse.quote(svg)
+        return [{"id": p, "sku": st[p]["sku"], "name": st[p]["name"], "offer_id": st[p]["offer_id"],
+                 "primary_image": [img(p)], "images": [img(p)]}
                 for p in map(int, product_ids) if p in st]
 
     def import_prices(self, prices):
