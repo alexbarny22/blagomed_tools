@@ -432,7 +432,27 @@ def boot():
     core.run("Подключаюсь к 1С и загружаю справочники…", go)
 
 
+def self_update():
+    """Проверка обновлений при каждом запуске (нужно, если бот запускает панель ботов,
+    а не server_run.bat). Если что-то обновилось — перезапускаемся уже с новыми файлами."""
+    if os.environ.get("MOVE_BOT_UPDATED"):
+        return
+    before = version()
+    try:
+        import update
+        update.main()
+    except Exception as e:
+        mb.log("Проверка обновлений не удалась: " + str(e))
+        return
+    if version() != before:
+        mb.log(f"Установлено обновление {before} -> {version()}, перезапуск")
+        os.environ["MOVE_BOT_UPDATED"] = "1"
+        import sys
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 if __name__ == "__main__":
+    self_update()
     mb.log(f"Веб-бот запущен, версия {version()}, порт {PORT}")
     threading.Thread(target=fix_task, daemon=True).start()
     boot()
