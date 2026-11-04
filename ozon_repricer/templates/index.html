@@ -9,7 +9,12 @@
 <div class="notice" id="minmax-banner" style="display:flex;gap:12px;align-items:center;justify-content:space-between">
   <div><b>Важно:</b> смысл полей «Мин» и «Макс» изменился — теперь это границы вашей цены селлера (цены, которая
     уходит в Ozon), а не контролируемой цены. Репрайсер никогда не поставит цену ниже минимума.
-    Проверьте значения, они могли требовать пересмотра.</div>
+    Проверьте значения, они могли требовать пересмотра.
+    {% if S.migration_dryrun == '1' and S.dry_run == '1' %}
+    <div style="margin-top:6px"><b>Режим тренировки включён после обновления:</b> проверьте мин/макс и включите
+      боевой режим в «Настройках».</div>
+    {% endif %}
+  </div>
   <button type="button" class="btn small" onclick="dismissBanner()">Понятно</button>
 </div>
 {% endif %}
@@ -57,8 +62,8 @@
   <span class="sep"></span>
   <label>Режим</label>
   <select id="b-mode"><option value="">не менять</option>{% for k, v in MODES.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
-  <label>Мин, % от текущей</label><input type="number" id="b-min" placeholder="95">
-  <label>Макс, %</label><input type="number" id="b-max" placeholder="130">
+  <label>Мин, % от цены селлера</label><input type="number" id="b-min" placeholder="95">
+  <label>Макс, % от цены селлера</label><input type="number" id="b-max" placeholder="130">
   <label><input type="checkbox" id="b-target"> цель = текущая цена</label>
   <button class="btn primary" onclick="bulkApply()">Применить</button>
   <button class="btn" onclick="bulkClear()">Сбросить правила</button>

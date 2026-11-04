@@ -268,17 +268,18 @@ def api_rules_bulk():
         if rule.get("locked"):
             skipped += 1  # товары под MPSpace массовые операции не трогают
             continue
-        cur = controlled_price(p, rule, s) or p["price"]
+        cur_base = p["price"] or 0  # мин/макс — границы цены селлера, считаем от неё
+        ctl = controlled_price(p, rule, s) or cur_base
         if d.get("clear"):
             rule.update(mode="watch", min_price=None, max_price=None, target=None)
-        if _f(d.get("min_pct")) is not None and cur:
-            rule["min_price"] = round(cur * _f(d["min_pct"]) / 100)
+        if _f(d.get("min_pct")) is not None and cur_base:
+            rule["min_price"] = round(cur_base * _f(d["min_pct"]) / 100)
         if _f(d.get("min_abs")) is not None:
             rule["min_price"] = _f(d["min_abs"])
-        if _f(d.get("max_pct")) is not None and cur:
-            rule["max_price"] = round(cur * _f(d["max_pct"]) / 100)
-        if d.get("target_current") and cur:
-            rule["target"] = round(cur)
+        if _f(d.get("max_pct")) is not None and cur_base:
+            rule["max_price"] = round(cur_base * _f(d["max_pct"]) / 100)
+        if d.get("target_current") and ctl:
+            rule["target"] = round(ctl)
         if _f(d.get("tolerance")) is not None:
             rule["tolerance"] = _f(d["tolerance"])
         if d.get("mode") in MODES:
@@ -303,7 +304,7 @@ def api_rules_bulk():
                             "max_strategy": rule.get("max_strategy") or 0,
                             "control_basis": rule.get("control_basis") or "",
                             "tags": rule.get("tags") or ""})
-            r = _hold_defaults(r, cur)
+            r = _hold_defaults(r, cur_base)
             db.save_rule(pid, note=rule.get("note"), **r)
             done += 1
         except ValueError as e:
@@ -569,15 +570,18 @@ def rules_import():
                 bad.append(f"{row[1]}: под MPSpace — режим не изменён")
             mode = "watch"
         try:
-            # новые столбцы — только в конец; старые файлы без них по-прежнему загружаются
-            cb = (row[11] if len(row) > 11 else "").strip().lower()
-            ms = (row[12] if len(row) > 12 else "").strip()
-            tags = (row[13] if len(row) > 13 else "").strip()[:500]
+            # новые столбцы — только в конец; старые файлы без них по-прежнему загружаются.
+            # Если столбца в файле нет — сохраняем уже заданные у товара значения (не затираем).
+            cur = db.get_rule(pid)
+            cb = (row[11] if len(row) > 11 else (cur.get("control_basis") or "")).strip().lower()
+            ms = (row[12] if len(row) > 12 else str(int(cur.get("max_strategy") or 0))).strip()
+            tags = (row[13] if len(row) > 13 else (cur.get("tags") or "")).strip()[:500]
             r = _rule_from({"mode": mode, "min": num(row[6]), "max": num(row[7]), "target": num(row[8]),
                             "tolerance": num(row[9]), "control_basis": cb, "max_strategy": ms, "tags": tags})
             if is_locked:
-                # «Под MPSpace» из файла можно только поставить, поля правил не меняем
-                r = _rule_from({"mode": "watch"})
+                # «Под MPSpace»: режим остаётся «только следить», но мин/макс/теги/тип/стратегия
+                # из файла применяются — для подсветки нарушений (как было раньше)
+                r["mode"] = "watch"
             p0 = db.q("SELECT price FROM products WHERE product_id=?", (pid,), one=True)
             r = _hold_defaults(r, p0["price"] if p0 else None)
             db.save_rule(pid, **r)

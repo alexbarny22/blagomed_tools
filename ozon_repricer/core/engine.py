@@ -151,15 +151,16 @@ def attention_for(p: dict, rule: dict, s):
                 ratio = min(max(c / price, 0.2), 1.2)
                 if tg / ratio > mx + 0.5:
                     reasons.append("цель не достигается из-за максимума")
-    blocked = db.q("SELECT ts FROM changes WHERE product_id=? AND source='отложено' AND ok=0 "
-                   "AND error LIKE '%акция с фиксированной%' ORDER BY id DESC LIMIT 1",
-                   (p["product_id"],), one=True)
-    if blocked:
-        reasons.append("изменение отложено: акция с фиксированной ценой")
-    err = db.q("SELECT ts FROM changes WHERE product_id=? AND ok=0 AND dry_run=0 AND source!='отложено' "
-               "ORDER BY id DESC LIMIT 1", (p["product_id"],), one=True)
-    if err:
-        reasons.append("ошибка при последней отправке цены в Ozon")
+    # «ошибка отправки» и «отложено: акция с фиксированной ценой» — только если это
+    # ПОСЛЕДНЯЯ реальная запись журнала по товару (после успешной отправки причина пропадает)
+    last_real = db.q("SELECT source, ok, error FROM changes WHERE product_id=? AND dry_run=0 "
+                     "ORDER BY id DESC LIMIT 1", (p["product_id"],), one=True)
+    if last_real:
+        if last_real["source"] == "отложено" and not last_real["ok"] and \
+                "акция с фиксированной" in (last_real.get("error") or ""):
+            reasons.append("изменение отложено: акция с фиксированной ценой")
+        elif last_real["ok"] == 0 and last_real["source"] != "отложено":
+            reasons.append("ошибка при последней отправке цены в Ozon")
     if rule.get("mode") in ("guard", "hold") and not rule.get("locked"):
         if p.get("stock_total") is not None and p["stock_total"] == 0:
             reasons.append("остаток 0")
@@ -260,9 +261,15 @@ def plan_change(p: dict, rule: dict, s: dict):
     if new_price < lo:
         new_price, limited = lo, f" (ограничено шагом {int(step * 100)}%)"
     if mn and new_price < mn:
+        # подъём до минимума разрешён сразу — защита от убытка, даже если шаг меньше
         new_price = math.ceil(mn)
-    if mx and hi and new_price > hi:
-        new_price = math.floor(hi)
+        if new_price > hst:
+            limited = ""
+            limit_note = " (подъём до минимума без ограничения шага)"
+        else:
+            limit_note = ""
+    else:
+        limit_note = ""
     if abs(new_price - price) < 1:
         return None, "изменение меньше 1 ₽"
 
@@ -274,7 +281,7 @@ def plan_change(p: dict, rule: dict, s: dict):
             reason = f"строгое удержание: максимум {round(mx)} ₽ превышен до {new_price} ₽"
 
     plan = {"price": float(new_price), "old_price": old_price_for(new_price, price, p.get("old_price") or 0),
-            "reason": reason + limited, "controlled": c, "min_only": False, "overshoot": overshoot}
+            "reason": reason + limited + limit_note, "controlled": c, "min_only": False, "overshoot": overshoot}
     if push_min:
         plan["min_price"] = float(min(mn, new_price))
     elif (p.get("ozon_min_price") or 0) > new_price:
@@ -334,6 +341,7 @@ class Repricer:
                 stocks[pid] = (fbo, fbs, fbp, total_)
         except Exception as e:
             db.log("warn", f"Не удалось получить остатки товаров: {e}")
+        got_stocks = bool(stocks)
         seen, ts = set(), db.now()
         for it in items:
             pid = int(it["product_id"])
@@ -355,21 +363,27 @@ class Repricer:
             }
             row["stock_fbo"], row["stock_fbs"], row["stock_fbp"], row["stock_total"] = \
                 stocks.get(pid, (None, None, None, None))
-            db.ex("""INSERT INTO products(product_id, offer_id, price, old_price, seller_price, ozon_min_price,
-                     buyer_est, color_index, idx_ozon_min, idx_ozon_val, idx_ext_min, idx_ext_val, actions,
-                     active, updated_at, stock_fbo, stock_fbs, stock_fbp, stock_total)
-                     VALUES(:product_id,:offer_id,:price,:old_price,:seller_price,:ozon_min_price,:buyer_est,
-                     :color_index,:idx_ozon_min,:idx_ozon_val,:idx_ext_min,:idx_ext_val,:actions,1,:ts,
-                     :stock_fbo,:stock_fbs,:stock_fbp,:stock_total)
-                     ON CONFLICT(product_id) DO UPDATE SET offer_id=excluded.offer_id, price=excluded.price,
-                     old_price=excluded.old_price, seller_price=excluded.seller_price,
-                     ozon_min_price=excluded.ozon_min_price, buyer_est=excluded.buyer_est,
-                     color_index=excluded.color_index, idx_ozon_min=excluded.idx_ozon_min,
-                     idx_ozon_val=excluded.idx_ozon_val, idx_ext_min=excluded.idx_ext_min,
-                     idx_ext_val=excluded.idx_ext_val, actions=excluded.actions, active=1,
-                     stock_fbo=excluded.stock_fbo, stock_fbs=excluded.stock_fbs,
-                     stock_fbp=excluded.stock_fbp, stock_total=excluded.stock_total,
-                     updated_at=excluded.updated_at""", {**row, "ts": ts})
+            base_cols = ["product_id", "offer_id", "price", "old_price", "seller_price", "ozon_min_price",
+                         "buyer_est", "color_index", "idx_ozon_min", "idx_ozon_val", "idx_ext_min",
+                         "idx_ext_val", "actions", "active", "updated_at"]
+            vals = [":product_id", ":offer_id", ":price", ":old_price", ":seller_price", ":ozon_min_price",
+                    ":buyer_est", ":color_index", ":idx_ozon_min", ":idx_ozon_val", ":idx_ext_min",
+                    ":idx_ext_val", ":actions", "1", ":ts"]
+            sets = ["offer_id=excluded.offer_id", "price=excluded.price", "old_price=excluded.old_price",
+                    "seller_price=excluded.seller_price", "ozon_min_price=excluded.ozon_min_price",
+                    "buyer_est=excluded.buyer_est", "color_index=excluded.color_index",
+                    "idx_ozon_min=excluded.idx_ozon_min", "idx_ozon_val=excluded.idx_ozon_val",
+                    "idx_ext_min=excluded.idx_ext_min", "idx_ext_val=excluded.idx_ext_val",
+                    "actions=excluded.actions", "active=1", "updated_at=excluded.updated_at"]
+            # остатки обновляем только когда реально получены для этого товара:
+            # при сбое запроса остатков прежние значения сохраняются (не затираются NULL)
+            if got_stocks and pid in stocks:
+                base_cols += ["stock_fbo", "stock_fbs", "stock_fbp", "stock_total"]
+                vals += [":stock_fbo", ":stock_fbs", ":stock_fbp", ":stock_total"]
+                sets += ["stock_fbo=excluded.stock_fbo", "stock_fbs=excluded.stock_fbs",
+                         "stock_fbp=excluded.stock_fbp", "stock_total=excluded.stock_total"]
+            db.ex((f"INSERT INTO products({', '.join(base_cols)}) VALUES({', '.join(vals)}) "
+                   f"ON CONFLICT(product_id) DO UPDATE SET {', '.join(sets)}"), {**row, "ts": ts})
             last = db.q("SELECT * FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 1", (pid,), one=True)
             keys = ("price", "old_price", "seller_price", "buyer_est", "ozon_min_price", "color_index")
             if not last or any(last[k] != row[k] for k in keys):

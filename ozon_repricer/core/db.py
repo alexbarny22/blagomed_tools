@@ -22,6 +22,7 @@ DEFAULT_SETTINGS = {
     "history_days": "365",
     "strict_overshoot_pct": "100", # на сколько % можно превысить максимум при стратегии «строгое удержание»
     "banner_minmax_seen": "0",     # видел ли пользователь плашку о новом смысле мин/макс («Понятно»)
+    "migration_dryrun": "0",       # 1 = при обновлении базы принудительно включена тренировка (проверьте мин/макс)
 }
 
 # Ключи Ozon НЕ вписываются в код: они вводятся в интерфейсе (вкладка «Настройки»)
@@ -95,6 +96,14 @@ def init():
             con.execute("ALTER TABLE rules ADD COLUMN max_strategy INTEGER DEFAULT 0")
             con.execute("ALTER TABLE rules ADD COLUMN control_basis TEXT DEFAULT ''")
             con.execute("ALTER TABLE rules ADD COLUMN tags TEXT DEFAULT ''")
+            # смысл мин/макс изменился: если есть активные правила guard/hold — принудительно
+            # включаем тренировку, чтобы старые границы не двигали цены на первом запуске
+            n_active = con.execute("SELECT COUNT(*) FROM rules WHERE mode IN ('guard','hold')").fetchone()[0]
+            if n_active:
+                con.execute("INSERT INTO settings(key, value) VALUES('dry_run','1') "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                con.execute("INSERT INTO settings(key, value) VALUES('migration_dryrun','1') "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         pcols = [r[1] for r in con.execute("PRAGMA table_info(products)")]
         for col in ("stock_fbo", "stock_fbs", "stock_fbp", "stock_total"):
             if col not in pcols:
@@ -108,6 +117,12 @@ def init():
                                     "вашей цены селлера (цены, которую отправляем в Ozon), а не контролируемой "
                                     "цены. Цель удержания задаётся отдельно. Проверьте значения на вкладке "
                                     "«Товары», плашка об этом видна над таблицей."))
+            n_active = con.execute("SELECT COUNT(*) FROM rules WHERE mode IN ('guard','hold')").fetchone()[0]
+            if n_active:
+                con.execute("INSERT INTO events(ts, level, message) VALUES(?, 'warn', ?)",
+                            (now(), "Режим тренировки включён после обновления: смысл полей «Мин»/«Макс» изменился "
+                                    "(теперь это границы вашей цены селлера). Проверьте значения мин/макс на "
+                                    "вкладке «Товары» и включите боевой режим в «Настройках», когда убедитесь."))
         if "hidden" not in cols:  # скрытые из таблиц товары
             con.execute("ALTER TABLE rules ADD COLUMN hidden INTEGER DEFAULT 0")
         pcols = [r[1] for r in con.execute("PRAGMA table_info(products)")]
