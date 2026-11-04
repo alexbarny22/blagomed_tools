@@ -2,11 +2,21 @@
 {% block title %}Товары{% endblock %}
 {% block content %}
 <h1>Товары и правила цен</h1>
-<p class="sub">Контролируемая цена — {{ 'расчётная цена покупателя (≈ по индексу цен)' if S.control_basis == 'buyer' else 'цена со скидками продавца (marketing_seller_price)' }}.
-  Правила сохраняются сразу при изменении поля.</p>
+<p class="sub">Мин/Макс — границы вашей цены селлера (той, что отправляется в Ozon). Цель удержания — для
+  контролируемой цены. Правила сохраняются сразу при изменении поля.</p>
+
+{% if S.banner_minmax_seen != '1' %}
+<div class="notice" id="minmax-banner" style="display:flex;gap:12px;align-items:center;justify-content:space-between">
+  <div><b>Важно:</b> смысл полей «Мин» и «Макс» изменился — теперь это границы вашей цены селлера (цены, которая
+    уходит в Ozon), а не контролируемой цены. Репрайсер никогда не поставит цену ниже минимума.
+    Проверьте значения, они могли требовать пересмотра.</div>
+  <button type="button" class="btn small" onclick="dismissBanner()">Понятно</button>
+</div>
+{% endif %}
 
 <div class="cards">
   <div class="card" data-f="all"><div class="n" id="c-all">—</div><div class="l">Всего товаров</div></div>
+  <div class="card warn" data-f="attention"><div class="n" id="c-attention">—</div><div class="l">Требует внимания</div></div>
   <div class="card bad" data-f="low"><div class="n" id="c-low">—</div><div class="l">Ниже минимума</div></div>
   <div class="card warn" data-f="high"><div class="n" id="c-high">—</div><div class="l">Выше максимума / не на цели</div></div>
   <div class="card good" data-f="managed"><div class="n" id="c-managed">—</div><div class="l">Под управлением</div></div>
@@ -20,14 +30,26 @@
     <option value="">Все режимы</option>
     {% for k, v in MODES.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}
   </select>
+  <select id="f-tag"><option value="">Все теги</option></select>
   <label class="switch muted" id="show-hidden-wrap" style="display:none">
     <input type="checkbox" id="show-hidden"><span>показать скрытые (<span id="n-hidden">0</span>)</span></label>
+  <button type="button" class="btn small" id="btn-cols" onclick="toggleCols()">Колонки…</button>
   <span class="spacer" style="flex:1"></span>
   <a class="btn" href="{{ url_for('rules_csv') }}">Скачать правила (Excel/CSV)</a>
   <form method="post" action="{{ url_for('rules_import') }}" enctype="multipart/form-data" id="imp" style="display:inline">
     <input type="file" name="file" accept=".csv" id="impfile" hidden onchange="document.getElementById('imp').submit()">
     <button type="button" class="btn" onclick="document.getElementById('impfile').click()">Загрузить правила</button>
   </form>
+</div>
+
+<div class="colpanel" id="colpanel" hidden>
+  <b>Колонки:</b>
+  <label data-col-toggle="old_price"><input type="checkbox"> Зачёркнутая</label>
+  <label data-col-toggle="buyer_est"><input type="checkbox"> ≈ Покупатель</label>
+  <label data-col-toggle="color"><input type="checkbox"> Индекс</label>
+  <label data-col-toggle="cb"><input type="checkbox"> Контроль</label>
+  <label data-col-toggle="ms"><input type="checkbox"> Стратегия</label>
+  <label data-col-toggle="tags"><input type="checkbox"> Теги</label>
 </div>
 
 <div class="bulk" id="bulk">
@@ -46,6 +68,10 @@
   <span class="sep"></span>
   <button class="btn" id="b-hide" onclick="bulkHide(true)">Скрыть из таблицы</button>
   <button class="btn" id="b-unhide" onclick="bulkHide(false)">Показать снова</button>
+  <span class="sep"></span>
+  <label>Тег</label><input type="text" id="b-tag" placeholder="тег" style="width:120px">
+  <button class="btn" onclick="bulkTag('add')">+ тег</button>
+  <button class="btn" onclick="bulkTag('remove')">− тег</button>
   <span class="spacer" style="flex:1"></span>
   <button class="btn" onclick="selectNone()">Снять выбор</button>
 </div>
@@ -57,18 +83,23 @@
     <th class="nosort"></th>
     <th data-k="name">Товар</th>
     <th data-k="price" class="num">Цена</th>
-    <th data-k="old_price" class="num">Зачёркн.</th>
+    <th data-k="old_price" class="num col" data-col="old_price">Зачёркн.</th>
     <th data-k="seller_price" class="num" title="Цена с учётом скидок и акций продавца">Со скидками</th>
-    <th data-k="buyer_est" class="num" title="Расчёт по индексу цен Ozon — близко к цене по Ozon Карте">≈ Покупатель</th>
-    <th data-k="color" title="Индекс цен Ozon">Индекс</th>
+    <th data-k="buyer_est" class="num col" data-col="buyer_est" title="Расчёт по индексу цен Ozon — близко к цене по Ozon Карте">≈ Покупатель</th>
+    <th data-k="color" class="col" data-col="color" title="Индекс цен Ozon">Индекс</th>
+    <th class="nosort col" data-col="cb" title="Тип контроля для этого товара">Контроль</th>
+    <th class="nosort col" data-col="ms" title="Стратегия при достижении максимума">Стратегия</th>
     <th class="nosort">Режим</th>
     <th class="nosort num">Мин</th>
     <th class="nosort num">Макс</th>
     <th class="nosort num">Цель</th>
+    <th class="nosort num" title="Остатки: наведите, чтобы увидеть FBO/FBS/FBP">Остатки</th>
+    <th class="nosort" title="Требует внимания — наведите на метку">Внимание</th>
+    <th class="nosort col" data-col="tags" title="Теги через запятую">Теги</th>
     <th data-k="status">Статус</th>
     <th data-k="last_change">Изменено</th>
   </tr></thead>
-  <tbody id="rows"><tr><td colspan="14" class="empty">Загрузка…</td></tr></tbody>
+  <tbody id="rows"><tr><td colspan="19" class="empty">Загрузка…</td></tr></tbody>
 </table>
 </div>
 {% endblock %}
@@ -76,14 +107,48 @@
 {% block scripts %}
 <script>
 const MODES = {{ MODES|tojson }};
-let DATA = [], cardFilter = 'all', sortKey = 'name', sortDir = 1;
+let DATA = [], cardFilter = 'all', sortKey = 'name', sortDir = 1, tagFilter = '';
 const sel = new Set();
 const rub = v => (v === null || v === undefined || v === '') ? '—' : Math.round(v).toLocaleString('ru-RU');
+const stk = v => (v === null || v === undefined || v === '') ? '—' : Math.round(v).toLocaleString('ru-RU');
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const val = v => (v === null || v === undefined) ? '' : Math.round(v);
+const tagsOf = p => (p.tags || '').split(',').map(t => t.trim()).filter(Boolean);
 
+// видимость колонок (запоминается в localStorage, со страховкой от ошибок)
+const COL_DEFAULT = {old_price: false, buyer_est: false, color: false, cb: true, ms: true, tags: false};
+let colVis = Object.assign({}, COL_DEFAULT);
+try {
+  const saved = JSON.parse(localStorage.getItem('rp-cols') || 'null');
+  if (saved) colVis = Object.assign({}, COL_DEFAULT, saved);
+} catch (e) {}
+function applyCols() {
+  document.querySelectorAll('[data-col]').forEach(el => {
+    el.style.display = colVis[el.dataset.col] === false ? 'none' : '';
+  });
+  document.querySelectorAll('.colpanel label[data-col-toggle]').forEach(l => {
+    l.querySelector('input').checked = colVis[l.dataset.colToggle] !== false;
+  });
+}
+function toggleCols() { document.getElementById('colpanel').hidden = !document.getElementById('colpanel').hidden; }
+document.querySelectorAll('.colpanel label[data-col-toggle]').forEach(l => l.addEventListener('click', () => {
+  const k = l.dataset.colToggle;
+  colVis[k] = l.querySelector('input').checked;
+  try { localStorage.setItem('rp-cols', JSON.stringify(colVis)); } catch (e) {}
+  applyCols();
+}));
+
+function refreshTags() {
+  const tags = new Set();
+  DATA.forEach(p => tagsOf(p).forEach(t => tags.add(t)));
+  const cur = document.getElementById('f-tag').value;
+  document.getElementById('f-tag').innerHTML = '<option value="">Все теги</option>'
+    + [...tags].sort((a, b) => a.localeCompare(b, 'ru')).map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+  if ([...document.getElementById('f-tag').options].some(o => o.value === cur)) document.getElementById('f-tag').value = cur;
+}
 async function load() {
   DATA = await (await fetch('/api/products')).json();
+  refreshTags();
   render();
 }
 function passes(p) {
@@ -92,8 +157,10 @@ function passes(p) {
   const fm = document.getElementById('f-mode').value;
   if (q && !(p.name.toLowerCase().includes(q) || String(p.offer_id).toLowerCase().includes(q))) return false;
   if (fm && p.mode !== fm) return false;
+  if (tagFilter && !tagsOf(p).some(t => t === tagFilter)) return false;
+  if (cardFilter === 'attention') return p.attention.length > 0;
   if (cardFilter === 'low') return p.status === 'low';
-  if (cardFilter === 'high') return p.status === 'high' || p.status === 'off';
+  if (cardFilter === 'high') return p.status === 'high' || p.status === 'off' || p.status === 'hitmax';
   if (cardFilter === 'managed') return p.mode !== 'watch' && !p.locked;
   if (cardFilter === 'mpspace') return p.locked;
   if (cardFilter === 'norule') return p.status === 'norule';
@@ -101,16 +168,22 @@ function passes(p) {
 }
 function rowClass(p) {
   if (p.locked) return 'row-locked';
-  return p.status === 'low' ? 'row-low' : (p.status === 'high' || p.status === 'off') ? 'row-high' : '';
+  return p.status === 'low' ? 'row-low' : (p.status === 'high' || p.status === 'off' || p.status === 'hitmax') ? 'row-high' : '';
 }
 function render() {
   const shown = DATA.filter(p => !p.hidden);
   const nHidden = DATA.length - shown.length;
   document.getElementById('n-hidden').textContent = nHidden;
   document.getElementById('show-hidden-wrap').style.display = nHidden ? '' : 'none';
-  const cnt = {all: shown.length, low: 0, high: 0, managed: 0, norule: 0, mpspace: 0};
-  shown.forEach(p => { if (p.status === 'low') cnt.low++; if (p.status === 'high' || p.status === 'off') cnt.high++;
-    if (p.mode !== 'watch' && !p.locked) cnt.managed++; if (p.status === 'norule') cnt.norule++; if (p.locked) cnt.mpspace++; });
+  const cnt = {all: shown.length, attention: 0, low: 0, high: 0, managed: 0, norule: 0, mpspace: 0};
+  shown.forEach(p => {
+    if (p.attention.length) cnt.attention++;
+    if (p.status === 'low') cnt.low++;
+    if (p.status === 'high' || p.status === 'off' || p.status === 'hitmax') cnt.high++;
+    if (p.mode !== 'watch' && !p.locked) cnt.managed++;
+    if (p.status === 'norule') cnt.norule++;
+    if (p.locked) cnt.mpspace++;
+  });
   for (const k in cnt) document.getElementById('c-' + k).textContent = cnt[k];
   document.querySelectorAll('.card').forEach(c => c.classList.toggle('sel', c.dataset.f === cardFilter));
 
@@ -120,8 +193,9 @@ function render() {
     return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), 'ru')) * sortDir;
   });
   const tb = document.getElementById('rows');
-  if (!DATA.length) { tb.innerHTML = '<tr><td colspan="14" class="empty">Товаров пока нет. Укажите ключи в Настройках и нажмите «Проверить сейчас».</td></tr>'; return; }
-  if (!rows.length) { tb.innerHTML = '<tr><td colspan="14" class="empty">Ничего не найдено</td></tr>'; return; }
+  if (!DATA.length) { tb.innerHTML = '<tr><td colspan="19" class="empty">Товаров пока нет. Укажите ключи в Настройках и нажмите «Проверить сейчас».</td></tr>'; applyCols(); return; }
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="19" class="empty">Ничего не найдено</td></tr>'; applyCols(); return; }
+  const lockAttr = p => p.locked ? ' disabled' : '';
   tb.innerHTML = rows.map(p => `
     <tr data-id="${p.product_id}" class="${rowClass(p)}">
       <td><input type="checkbox" class="chk" ${sel.has(p.product_id) ? 'checked' : ''}></td>
@@ -130,30 +204,46 @@ function render() {
         ${p.locked ? '<span class="pill mp" title="Цену ведёт MPSpace — эта программа её не меняет">MPSpace</span>' : ''}
         ${p.n_actions ? `<span class="pill real" title="Товар участвует в акциях">акций: ${p.n_actions}</span>` : ''}</td>
       <td class="num">${rub(p.price)}</td>
-      <td class="num muted">${p.old_price ? rub(p.old_price) : '—'}</td>
+      <td class="num muted" data-col="old_price">${p.old_price ? rub(p.old_price) : '—'}</td>
       <td class="num"><b>${rub(p.seller_price || p.price)}</b></td>
-      <td class="num">${p.buyer_est ? '≈ ' + rub(p.buyer_est) : '—'}</td>
-      <td><span class="dot ${p.color || ''}" title="${p.color || 'нет данных'}"></span></td>
+      <td class="num" data-col="buyer_est">${p.buyer_est ? '≈ ' + rub(p.buyer_est) : '—'}</td>
+      <td data-col="color"><span class="dot ${p.color || ''}" title="${p.color || 'нет данных'}"></span></td>
+      <td class="edit" data-col="cb"><select data-f="cb" title="Тип контроля для этого товара"${lockAttr(p)}>
+        <option value="" ${!p.control_basis ? 'selected' : ''}>по настр.</option>
+        <option value="seller" ${p.control_basis === 'seller' ? 'selected' : ''}>со скидками</option>
+        <option value="buyer" ${p.control_basis === 'buyer' ? 'selected' : ''}>≈ покупатель</option>
+      </select></td>
+      <td class="edit" data-col="ms"><select data-f="ms" title="Стратегия при достижении максимума"${lockAttr(p)}>
+        <option value="0" ${p.max_strategy !== 1 ? 'selected' : ''}>не выше макс</option>
+        <option value="1" ${p.max_strategy === 1 ? 'selected' : ''}>строгое удерж.</option>
+      </select></td>
       <td class="edit">${p.locked
         ? '<select data-f="mode" disabled title="Снимите отметку «Под MPSpace», чтобы управлять ценой"><option value="watch">Под MPSpace</option></select>'
         : `<select data-f="mode">${Object.entries(MODES).map(([k, v]) => `<option value="${k}" ${k === p.mode ? 'selected' : ''}>${v}</option>`).join('')}</select>`}</td>
       <td class="edit num"><input type="number" data-f="min" value="${val(p.min)}"></td>
       <td class="edit num"><input type="number" data-f="max" value="${val(p.max)}"></td>
       <td class="edit num"><input type="number" data-f="target" value="${val(p.target)}" ${p.mode === 'hold' ? '' : 'placeholder="—"'} ${p.locked ? 'disabled' : ''}></td>
+      <td class="num" title="FBO: ${p.stock_fbo ?? '—'} · FBS: ${p.stock_fbs ?? '—'} · FBP: ${p.stock_fbp ?? '—'}">${stk(p.stock_total)}</td>
+      <td>${p.attention.length ? `<span class="pill atn" title="${esc(p.attention.join('; '))}">внимание</span>` : ''}</td>
+      <td class="edit" data-col="tags"><input type="text" data-f="tags" value="${esc(p.tags)}" placeholder="тег, тег" title="Теги через запятую"${lockAttr(p)}></td>
       <td><span class="pill st ${p.status}" title="${esc(p.status_text)}">${esc(p.status_text)}</span></td>
       <td class="muted">${p.last_change ? p.last_change.slice(5, 16) : '—'}</td>
     </tr>`).join('');
+  applyCols();
 }
 async function saveRow(tr, el) {
   const id = +tr.dataset.id, p = DATA.find(x => x.product_id === id);
   const g = f => tr.querySelector(`[data-f="${f}"]`).value;
-  const body = {product_id: id, mode: g('mode'), min: g('min'), max: g('max'), target: g('target'), tolerance: p.tolerance};
+  const body = {product_id: id, mode: g('mode'), min: g('min'), max: g('max'), target: g('target'), tolerance: p.tolerance,
+    max_strategy: g('ms'), control_basis: g('cb'), tags: g('tags')};
   if (body.mode === 'hold' && !body.target) { body.target = Math.round(p.controlled || p.price); tr.querySelector('[data-f="target"]').value = body.target; }
   const r = await api('/api/rule', body);
   if (!r.ok) { el.classList.add('err'); toast(r.message); if (el.tagName === 'SELECT') el.value = p.mode; return; }
   el.classList.remove('err'); el.classList.add('saved'); setTimeout(() => el.classList.remove('saved'), 900);
   Object.assign(p, {mode: body.mode, min: body.min === '' ? null : +body.min, max: body.max === '' ? null : +body.max,
-    target: body.target === '' ? null : +body.target, status: r.status, status_text: r.status_text});
+    target: body.target === '' ? null : +body.target, max_strategy: +body.max_strategy,
+    control_basis: body.control_basis, tags: body.tags, status: r.status, status_text: r.status_text});
+  refreshTags();
   render();
 }
 document.getElementById('rows').addEventListener('change', e => {
@@ -196,14 +286,31 @@ async function bulkLock(on) {
   const r = await api('/api/lock', {ids: [...sel], locked: on});
   toast((on ? 'Отмечено «Под MPSpace»: ' : 'Отметка снята: ') + r.done); load();
 }
+async function bulkTag(op) {
+  const tag = document.getElementById('b-tag').value.trim();
+  if (!tag) { toast('Введите тег в поле справа'); return; }
+  if (op === 'remove' && !confirm(`Убрать тег «${tag}» у ${sel.size} товаров?`)) return;
+  const r = await api('/api/rules/bulk', {ids: [...sel], [op === 'add' ? 'tag_add' : 'tag_remove']: tag});
+  toast((op === 'add' ? 'Тег добавлен: ' : 'Тег убран: ') + r.done + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : ''), 6000);
+  document.getElementById('b-tag').value = '';
+  load();
+}
+function dismissBanner() {
+  const b = document.getElementById('minmax-banner');
+  api('/api/dismiss_banner');
+  if (b) b.remove();
+  toast('Понятно. Проверьте значения Мин/Макс в таблице.');
+}
 document.querySelectorAll('.card').forEach(c => c.onclick = () => { cardFilter = c.dataset.f; render(); });
 document.getElementById('q').oninput = render;
 document.getElementById('f-mode').onchange = render;
+document.getElementById('f-tag').onchange = e => { tagFilter = e.target.value; render(); };
 document.getElementById('show-hidden').onchange = () => { document.getElementById('chk-all').checked = false; render(); };
 document.querySelectorAll('th[data-k]').forEach(th => th.onclick = () => {
   sortDir = sortKey === th.dataset.k ? -sortDir : 1; sortKey = th.dataset.k; render();
 });
 window.onRunFinished = load;
+applyCols();
 load();
 </script>
 {% endblock %}

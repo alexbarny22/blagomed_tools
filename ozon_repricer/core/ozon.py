@@ -71,6 +71,21 @@ class OzonClient:
             out.extend(data.get("items") or [])
         return out
 
+    def get_stocks(self, visibility: str = "ALL") -> list:
+        """Остатки всех товаров (/v4/product/info/stocks, постранично)."""
+        items, cursor = [], ""
+        for _ in range(200):
+            data = self._post("/v4/product/info/stocks", {
+                "filter": {"visibility": visibility},
+                "limit": 1000, "cursor": cursor,
+            })
+            batch = data.get("items") or []
+            items.extend(batch)
+            cursor = data.get("cursor") or ""
+            if not batch or not cursor:
+                break
+        return items
+
     # --- запись ---
     def import_prices(self, prices: list) -> list:
         """Обновление цен (/v1/product/import/prices), до 1000 за запрос."""
@@ -101,6 +116,8 @@ class MockOzonClient:
                     "product_id": pid, "offer_id": f"BM-{100 + i}", "sku": 1500000000 + i, "name": n,
                     "price": float(price), "old_price": float(round(price * 1.4)), "min_price": 0.0,
                     "promo": rnd.choice([1.0, 1.0, 0.9, 0.85, 0.8]),
+                    "stock_fbo": rnd.choice([0, 0, 2, 5, 9, 14]),
+                    "stock_fbs": rnd.choice([0, 1, 3, 6, 11]),
                 }
             MockOzonClient._state = st
 
@@ -140,6 +157,20 @@ class MockOzonClient:
         return [{"id": p, "sku": st[p]["sku"], "name": st[p]["name"], "offer_id": st[p]["offer_id"],
                  "primary_image": [img(p)], "images": [img(p)]}
                 for p in map(int, product_ids) if p in st]
+
+    def get_stocks(self, visibility="ALL"):
+        """Остатки FBO/FBS для мока; FBP не используется (показывается «—»)."""
+        res = []
+        for s in MockOzonClient._state.values():
+            st = []
+            if s.get("stock_fbo"):
+                st.append({"type": "fbo", "present": s["stock_fbo"], "reserved": 0, "sku": s["sku"],
+                           "shipment_type": "SHIPMENT_TYPE_GENERAL"})
+            if s.get("stock_fbs"):
+                st.append({"type": "fbs", "present": s["stock_fbs"], "reserved": 0, "sku": s["sku"],
+                           "shipment_type": "SHIPMENT_TYPE_GENERAL"})
+            res.append({"product_id": s["product_id"], "offer_id": s["offer_id"], "stocks": st})
+        return res
 
     def import_prices(self, prices):
         res = []

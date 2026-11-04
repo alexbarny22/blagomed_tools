@@ -52,8 +52,15 @@
         <div>Зачёркнутая</div><div>{{ p.old_price|rub if p.old_price else '—' }}</div>
         <div>Со скидками продавца</div><div>{{ (p.seller_price or p.price)|rub }} ₽</div>
         <div>≈ Цена покупателя</div><div>{{ ('≈ ' ~ (p.buyer_est|rub) ~ ' ₽') if p.buyer_est else '—' }}</div>
-        <div>Контролируемая</div><div><b>{{ controlled|rub }} ₽</b></div>
+        <div>Контролируемая</div><div><b>{{ controlled|rub }} ₽</b>
+          <span class="muted" style="font-size:12px">(тип: {{ '≈ покупатель' if basis == 'buyer' else 'со скидками продавца' }})</span></div>
         <div>Мин. цена в Ozon</div><div>{{ p.ozon_min_price|rub if p.ozon_min_price else '—' }}</div>
+        <div>Остатки</div>
+        <div><b>{{ p.stock_total|int if p.stock_total is not none }} шт.</b>{% if p.stock_fbo is not none or p.stock_fbs is not none or p.stock_fbp is not none %}
+          <span class="muted" style="font-size:12px">FBO {{ p.stock_fbo|int if p.stock_fbo is not none else '—' }} ·
+          FBS {{ p.stock_fbs|int if p.stock_fbs is not none else '—' }} ·
+          FBP {{ p.stock_fbp|int if p.stock_fbp is not none else '—' }}</span>{% endif %}</div>
+        {% if attention %}<div>Требует внимания</div><div><span class="pill atn">{{ " · ".join(attention) }}</span></div>{% endif %}
         <div>Индекс цен</div><div><span class="dot {{ p.color_index or '' }}"></span> {{ p.color_index or '—' }}
           {% if p.idx_ozon_min %}<br><span class="muted">мин. у конкурентов на Ozon: {{ p.idx_ozon_min|rub }} ₽</span>{% endif %}
           {% if p.idx_ext_min %}<br><span class="muted">на других площадках: {{ p.idx_ext_min|rub }} ₽</span>{% endif %}</div>
@@ -77,8 +84,21 @@
       <div class="form-row"><label>Максимум, ₽</label><input type="number" id="r-max" value="{{ rule.max_price|int if rule.max_price }}"></div>
       <div class="form-row"><label>Цена удержания, ₽</label><input type="number" id="r-target" value="{{ rule.target|int if rule.target }}"></div>
       <div class="form-row"><label>Допуск удержания, %</label><input type="number" step="0.5" id="r-tol" value="{{ '%g'|format(rule.tolerance or 2) }}"></div>
-      <p class="muted" style="font-size:12.5px">«Только следить» — подсвечивает нарушения, цену не трогает. «Держать в коридоре» — возвращает цену в границы мин/макс.
-        «Держать цену» — подгоняет базовую цену так, чтобы контролируемая цена (с учётом акций) была равна цене удержания.</p>
+      <div class="form-row"><label>Тип контроля</label>
+        <select id="r-cb">
+          <option value="" {{ 'selected' if not rule.control_basis }}>как в настройках ({{ '≈ покупатель' if S.control_basis == 'buyer' else 'со скидками продавца' }})</option>
+          <option value="seller" {{ 'selected' if rule.control_basis == 'seller' }}>со скидками продавца</option>
+          <option value="buyer" {{ 'selected' if rule.control_basis == 'buyer' }}>≈ цена покупателя</option>
+        </select></div>
+      <div class="form-row"><label>Стратегия при максимуме</label>
+        <select id="r-ms">
+          <option value="0" {{ 'selected' if rule.max_strategy|int != 1 }}>не превышать максимум</option>
+          <option value="1" {{ 'selected' if rule.max_strategy|int == 1 }}>строгое удержание (можно выше максимума)</option>
+        </select></div>
+      <div class="form-row"><label>Теги, через запятую</label><input type="text" id="r-tags" value="{{ rule.tags or '' }}"></div>
+      <p class="muted" style="font-size:12.5px">Мин/Макс — границы вашей цены селлера (той, что уходит в Ozon). «Держать цену» подгоняет базовую цену так,
+        чтобы контролируемая цена (с учётом ваших акций и скидок) была равна цене удержания, не выходя из границ.
+        При включении «Держать цену» без границ: минимум = цели, максимум = текущая цена × 10.</p>
       <button class="btn primary" onclick="saveRule()">Сохранить правило</button>
     </div>
 
@@ -107,7 +127,8 @@ async function draw(p) {
 }
 async function saveRule() {
   const v = id => document.getElementById(id).value;
-  const r = await api('/api/rule', {product_id: PID, mode: v('r-mode'), min: v('r-min'), max: v('r-max'), target: v('r-target'), tolerance: v('r-tol')});
+  const r = await api('/api/rule', {product_id: PID, mode: v('r-mode'), min: v('r-min'), max: v('r-max'),
+    target: v('r-target'), tolerance: v('r-tol'), max_strategy: v('r-ms'), control_basis: v('r-cb'), tags: v('r-tags')});
   toast(r.ok ? 'Правило сохранено: ' + r.status_text : r.message);
   if (r.ok) setTimeout(() => location.reload(), 900);
 }

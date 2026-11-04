@@ -20,6 +20,8 @@ DEFAULT_SETTINGS = {
     "control_basis": "seller",     # seller = цена со скидками продавца; buyer = расчётная цена покупателя
     "visibility": "ALL",
     "history_days": "365",
+    "strict_overshoot_pct": "100", # на сколько % можно превысить максимум при стратегии «строгое удержание»
+    "banner_minmax_seen": "0",     # видел ли пользователь плашку о новом смысле мин/макс («Понятно»)
 }
 
 # Ключи Ozon НЕ вписываются в код: они вводятся в интерфейсе (вкладка «Настройки»)
@@ -33,13 +35,17 @@ CREATE TABLE IF NOT EXISTS products (
     offer_id TEXT, sku INTEGER, name TEXT,
     price REAL, old_price REAL, seller_price REAL, ozon_min_price REAL, buyer_est REAL,
     color_index TEXT, idx_ozon_min REAL, idx_ozon_val REAL, idx_ext_min REAL, idx_ext_val REAL,
-    actions TEXT, active INTEGER DEFAULT 1, updated_at TEXT
+    actions TEXT, active INTEGER DEFAULT 1, updated_at TEXT,
+    stock_fbo REAL, stock_fbs REAL, stock_fbp REAL, stock_total REAL
 );
 CREATE TABLE IF NOT EXISTS rules (
     product_id INTEGER PRIMARY KEY,
     mode TEXT DEFAULT 'watch',      -- watch | guard | hold
     min_price REAL, max_price REAL, target REAL,
     tolerance REAL DEFAULT 2,       -- допуск для удержания, %
+    max_strategy INTEGER DEFAULT 0, -- 0 = не превышать максимум; 1 = строгое удержание (можно выше максимума)
+    control_basis TEXT DEFAULT '',  -- '' = как в настройках | seller | buyer — тип контроля для товара
+    tags TEXT DEFAULT '',           -- теги, через запятую
     note TEXT
 );
 CREATE TABLE IF NOT EXISTS price_history (
@@ -84,6 +90,24 @@ def init():
         cols = [r[1] for r in con.execute("PRAGMA table_info(rules)")]
         if "locked" not in cols:  # обновление старой базы: отметка «Под MPSpace»
             con.execute("ALTER TABLE rules ADD COLUMN locked INTEGER DEFAULT 0")
+        # этап 1 (2026.11.10): стратегия при максимуме, тип контроля товара, теги
+        if "max_strategy" not in cols:
+            con.execute("ALTER TABLE rules ADD COLUMN max_strategy INTEGER DEFAULT 0")
+            con.execute("ALTER TABLE rules ADD COLUMN control_basis TEXT DEFAULT ''")
+            con.execute("ALTER TABLE rules ADD COLUMN tags TEXT DEFAULT ''")
+        pcols = [r[1] for r in con.execute("PRAGMA table_info(products)")]
+        for col in ("stock_fbo", "stock_fbs", "stock_fbp", "stock_total"):
+            if col not in pcols:
+                con.execute(f"ALTER TABLE products ADD COLUMN {col} REAL")
+        # плашка о новом смысле мин/макс: событие пишем один раз, при обновлении базы с правилами
+        if "max_strategy" not in cols:
+            n_rules = con.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
+            if n_rules:
+                con.execute("INSERT INTO events(ts, level, message) VALUES(?, 'warn', ?)",
+                            (now(), "Обновление: смысл полей «Мин»/«Макс» изменился — теперь это границы "
+                                    "вашей цены селлера (цены, которую отправляем в Ozon), а не контролируемой "
+                                    "цены. Цель удержания задаётся отдельно. Проверьте значения на вкладке "
+                                    "«Товары», плашка об этом видна над таблицей."))
         if "hidden" not in cols:  # скрытые из таблиц товары
             con.execute("ALTER TABLE rules ADD COLUMN hidden INTEGER DEFAULT 0")
         pcols = [r[1] for r in con.execute("PRAGMA table_info(products)")]
@@ -123,15 +147,20 @@ def log(level, message):
 def get_rule(pid):
     r = q("SELECT * FROM rules WHERE product_id=?", (pid,), one=True)
     return r or {"product_id": pid, "mode": "watch", "min_price": None, "max_price": None,
-                 "target": None, "tolerance": 2, "note": None, "locked": 0, "hidden": 0}
+                 "target": None, "tolerance": 2, "note": None, "locked": 0, "hidden": 0,
+                 "max_strategy": 0, "control_basis": "", "tags": ""}
 
 
-def save_rule(pid, mode="watch", min_price=None, max_price=None, target=None, tolerance=2, note=None):
-    ex("""INSERT INTO rules(product_id, mode, min_price, max_price, target, tolerance, note)
-          VALUES(?,?,?,?,?,?,?)
+def save_rule(pid, mode="watch", min_price=None, max_price=None, target=None, tolerance=2, note=None,
+              max_strategy=0, control_basis="", tags=""):
+    ex("""INSERT INTO rules(product_id, mode, min_price, max_price, target, tolerance, note,
+             max_strategy, control_basis, tags)
+          VALUES(?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(product_id) DO UPDATE SET mode=excluded.mode, min_price=excluded.min_price,
-          max_price=excluded.max_price, target=excluded.target, tolerance=excluded.tolerance, note=excluded.note""",
-       (pid, mode, min_price, max_price, target, tolerance, note))
+          max_price=excluded.max_price, target=excluded.target, tolerance=excluded.tolerance,
+          note=excluded.note, max_strategy=excluded.max_strategy,
+          control_basis=excluded.control_basis, tags=excluded.tags""",
+       (pid, mode, min_price, max_price, target, tolerance, note, max_strategy, control_basis, tags))
 
 
 def set_locked(pid, locked: bool):

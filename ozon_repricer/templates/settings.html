@@ -38,6 +38,8 @@
   <div class="form-row"><span></span><div class="hint">Ozon пересчитывает цену со скидками не мгновенно — не трогаем товар, пока не увидим результат.</div></div>
   <div class="form-row"><label>Макс. шаг за раз, %</label><input type="number" name="max_step_pct" min="1" max="100" value="{{ S.max_step_pct }}"></div>
   <div class="form-row"><label>Макс. изменений товара в сутки</label><input type="number" name="max_changes_day" min="1" max="40" value="{{ S.max_changes_day }}"></div>
+  <div class="form-row"><label>Превышение максимума при строгом удержании, %</label><input type="number" name="strict_overshoot_pct" min="0" value="{{ S.strict_overshoot_pct }}"></div>
+  <div class="form-row"><span></span><div class="hint">Если у товара стратегия «строгое удержание» и цель выше максимума — репрайсер может поднять цену выше максимума, но не больше чем на этот процент. Со стратегией «не превышать максимум» не используется.</div></div>
   <div class="form-row"><label>Какие товары брать</label>
     <select name="visibility">
       {% for k, v in [('ALL','Все'),('VISIBLE','Только видимые покупателям'),('IN_SALE','Только в продаже')] %}
