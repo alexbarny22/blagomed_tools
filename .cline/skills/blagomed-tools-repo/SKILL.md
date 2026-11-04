@@ -70,3 +70,5 @@ README.md внутри папки проекта обычно короче и о
 - Windows-сервер с 1С: боты 1С (move_bot, prihod_po_foto, zakaz_postavshiku) под BotPanel (C:\BotPanel).
 - Timeweb (виртуальный хостинг): direct_analytics, vk_bot — см. навык timeweb-hosting.
 - Подробности по 1С (OData ut12, COM, procat1c) — в навыке 1c-integration.
+- API маркетплейсов (Ozon, позже WB): методы, поля, свежие изменения — в навыке marketplace-api
+  (.cline/skills/marketplace-api). Документацию Ozon/WB целиком не читать.
