@@ -1,0 +1,66 @@
+# .clineignore — что Cline не должен читать (экономия токенов)
+# Положить в корень папки, которую открываете в VS Code (например, blagomed_tools)
+
+# Виртуальные окружения и зависимости
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+node_modules/
+site-packages/
+
+# Логи — читать только по запросу и только хвост (см. .clinerules)
+*.log
+logs/
+log/
+BotPanel/logs/
+
+# Данные и выгрузки
+*.xlsx
+*.xls
+*.csv
+*.xml
+*.json.bak
+*.db
+*.sqlite
+*.zip
+*.7z
+*.rar
+
+# Картинки, PDF, сканы накладных
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.pdf
+
+# Шрифты и чужие библиотеки (огромные, читать незачем)
+*.ttf
+*.otf
+*.woff
+*.woff2
+chart.umd.js
+*.min.js
+
+# Кэши и рабочие данные ботов
+*_cache.json
+cache_*.json
+*_state.json
+nomenclature.json
+cost_history.json
+wb_catalog.json
+proposals.json
+actions_log.json
+report/
+Заказы/
+
+# Секреты
+config.py
+.env
+
+# Служебное
+.git/
+.vscode/
+dist/
+build/
