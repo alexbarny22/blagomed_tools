@@ -12,10 +12,10 @@ from flask import Flask, jsonify, render_template, request, redirect, url_for, R
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core import db  # noqa: E402
-from core.engine import Repricer, MODES, status_of, controlled_price, _f  # noqa: E402
+from core.engine import Repricer, MODES, status_of, controlled_price, _f, attention_for, control_basis  # noqa: E402
 from core.ozon import make_client, OzonError  # noqa: E402
 
-HOST, PORT = "127.0.0.1", 8765
+HOST, PORT = os.environ.get("REPRICER_HOST", "127.0.0.1"), int(os.environ.get("REPRICER_PORT", "8765"))
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 # при запуске без окна (pythonw) пишем вывод и ошибки в data/app.log
@@ -103,11 +103,12 @@ def product(pid):
         return redirect(url_for("index"))
     s = db.get_settings()
     rule = db.get_rule(pid)
-    st, st_text = status_of(p, rule, s["control_basis"])
+    st, st_text = status_of(p, rule, s)
     changes = db.q("SELECT * FROM changes WHERE product_id=? ORDER BY id DESC LIMIT 100", (pid,))
     actions = json.loads(p.get("actions") or "[]")
     return render_template("product.html", p=p, rule=rule, st=st, st_text=st_text, changes=changes,
-                           actions=actions, controlled=controlled_price(p, s["control_basis"]))
+                           actions=actions, controlled=controlled_price(p, rule, s),
+                           attention=attention_for(p, rule, s), basis=control_basis(rule, s))
 
 
 @app.route("/changes")
@@ -135,7 +136,7 @@ def settings():
     if request.method == "POST":
         f = request.form
         for key in ("client_id", "interval_min", "cooldown_min", "max_step_pct", "max_changes_day",
-                    "control_basis", "visibility", "history_days"):
+                    "control_basis", "visibility", "history_days", "strict_overshoot_pct"):
             if key in f:
                 db.set_setting(key, f.get(key, "").strip())
         if f.get("api_key", "").strip() and "•" not in f.get("api_key"):
@@ -158,14 +159,20 @@ def api_products():
     out = []
     for p in db.q("SELECT * FROM products WHERE active=1 ORDER BY name"):
         rule = rules.get(p["product_id"]) or db.get_rule(p["product_id"])
-        st, st_text = status_of(p, rule, s["control_basis"])
+        st, st_text = status_of(p, rule, s)
         out.append({
             "product_id": p["product_id"], "offer_id": p["offer_id"], "name": p["name"] or "",
             "price": p["price"], "old_price": p["old_price"], "seller_price": p["seller_price"],
             "buyer_est": p["buyer_est"], "ozon_min_price": p["ozon_min_price"], "color": p["color_index"],
-            "controlled": controlled_price(p, s["control_basis"]),
+            "controlled": controlled_price(p, rule, s),
             "mode": rule.get("mode") or "watch", "min": rule.get("min_price"), "max": rule.get("max_price"),
             "target": rule.get("target"), "tolerance": rule.get("tolerance") or 2,
+            "max_strategy": int(rule.get("max_strategy") or 0),
+            "control_basis": rule.get("control_basis") or "",
+            "tags": rule.get("tags") or "",
+            "stock_fbo": p.get("stock_fbo"), "stock_fbs": p.get("stock_fbs"),
+            "stock_fbp": p.get("stock_fbp"), "stock_total": p.get("stock_total"),
+            "attention": attention_for(p, rule, s),
             "status": st, "status_text": st_text, "last_change": (last.get(p["product_id"]) or {}).get("ts"),
             "n_actions": len(json.loads(p["actions"] or "[]")), "locked": bool(rule.get("locked")),
             "hidden": bool(rule.get("hidden")), "image": p.get("image") or "",
@@ -192,15 +199,37 @@ def api_run():
 
 def _rule_from(d):
     mode = d.get("mode") if d.get("mode") in MODES else "watch"
+    # целые рубли: мин/макс/цель округляем до рубля
+    def rub(v):
+        return round(v) if v is not None else None
     mn, mx, tg = _f(d.get("min")), _f(d.get("max")), _f(d.get("target"))
+    mn, mx, tg = rub(mn), rub(mx), rub(tg)
     tol = _f(d.get("tolerance")) or 2
+    max_strategy = 1 if str(d.get("max_strategy") or "") in ("1", "true") else 0
+    cb = (d.get("control_basis") or "").strip()
+    if cb not in ("", "seller", "buyer"):
+        cb = ""
+    tags = (d.get("tags") or "").strip()[:500]
     if mn and mx and mn > mx:
         raise ValueError("Минимум больше максимума")
-    if mode == "hold" and not tg:
-        raise ValueError("Для режима «Держать цену» укажите цену удержания")
+    if mn and mx and mx > mn * 20:
+        raise ValueError("Максимум не может быть больше минимума более чем в 20 раз")
+    if mode == "hold" and (tg is None or tg <= 0):
+        raise ValueError("Для режима «Держать цену» укажите цену удержания (> 0)")
     if mode == "guard" and not (mn or mx):
         raise ValueError("Для режима «Держать в коридоре» укажите минимум и/или максимум")
-    return dict(mode=mode, min_price=mn, max_price=mx, target=tg, tolerance=tol)
+    return dict(mode=mode, min_price=mn, max_price=mx, target=tg, tolerance=tol,
+                max_strategy=max_strategy, control_basis=cb, tags=tags)
+
+
+def _hold_defaults(r: dict, price):
+    """Дефолты при включении удержания (как в MPSpace): мин = цель, макс = цена селлера × 10."""
+    if r.get("mode") == "hold" and r.get("target"):
+        if not r.get("min_price"):
+            r["min_price"] = r["target"]
+        if not r.get("max_price") and price:
+            r["max_price"] = round(price * 10)
+    return r
 
 
 @app.route("/api/rule", methods=["POST"])
@@ -209,6 +238,8 @@ def api_rule():
     pid = int(d["product_id"])
     try:
         r = _rule_from(d)
+        p0 = db.q("SELECT price FROM products WHERE product_id=?", (pid,), one=True)
+        r = _hold_defaults(r, p0["price"] if p0 else None)
     except ValueError as e:
         return jsonify({"ok": False, "message": str(e)}), 400
     old = db.get_rule(pid)
@@ -216,7 +247,8 @@ def api_rule():
         return jsonify({"ok": False, "message": "Товар отмечен «Под MPSpace» — сначала снимите отметку"}), 400
     db.save_rule(pid, note=old.get("note"), **r)
     p = db.q("SELECT * FROM products WHERE product_id=?", (pid,), one=True)
-    st, st_text = status_of(p, db.get_rule(pid), db.get_settings()["control_basis"]) if p else ("", "")
+    rule = db.get_rule(pid)
+    st, st_text = status_of(p, rule, db.get_settings()) if p else ("", "")
     return jsonify({"ok": True, "status": st, "status_text": st_text})
 
 
@@ -225,6 +257,8 @@ def api_rules_bulk():
     d = request.get_json(force=True)
     ids = [int(x) for x in d.get("ids") or []]
     s = db.get_settings()
+    tag_add = (d.get("tag_add") or "").strip()
+    tag_remove = (d.get("tag_remove") or "").strip()
     done, errors, skipped = 0, [], 0
     for pid in ids:
         p = db.q("SELECT * FROM products WHERE product_id=?", (pid,), one=True)
@@ -234,24 +268,43 @@ def api_rules_bulk():
         if rule.get("locked"):
             skipped += 1  # товары под MPSpace массовые операции не трогают
             continue
-        cur = controlled_price(p, s["control_basis"]) or p["price"]
+        cur_base = p["price"] or 0  # мин/макс — границы цены селлера, считаем от неё
+        ctl = controlled_price(p, rule, s) or cur_base
         if d.get("clear"):
             rule.update(mode="watch", min_price=None, max_price=None, target=None)
-        if _f(d.get("min_pct")) is not None and cur:
-            rule["min_price"] = round(cur * _f(d["min_pct"]) / 100)
+        if _f(d.get("min_pct")) is not None and cur_base:
+            rule["min_price"] = round(cur_base * _f(d["min_pct"]) / 100)
         if _f(d.get("min_abs")) is not None:
             rule["min_price"] = _f(d["min_abs"])
-        if _f(d.get("max_pct")) is not None and cur:
-            rule["max_price"] = round(cur * _f(d["max_pct"]) / 100)
-        if d.get("target_current") and cur:
-            rule["target"] = round(cur)
+        if _f(d.get("max_pct")) is not None and cur_base:
+            rule["max_price"] = round(cur_base * _f(d["max_pct"]) / 100)
+        if d.get("target_current") and ctl:
+            rule["target"] = round(ctl)
         if _f(d.get("tolerance")) is not None:
             rule["tolerance"] = _f(d["tolerance"])
         if d.get("mode") in MODES:
             rule["mode"] = d["mode"]
+        # массовые операции с тегами и редко меняемыми полями
+        if tag_add:
+            cur_tags = [t.strip() for t in (rule.get("tags") or "").split(",") if t.strip()]
+            if tag_add not in cur_tags:
+                cur_tags.append(tag_add)
+            rule["tags"] = ", ".join(cur_tags)
+        if tag_remove:
+            cur_tags = [t.strip() for t in (rule.get("tags") or "").split(",") if t.strip()]
+            rule["tags"] = ", ".join([t for t in cur_tags if t.lower() != tag_remove.lower()])
+        if d.get("max_strategy") is not None:
+            rule["max_strategy"] = 1 if str(d["max_strategy"]) in ("1", "true") else 0
+        if d.get("control_basis") is not None:
+            cb = (d.get("control_basis") or "").strip()
+            rule["control_basis"] = cb if cb in ("", "seller", "buyer") else rule.get("control_basis", "")
         try:
             r = _rule_from({"mode": rule["mode"], "min": rule["min_price"], "max": rule["max_price"],
-                            "target": rule["target"], "tolerance": rule["tolerance"]})
+                            "target": rule["target"], "tolerance": rule["tolerance"],
+                            "max_strategy": rule.get("max_strategy") or 0,
+                            "control_basis": rule.get("control_basis") or "",
+                            "tags": rule.get("tags") or ""})
+            r = _hold_defaults(r, cur_base)
             db.save_rule(pid, note=rule.get("note"), **r)
             done += 1
         except ValueError as e:
@@ -279,6 +332,12 @@ def api_lock():
         db.set_locked(pid, locked)
     db.log("info", f"Отметка «Под MPSpace» {'поставлена' if locked else 'снята'}: товаров {len(ids)}")
     return jsonify({"ok": True, "done": len(ids)})
+
+
+@app.route("/api/dismiss_banner", methods=["POST"])
+def api_dismiss_banner():
+    db.set_setting("banner_minmax_seen", "1")
+    return jsonify({"ok": True})
 
 
 def _period():
@@ -368,16 +427,22 @@ def api_charts():
         rows = hist.get(pid, [])
         if pid in before:
             rows = [before[pid]] + rows
-        rule = rules.get(pid) or {}
+        rule = rules.get(pid) or db.get_rule(pid)
         ctrl = [r["seller_price"] or r["price"] for r in rows if (r["seller_price"] or r["price"])]
         first, last = (ctrl[0], ctrl[-1]) if ctrl else (None, None)
-        st, st_text = status_of(p, db.get_rule(pid), s["control_basis"])
+        st, st_text = status_of(p, rule, s)
         out.append({
             "product_id": pid, "offer_id": p["offer_id"], "name": p["name"] or "",
             "rows": rows, "changes": chg.get(pid, []),
             "min": rule.get("min_price"), "max": rule.get("max_price"),
             "target": rule.get("target") if rule.get("mode") == "hold" else None,
-            "mode": rule.get("mode") or "watch", "locked": bool(rule.get("locked")),
+            "mode": rule.get("mode") or "watch",
+            "max_strategy": int(rule.get("max_strategy") or 0),
+            "control_basis": rule.get("control_basis") or "",
+            "tags": rule.get("tags") or "",
+            "attention": attention_for(p, rule, s),
+            "stock_total": p.get("stock_total"),
+            "locked": bool(rule.get("locked")),
             "hidden": bool(rule.get("hidden")), "image": p.get("image") or "",
             "first": first, "last": last,
             "delta_pct": round((last - first) / first * 100, 1) if first and last else 0,
@@ -447,7 +512,8 @@ def api_test():
 
 # ---------------- CSV правил (открывается в Excel) ----------------
 CSV_HEAD = ["product_id", "Артикул", "Название", "Цена", "Контролируемая цена", "Режим (watch/guard/hold)",
-            "Минимум", "Максимум", "Цена удержания", "Допуск %", "Под MPSpace (1 = да)"]
+            "Минимум", "Максимум", "Цена удержания", "Допуск %", "Под MPSpace (1 = да)",
+            "Тип контроля (seller/buyer)", "Стратегия при максимуме (0/1)", "Теги", "Остаток (шт.)"]
 
 
 @app.route("/rules.csv")
@@ -458,11 +524,13 @@ def rules_csv():
     w.writerow(CSV_HEAD)
     for p in db.q("SELECT * FROM products WHERE active=1 ORDER BY name"):
         r = db.get_rule(p["product_id"])
-        c = controlled_price(p, s["control_basis"])
+        c = controlled_price(p, r, s)
         num = lambda v: "" if v is None else str(int(round(v))) if float(v).is_integer() else str(v).replace(".", ",")
         w.writerow([p["product_id"], p["offer_id"], p["name"] or "", num(p["price"]), num(c), r["mode"],
                     num(r["min_price"]), num(r["max_price"]), num(r["target"]), num(r["tolerance"] or 2),
-                    "1" if r.get("locked") else ""])
+                    "1" if r.get("locked") else "",
+                    (r.get("control_basis") or ""), int(r.get("max_strategy") or 0), r.get("tags") or "",
+                    num(p.get("stock_total")) if p.get("stock_total") is not None else ""])
     return Response("﻿" + buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": "attachment; filename=rules_ozon.csv"})
 
@@ -496,13 +564,26 @@ def rules_import():
             if not db.is_locked(pid):
                 db.set_locked(pid, True)
                 locked_n += 1
-        if db.is_locked(pid):
+        is_locked = db.is_locked(pid)
+        if is_locked:
             if mode != "watch":
                 bad.append(f"{row[1]}: под MPSpace — режим не изменён")
             mode = "watch"
         try:
+            # новые столбцы — только в конец; старые файлы без них по-прежнему загружаются.
+            # Если столбца в файле нет — сохраняем уже заданные у товара значения (не затираем).
+            cur = db.get_rule(pid)
+            cb = (row[11] if len(row) > 11 else (cur.get("control_basis") or "")).strip().lower()
+            ms = (row[12] if len(row) > 12 else str(int(cur.get("max_strategy") or 0))).strip()
+            tags = (row[13] if len(row) > 13 else (cur.get("tags") or "")).strip()[:500]
             r = _rule_from({"mode": mode, "min": num(row[6]), "max": num(row[7]), "target": num(row[8]),
-                            "tolerance": num(row[9])})
+                            "tolerance": num(row[9]), "control_basis": cb, "max_strategy": ms, "tags": tags})
+            if is_locked:
+                # «Под MPSpace»: режим остаётся «только следить», но мин/макс/теги/тип/стратегия
+                # из файла применяются — для подсветки нарушений (как было раньше)
+                r["mode"] = "watch"
+            p0 = db.q("SELECT price FROM products WHERE product_id=?", (pid,), one=True)
+            r = _hold_defaults(r, p0["price"] if p0 else None)
             db.save_rule(pid, **r)
             ok += 1
         except ValueError as e:

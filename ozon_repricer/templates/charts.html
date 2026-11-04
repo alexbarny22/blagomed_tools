@@ -27,6 +27,7 @@
     <option value="mpspace">Под MPSpace</option>
     <option value="bad">Нарушают мин/макс сейчас</option>
   </select>
+  <select id="f-tag"><option value="">Все теги</option></select>
   <select id="sort">
     <option value="delta_abs">Сортировка: сильнее всего изменилась</option>
     <option value="delta_up">Сильнее всего подорожала</option>
@@ -54,6 +55,12 @@ async function load(p) {
   document.getElementById('grid').innerHTML = '<div class="empty">Загрузка…</div>';
   D = await (await fetch('/api/charts?' + periodQuery(p))).json();
   document.getElementById('period-label').textContent = `${D.from.slice(0, 16)} — ${D.to.slice(0, 16)}`;
+  const tags = new Set();
+  D.products.forEach(pp => (pp.tags || '').split(',').map(t => t.trim()).filter(Boolean).forEach(t => tags.add(t)));
+  const cur = document.getElementById('f-tag').value;
+  document.getElementById('f-tag').innerHTML = '<option value="">Все теги</option>'
+    + [...tags].sort((a, b) => a.localeCompare(b, 'ru')).map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+  if (cur && tags.has(cur)) document.getElementById('f-tag').value = cur;
   drawSummary(); renderGrid();
 }
 
@@ -98,13 +105,15 @@ function visible() {
   const q = document.getElementById('q').value.trim().toLowerCase();
   const f = document.getElementById('flt').value, so = document.getElementById('sort').value;
   const sh = document.getElementById('show-hidden').checked;
+  const tg = document.getElementById('f-tag').value;
   let L = D.products.filter(p => {
     if (p.hidden && !sh) return false;
     if (q && !(p.name.toLowerCase().includes(q) || String(p.offer_id).toLowerCase().includes(q))) return false;
+    if (tg && !(p.tags || '').split(',').map(t => t.trim()).some(t => t === tg)) return false;
     if (f === 'moved') return p.delta_pct !== 0 || p.changes.length > 0 || (p.lo !== p.hi);
     if (f === 'managed') return p.mode !== 'watch' && !p.locked;
     if (f === 'mpspace') return p.locked;
-    if (f === 'bad') return ['low', 'high', 'off'].includes(p.status);
+    if (f === 'bad') return ['low', 'high', 'off', 'hitmax'].includes(p.status);
     return true;
   });
   const vol = p => p.lo && p.hi ? (p.hi - p.lo) / p.lo : 0;
@@ -131,7 +140,8 @@ function renderGrid() {
         ${p.hidden ? '<span class="pill nodata">скрыт</span>' : ''}
         ${p.locked ? '<span class="pill mp">MPSpace</span>' : ''}
         ${p.changes.length ? `<span class="pill real">изменений: ${p.changes.length}</span>` : ''}
-        ${['low','high','off'].includes(p.status) ? `<span class="pill ${p.status}">${esc(p.status_text)}</span>` : ''}</div></div>
+        ${p.attention && p.attention.length ? `<span class="pill atn" title="${esc(p.attention.join('; '))}">внимание</span>` : ''}
+        ${['low','high','off','hitmax'].includes(p.status) ? `<span class="pill ${p.status}">${esc(p.status_text)}</span>` : ''}</div></div>
         <div class="cc-delta ${dcls}">${p.delta_pct > 0 ? '+' : ''}${p.delta_pct}%</div></div>
       <div class="cc-chart"><canvas></canvas></div>
       <div class="cc-foot"><span>было <b>${rub(p.first)}</b></span><span>стало <b>${rub(p.last)}</b></span>
@@ -153,6 +163,7 @@ function renderGrid() {
 document.getElementById('q').oninput = renderGrid;
 document.getElementById('flt').onchange = renderGrid;
 document.getElementById('sort').onchange = renderGrid;
+document.getElementById('f-tag').onchange = renderGrid;
 document.getElementById('show-hidden').onchange = renderGrid;
 window.onRunFinished = () => load(period);
 periodPicker(document.getElementById('period'), load, 7);

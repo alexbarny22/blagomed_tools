@@ -155,3 +155,17 @@ td.pic { width: 56px; padding-right: 0; }
 .phead { display: flex; gap: 18px; align-items: center; margin-bottom: 16px; }
 .phead h1 { margin-bottom: 6px; }
 .chartcard.hidden-card { opacity: .6; }
+/* --- этап 1: «требует внимания», колонки, теги --- */
+.pill.atn { background: var(--bad-soft); color: var(--bad); font-weight: 600; }
+.pill.hitmax { background: var(--warn-soft); color: var(--warn); }
+.colpanel { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
+.colpanel label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+td.edit select { max-width: 130px; }
+td.edit input[type="text"] { max-width: 150px; }
+th.col, td.col { cursor: default; }
+/*
+ * Внимание: данные колонки скрываются через element.style.display (applyCols в index.html);
+ * сами стили колонок не задаются, чтобы не конфликтовать.
+ */
