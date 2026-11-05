@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS products (
     comm_sales_pct_fbo REAL, comm_sales_pct_fbs REAL,          -- комиссия Ozon, %
     comm_direct_max_fbo REAL, comm_direct_max_fbs REAL,        -- логистика (max), ₽
     comm_direct_min_fbo REAL, comm_direct_min_fbs REAL,        -- логистика (min), ₽ — для подсказки
-    comm_mile_fbo REAL, comm_mile_fbs REAL                     -- последняя миля, ₽
+    comm_mile_fbo REAL, comm_mile_fbs REAL,                    -- последняя миля, ₽
+    auto_add_enabled INTEGER           -- Ozon: auto_add_to_ozon_actions_list_enabled (1/0/NULL — нет данных)
 );
 CREATE TABLE IF NOT EXISTS rules (
     product_id INTEGER PRIMARY KEY,
@@ -58,7 +59,8 @@ CREATE TABLE IF NOT EXISTS rules (
     max_strategy INTEGER DEFAULT 0, -- 0 = не превышать максимум; 1 = строгое удержание (можно выше максимума)
     control_basis TEXT DEFAULT '',  -- '' = как в настройках | seller | buyer — тип контроля для товара
     tags TEXT DEFAULT '',           -- теги, через запятую
-    note TEXT
+    note TEXT,
+    promo_auto_add TEXT DEFAULT ''  -- '' — не трогать | on — разрешить автодобавление | off — запретить
 );
 CREATE TABLE IF NOT EXISTS price_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,6 +171,25 @@ def init():
                           ("comm_mile_fbo", "REAL"), ("comm_mile_fbs", "REAL")):
             if col3 not in pcols3:
                 con.execute(f"ALTER TABLE products ADD COLUMN {col3} {ct3}")
+        # Этап 2б (2026.11.27): автодобавление в акции Ozon по «единой предельной цене»
+        rcols2b = [r[1] for r in con.execute("PRAGMA table_info(rules)")]
+        pcols2b = [r[1] for r in con.execute("PRAGMA table_info(products)")]
+        if "auto_add_enabled" not in pcols2b:
+            con.execute("ALTER TABLE products ADD COLUMN auto_add_enabled INTEGER")
+        if "promo_auto_add" not in rcols2b:
+            # впервые на схеме этапа 2б: старые режимы «выходить из акций» / «входить и выходить»
+            # переносятся в новую настройку автодобавления; старые колонки не удаляются
+            con.execute("ALTER TABLE rules ADD COLUMN promo_auto_add TEXT DEFAULT ''")
+            n_off = con.execute("SELECT COUNT(*) FROM rules WHERE promo_mode=1").fetchone()[0]
+            n_on = con.execute("SELECT COUNT(*) FROM rules WHERE promo_mode=3 "
+                               "AND COALESCE(promo_entry,'')='AUTO'").fetchone()[0]
+            n_rest = con.execute("SELECT COUNT(*) FROM rules").fetchone()[0] - n_off - n_on
+            con.execute("UPDATE rules SET promo_auto_add='off' WHERE promo_mode=1")
+            con.execute("UPDATE rules SET promo_auto_add='on' WHERE promo_mode=3 "
+                        "AND COALESCE(promo_entry,'')='AUTO'")
+            con.execute("INSERT INTO events(ts, level, message) VALUES(?, 'info', ?)",
+                        (now(), f"Акции Ozon: настройка автодобавления перенесена из старых режимов: "
+                                f"«запретить» — {n_off} товаров, «разрешить» — {n_on}, «не трогать» — {n_rest}"))
 
 
 def q(sql, args=(), one=False):
@@ -205,23 +226,25 @@ def get_rule(pid):
     return r or {"product_id": pid, "mode": "watch", "min_price": None, "max_price": None,
                  "target": None, "tolerance": 2, "note": None, "locked": 0, "hidden": 0,
                  "max_strategy": 0, "control_basis": "", "tags": "",
-                 "promo_mode": 0, "promo_entry": "RECOMMEND", "promo_deviation_pct": 0}
+                 "promo_mode": 0, "promo_entry": "RECOMMEND", "promo_deviation_pct": 0,
+                 "promo_auto_add": ""}
 
 
 def save_rule(pid, mode="watch", min_price=None, max_price=None, target=None, tolerance=2, note=None,
               max_strategy=0, control_basis="", tags="",
-              promo_mode=0, promo_entry="RECOMMEND", promo_deviation_pct=0):
+              promo_mode=0, promo_entry="RECOMMEND", promo_deviation_pct=0, promo_auto_add=""):
     ex("""INSERT INTO rules(product_id, mode, min_price, max_price, target, tolerance, note,
-             max_strategy, control_basis, tags, promo_mode, promo_entry, promo_deviation_pct)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+             max_strategy, control_basis, tags, promo_mode, promo_entry, promo_deviation_pct, promo_auto_add)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(product_id) DO UPDATE SET mode=excluded.mode, min_price=excluded.min_price,
           max_price=excluded.max_price, target=excluded.target, tolerance=excluded.tolerance,
           note=excluded.note, max_strategy=excluded.max_strategy,
           control_basis=excluded.control_basis, tags=excluded.tags,
           promo_mode=excluded.promo_mode, promo_entry=excluded.promo_entry,
-          promo_deviation_pct=excluded.promo_deviation_pct""",
+          promo_deviation_pct=excluded.promo_deviation_pct,
+          promo_auto_add=excluded.promo_auto_add""",
        (pid, mode, min_price, max_price, target, tolerance, note, max_strategy, control_basis, tags,
-        promo_mode, promo_entry, promo_deviation_pct))
+        promo_mode, promo_entry, promo_deviation_pct, promo_auto_add))
 
 
 def save_actions(rows, gone_aids=(), reset_pa=(), reset_aa=(), auto_add_rows=()):
@@ -285,6 +308,11 @@ def set_locked(pid, locked: bool):
         ex("UPDATE rules SET mode='watch' WHERE product_id=?", (pid,))
 
 
+def set_auto_add_enabled(pid, value):
+    """Фактическое значение auto_add_to_ozon_actions_list_enabled после успешной отправки."""
+    ex("UPDATE products SET auto_add_enabled=? WHERE product_id=?", (value, pid))
+
+
 def set_hidden(pid, hidden: bool):
     """Скрыть товар из таблиц и графиков. Только отображение — правила продолжают работать."""
     ex("INSERT INTO rules(product_id, mode, hidden) VALUES(?, 'watch', ?) "
@@ -303,16 +331,21 @@ def set_min(pid, value):
 
 
 def changes_since(pid, minutes, include_min_only=False):
-    """Сколько реальных изменений цены товара было за последние N минут."""
+    """Сколько реальных изменений цены товара было за последние N минут.
+
+    Записи с источником «акции: автодобавление» ценой не являются — в счётчик не идут.
+    """
     since = (datetime.now() - timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
-    sql = "SELECT COUNT(*) AS n FROM changes WHERE product_id=? AND ts>=? AND ok=1 AND dry_run=0"
+    sql = ("SELECT COUNT(*) AS n FROM changes WHERE product_id=? AND ts>=? AND ok=1 AND dry_run=0 "
+           "AND source != 'акции: автодобавление'")
     if not include_min_only:
         sql += " AND source != 'мин. цена'"
     return q(sql, (pid, since), one=True)["n"]
 
 
 def last_change(pid):
-    return q("SELECT * FROM changes WHERE product_id=? AND ok=1 AND dry_run=0 AND source != 'мин. цена' "
+    return q("SELECT * FROM changes WHERE product_id=? AND ok=1 AND dry_run=0 "
+             "AND source != 'мин. цена' AND source != 'акции: автодобавление' "
              "ORDER BY id DESC LIMIT 1", (pid,), one=True)
 
 

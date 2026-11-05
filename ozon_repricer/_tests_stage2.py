@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Тесты этапа 2 — поддержка акций Ozon.
+"""Тесты этапа 2 — поддержка акций Ozon (чтение и синхронизация).
 
 Проверяют: чтение акций по актуальным методам v2 (пагинация last_id/offset, limit<=100),
-решения promo_decisions, sync, авто/ручные входы и выходы. Запись (вход/выход в Ozon) пока
-не реализована — с 19.10.2026 Ozon отключил методы акций v1, новые не подтверждены, поэтому
-всё, что движок считает «войти/выйти», фиксируется в журнале ТОЛЬКО как рекомендации (dry_run=1).
+синхронизацию акций/автодобавлений, интервал перечитывания, защиту от потери данных.
+Рекомендации входа/выхода из акций удалены в этапе 2б: с 19.10.2026 Ozon ввёл «единую
+предельную цену» (участие решается ценой), отдельные методы входа/выхода не используются;
+управляется только автодобавление (см. _tests_stage2b.py).
 
 Без внешних зависимостей: простые функции, запуск:  python _tests_stage2.py
 """
@@ -91,63 +92,6 @@ class FakeOzonClient(OzonClient):
         raise AssertionError(f"неожиданный метод: {path}")
 
 
-def test_promo_decisions():
-    with Ctx() as c:
-        put_product(101, 2000.0)
-        put_product(102, 700.0)
-        put_product(103, 700.0)
-        put_product(104, 700.0)
-        put_product(105, 700.0)
-        put_product(106, 700.0)
-        put_product(107, 700.0)
-        db.save_actions([
-            act_row(101, 63301, "participant", 1950, price=2000),      # участник, цена допустима
-            act_row(102, 63301, "participant", 300, price=600),        # участник, цена ниже минимума
-            act_row(103, 63301, "candidate", 1950, price=2000),        # кандидат, выгоден (цель 1800)
-            act_row(104, 63301, "candidate", 1950, price=2000),        # кандидат, режим RECOMMEND
-            act_row(105, 63301, "candidate", 300, price=700),          # кандидат, ниже минимума — запрет
-            act_row(106, 63301, "participant", 1950, price=2000),      # режим 0 — не трогаем
-            act_row(107, 63301, "participant", 1950, price=2000),      # режим 1 — выходим
-        ])
-        s = db.get_settings()
-
-        # участник, цена акции выше допустимой (цель 2000 при допуске 5%: 1900) — остаёмся
-        r = db.get_rule(101)
-        r.update(promo_mode=3, promo_entry="AUTO", min_price=400, target=2000, promo_deviation_pct=5)
-        d = engine.promo_decisions({"product_id": 101}, r, s)[0]
-        assert d["decision"] == "keep", d
-
-        # участник с ценой акции ниже минимума селлера — выходим всегда (защита цены, даже в режиме 0)
-        db.save_rule(102, min_price=500)
-        d = engine.promo_decisions({"product_id": 102}, db.get_rule(102), s)[0]
-        assert d["decision"] == "exit", d
-
-        # кандидат: вход выгоден (цель 1800, цена акции 1950, минимум 500)
-        db.save_rule(103, promo_mode=3, promo_entry="AUTO", min_price=500, target=1800)
-        d = engine.promo_decisions({"product_id": 103}, db.get_rule(103), s)[0]
-        assert d["decision"] == "enter", d
-
-        # кандидат при режиме «только рекомендации» — hint, не автоматический вход
-        db.save_rule(104, promo_mode=3, promo_entry="RECOMMEND", min_price=500, target=2000)
-        d = engine.promo_decisions({"product_id": 104}, db.get_rule(104), s)[0]
-        assert d["decision"] == "hint", d
-
-        # кандидат с ценой акции ниже минимума селлера — вход запрещён
-        db.save_rule(105, promo_mode=3, promo_entry="AUTO", min_price=500, target=2000)
-        d = engine.promo_decisions({"product_id": 105}, db.get_rule(105), s)[0]
-        assert d["decision"] == "ban", d
-
-        # режим 0 — акции не трогаем (участник остаётся)
-        db.save_rule(106, promo_mode=0)
-        d = engine.promo_decisions({"product_id": 106}, db.get_rule(106), s)[0]
-        assert d["decision"] == "keep", d
-
-        # режим 1 — выходим из акций
-        db.save_rule(107, promo_mode=1)
-        d = engine.promo_decisions({"product_id": 107}, db.get_rule(107), s)[0]
-        assert d["decision"] == "exit", d
-
-
 def test_mock_actions():
     with Ctx() as c:
         acts = {a["id"]: a for a in c.mock.get_actions()}
@@ -207,81 +151,6 @@ def test_sync_actions():
         assert stamped and stamped["value"]
 
 
-def test_apply_promo_recommends_only():
-    """Автовход/автовыход даже в боевом режиме пишут ТОЛЬКО рекомендации, мок не меняется."""
-    with Ctx() as c:
-        par = {p["id"]: p for p in c.mock.get_action_products(63301)}
-        cand = {p["id"]: p for p in c.mock.get_action_candidates(63302)}
-        assert par and cand
-        pid_enter = sorted(cand)[0]
-        pid_exit = sorted(par)[0]
-        s_price = MockOzonClient._state
-        put_product(pid_enter, s_price[pid_enter]["price"])
-        put_product(pid_exit, s_price[pid_exit]["price"])
-
-        # вход: кандидат из «Умной скидки» (цель 1800, цена акции 1950)
-        db.save_rule(pid_enter, promo_mode=3, promo_entry="AUTO", min_price=500, target=1800)
-        # выход: участник с ценой акции ниже минимума 500 — защитный выход
-        db.save_rule(pid_exit, promo_mode=1, min_price=500)
-        db.save_actions([
-            act_row(pid_enter, 63302, "candidate", 1950, price=s_price[pid_enter]["price"]),
-            act_row(pid_exit, 63301, "participant", 300, price=s_price[pid_exit]["price"]),
-        ])
-
-        done = c.rep._apply_promo(c.mock, db.get_settings(), dry=False)
-        assert done == 2, f"ожидали 2 рекомендации, записано {done}"
-
-        # фактического входа/выхода НЕТ — мок не изменился
-        assert pid_enter in {p["id"] for p in c.mock.get_action_candidates(63302)}, "попал в участники?"
-        assert pid_enter not in {p["id"] for p in c.mock.get_action_products(63302)}
-        assert pid_exit in {p["id"] for p in c.mock.get_action_products(63301)}, "вышел из акции?"
-
-        ch = db.q("SELECT source, dry_run, ok, reason FROM changes ORDER BY ts")
-        sources = {(r["source"], r["dry_run"], r["ok"]) for r in ch}
-        assert ("акция: вход", 1, 1) in sources, sources
-        assert ("акция: выход", 1, 1) in sources, sources
-        assert all("только рекомендация" in (r["reason"] or "") for r in ch if r["source"].startswith("акция")), \
-            [r["reason"] for r in ch]
-
-
-def test_apply_promo_dryrun():
-    with Ctx() as c:
-        cand = {p["id"]: p for p in c.mock.get_action_candidates(63302)}
-        pid_enter = sorted(cand)[0]
-        put_product(pid_enter, MockOzonClient._state[pid_enter]["price"])
-        db.save_rule(pid_enter, promo_mode=3, promo_entry="AUTO", min_price=500, target=1800)
-        db.save_actions([act_row(pid_enter, 63302, "candidate", 1950, price=2000.0)])
-        db.set_setting("dry_run", "1")
-
-        done = c.rep._apply_promo(c.mock, db.get_settings(), dry=True)
-        assert done == 1
-        # в мок вход НЕ произошёл, но в журнал запись есть
-        assert pid_enter not in {p["id"] for p in c.mock.get_action_products(63302)}
-        ch = db.q("SELECT dry_run, ok FROM changes", one=True)
-        assert ch and ch["dry_run"] == 1 and ch["ok"] == 1
-
-
-def test_action_manual_recommends_only():
-    """Ручной вход/выход НЕ трогает Ozon: рекомендация в журнал (dry_run=1), мок без изменений."""
-    with Ctx() as c:
-        put_product(900001, 2000.0)
-        db.save_rule(900001, mode="guard", min_price=100)
-        db.save_actions([act_row(900001, 63302, "candidate", 1950, price=2000.0)])
-
-        ok, msg = c.rep.action_manual(900001, 63302, "enter")
-        assert ok, msg
-        assert "рекомендация" in msg.lower(), msg
-        # товар НЕ вошёл в акцию
-        assert 900001 not in {p["id"] for p in c.mock.get_action_products(63302)}
-        assert 900001 in {p["id"] for p in c.mock.get_action_candidates(63302)}
-
-        ok, msg = c.rep.action_manual(900001, 63302, "exit")
-        assert ok, msg
-        ch = db.q("SELECT source, dry_run, ok FROM changes ORDER BY ts")
-        assert [r["source"] for r in ch] == ["акция: вход (вручную)", "акция: выход (вручную)"], ch
-        assert all(r["dry_run"] == 1 and r["ok"] == 1 for r in ch)
-
-
 def test_migration_from_old_db():
     """Общая проверка задания: миграция базы 2026.11.10 (этап 1) -> схема этапа 2 без потери данных."""
     with Ctx() as c:
@@ -339,7 +208,7 @@ def test_old_csv_import():
         import app as A  # импорт после подмены db.DB_PATH (модульный init() упадёт во временную БД)
         # товар с уже заданными параметрами акций — старый файл не должен их затереть
         put_product(500001, 2000.0)
-        db.save_rule(500001, promo_mode=3, promo_entry="AUTO", min_price=400)
+        db.save_rule(500001, promo_auto_add="on", min_price=400)
         put_product(500002, 1000.0)          # через CSV пометим «Под MPSpace»
         cl = A.app.test_client()
         old_csv = (
@@ -354,7 +223,7 @@ def test_old_csv_import():
         assert r.status_code == 200
         r1 = db.get_rule(500001)
         assert r1["mode"] == "guard" and r1["min_price"] == 600 and r1["tags"] == "старые-теги"
-        assert r1["promo_mode"] == 3 and r1["promo_entry"] == "AUTO", "старый CSV затёр промо-настройки"
+        assert r1["promo_auto_add"] == "on", "старый CSV затёр настройку автодобавления"
         r2 = db.get_rule(500002)
         assert r2["locked"] == 1 and r2["mode"] == "watch", "«Под MPSpace» из старого CSV не применён/режим изменён"
 
@@ -378,9 +247,10 @@ def test_mpspace_general():
         r = cl.post("/api/rule", json={"product_id": p_a, "mode": "guard", "min": 500, "max": 2000})
         assert r.status_code == 400
 
-        # массовый вход в акцию locked-товары пропускает
-        r = cl.post("/api/action/batch", json={"ids": [p_a, p_b], "action_id": 63302, "op": "enter"})
-        assert r.status_code == 200 and r.json["done"] == 0 and r.json["skipped"] == 2
+        # вход/выход в акции удалён из интерфейса и API (этап 2б: Ozon решает участие ценой)
+        assert cl.post(f"/api/action/{p_a}", json={"action_id": 63302, "op": "enter"}).status_code == 404
+        assert cl.post("/api/action/batch", json={"ids": [p_a, p_b], "action_id": 63302,
+                                                  "op": "enter"}).status_code == 404
 
         # ручная цена под MPSpace — только с force
         r = cl.post(f"/api/manual/{p_a}", json={"price": 1200})
@@ -400,12 +270,8 @@ def test_training_price_dryrun():
         for pid in (p_a, p_b):
             put_product(pid, MockOzonClient._state[pid]["price"])
         pa, pb = MockOzonClient._state[p_a]["price"], MockOzonClient._state[p_b]["price"]
-        # p_a — повышение цены до минимума (шаг 20% < лимита 25%);
-        # p_b — выгодный вход в «Умную скидку» (цена акции ≤ 0.8·цены, мин ниже, цель выше)
         db.save_rule(p_a, mode="guard", min_price=round(pa * 1.2), max_price=round(pa * 1.2))
-        db.save_rule(p_b, mode="guard", promo_mode=3, promo_entry="AUTO",
-                     min_price=round(pb * 0.3), max_price=round(pb * 2), target=round(pb * 1.5))
-        c.rep._sync_actions(c.mock)
+        db.save_rule(p_b, mode="guard", min_price=round(pb * 0.3), max_price=round(pb * 2))
         before = {pid: MockOzonClient._state[pid]["price"] for pid in (p_a, p_b)}
         db.set_setting("dry_run", "1")
         c.rep.apply_rules(c.mock, db.get_settings())
@@ -414,7 +280,6 @@ def test_training_price_dryrun():
         rows = db.q("SELECT source, dry_run, ok FROM changes WHERE ok=1 ORDER BY ts")
         assert rows, "в тренировке не записано ни одного изменения"
         assert all(r["dry_run"] == 1 for r in rows), rows
-        assert any(r["source"].startswith("акция") for r in rows), "рекомендации по акциям не попали в журнал"
 
 
 def test_sync_actions_error_does_not_break_run():
@@ -595,10 +460,12 @@ def test_auto_add_in_product_card():
         html = cl.get(f"/product/{pid}").get_data(as_text=True)
         assert "Ozon добавит сам по цене" in html, "блок автодобавления не показан"
         assert f"по цене <b>{A.fmt(price)} ₽</b>" in html, html
-        # цена автодобавления ниже минимума селлера — метка
+        # цена автодобавления ниже минимума селлера — метка в таблице акций
+        # и причина «Требует внимания» в карточке
         db.save_rule(pid, mode="guard", min_price=price + 1)
         html2 = cl.get(f"/product/{pid}").get_data(as_text=True)
-        assert "Требует внимания: Ozon добавит в акцию ниже минимума" in html2
+        assert "ниже вашего минимума" in html2, html2
+        assert "Ozon добавит в акцию ниже минимума" in html2
         # ошибка метода автодобавления — только предупреждение, карточка живёт
         class FragileAA(MockOzonClient):
             def get_auto_add_products(self, action_id):

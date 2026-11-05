@@ -109,10 +109,13 @@ def product(pid):
     actions = json.loads(p.get("actions") or "[]")
     promo_actions = db.q("SELECT * FROM product_actions WHERE product_id=? ORDER BY action_id", (pid,))
     auto_add = db.get_auto_add(pid)
+    auto_prices = {int(a["action_id"]): a["price_to_auto_add"] for a in auto_add
+                   if a.get("price_to_auto_add")}
     pr = profit_of(p, s)
     sm, sm_reason = safe_min_calc(p, s)
     return render_template("product.html", p=p, rule=rule, st=st, st_text=st_text, changes=changes,
                            actions=actions, promo_actions=promo_actions, auto_add=auto_add,
+                           auto_prices=auto_prices,
                            controlled=controlled_price(p, rule, s),
                            attention=attention_for(p, rule, s), basis=control_basis(rule, s),
                            profit=pr, comm_scheme=cost_scheme(p), profit_tip=profit_tip_text(pr),
@@ -180,8 +183,8 @@ def api_products():
             "max_strategy": int(rule.get("max_strategy") or 0),
             "control_basis": rule.get("control_basis") or "",
             "tags": rule.get("tags") or "",
-            "promo_mode": int(rule.get("promo_mode") or 0), "promo_entry": rule.get("promo_entry") or "RECOMMEND",
-            "promo_deviation": _f(rule.get("promo_deviation_pct")) or 0,
+            "promo_auto_add": rule.get("promo_auto_add") or "",
+            "auto_add_enabled": p.get("auto_add_enabled"),
             "stock_fbo": p.get("stock_fbo"), "stock_fbs": p.get("stock_fbs"),
             "stock_fbp": p.get("stock_fbp"), "stock_total": p.get("stock_total"),
             "cost": p.get("cost"), "comm_scheme": cost_scheme(p),
@@ -264,50 +267,6 @@ def api_actions():
                     "synced": s.get("actions_synced_at", "")})
 
 
-@app.route("/api/action/<int:pid>", methods=["POST"])
-def api_action(pid):
-    """Ручной вход/выход одного товара в акцию (из карточки товара)."""
-    d = request.get_json(force=True)
-    try:
-        ok, msg = rp.action_manual(pid, int(d.get("action_id") or 0), d.get("op") or "enter",
-                                   _f(d.get("action_price")))
-    except OzonError as e:
-        return jsonify({"ok": False, "message": str(e)}), 400
-    except Exception as e:
-        return jsonify({"ok": False, "message": str(e)}), 500
-    return jsonify({"ok": ok, "message": msg})
-
-
-@app.route("/api/action/batch", methods=["POST"])
-def api_action_batch():
-    """Массовый вход/выход выбранных товаров в акцию (в таблице товаров)."""
-    d = request.get_json(force=True)
-    ids = [int(x) for x in d.get("ids") or []]
-    try:
-        aid = int(d.get("action_id") or 0)
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "message": "Укажите акцию"}), 400
-    op = "enter" if d.get("op") in ("enter", "activate", "2", "1") else "exit"
-    if not ids or not aid:
-        return jsonify({"ok": False, "message": "Выберите товары и акцию"}), 400
-    done, errors, skipped = 0, [], 0
-    for pid in ids:
-        if db.is_locked(pid):
-            skipped += 1  # под MPSpace массово не трогаем
-            continue
-        try:
-            ok, msg = rp.action_manual(pid, aid, op, _f(d.get("action_price")))
-        except Exception as e:
-            ok, msg = False, str(e)
-        if ok:
-            done += 1
-        else:
-            errors.append(msg)
-    db.log("info", f"Акция {aid}: {'вход' if op == 'enter' else 'выход'} — рекомендаций сохранено {done}, "
-                   f"пропущено (MPSpace) {skipped}, ошибок {len(errors)}")
-    return jsonify({"ok": True, "done": done, "skipped": skipped, "errors": errors[:10]})
-
-
 @app.route("/api/rule", methods=["POST"])
 def api_rule():
     d = request.get_json(force=True)
@@ -317,32 +276,17 @@ def api_rule():
         r = _rule_from(d)
         p0 = db.q("SELECT price FROM products WHERE product_id=?", (pid,), one=True)
         r = _hold_defaults(r, p0["price"] if p0 else None)
-        # параметры акций: поле не передано — сохраняем текущее значение товара
-        if d.get("promo_mode") is not None:
-            pm = int(str(d["promo_mode"]).strip())
-            if pm not in (0, 1, 3):
-                raise ValueError("Код режима акций должен быть 0, 1 или 3")
+        # автодобавление в акции (этап 2б): '' — не трогать, 'on'/'off'
+        pa = d.get("promo_auto_add")
+        if pa is None:
+            pa = old.get("promo_auto_add") or ""
+        pa = str(pa).strip().lower()
+        if pa in ("on", "off", "1", "да", "разрешить", "включить", "0", "нет", "запретить", "выключить"):
+            r["promo_auto_add"] = {"on": "on", "1": "on", "да": "on", "разрешить": "on", "включить": "on",
+                                   "off": "off", "0": "off", "нет": "off", "запретить": "off",
+                                   "выключить": "off"}.get(pa, pa)
         else:
-            pm = int(old.get("promo_mode") or 0)
-        pe_raw = str(d.get("promo_entry") or "").strip().upper()
-        if d.get("promo_entry") in (None, ""):
-            pe = old.get("promo_entry") or "RECOMMEND"
-        elif pe_raw in ("0", "RECOMMEND"):
-            pe = "RECOMMEND"
-        elif pe_raw in ("1", "AUTO"):
-            pe = "AUTO"
-        else:
-            raise ValueError("Тип входа в акцию: 0 — рекомендации, 1 — автоматически")
-        dev = d.get("promo_deviation_pct")
-        if dev not in (None, ""):
-            dv = _f(dev)
-            if dv is None or dv < 0 or dv > 200:
-                raise ValueError("Отклонение от целевой должно быть 0..200 %")
-        else:
-            dv = _f(old.get("promo_deviation_pct")) or 0
-        r["promo_mode"] = pm
-        r["promo_entry"] = pe
-        r["promo_deviation_pct"] = dv
+            r["promo_auto_add"] = ""
     except ValueError as e:
         return jsonify({"ok": False, "message": str(e)}), 400
     if old.get("locked") and r["mode"] != "watch":
@@ -400,21 +344,18 @@ def api_rules_bulk():
         if d.get("control_basis") is not None:
             cb = (d.get("control_basis") or "").strip()
             rule["control_basis"] = cb if cb in ("", "seller", "buyer") else rule.get("control_basis", "")
-        if d.get("promo_mode") is not None:
-            pm = int(str(d["promo_mode"]).strip())
-            if pm in (0, 1, 3):
-                rule["promo_mode"] = pm
-        if d.get("promo_entry") in ("0", 0, "RECOMMEND"):
-            rule["promo_entry"] = "RECOMMEND"
-        elif d.get("promo_entry") in ("1", 1, "AUTO"):
-            rule["promo_entry"] = "AUTO"
-        if d.get("promo_deviation_pct") not in (None, ""):
-            dv = _f(d["promo_deviation_pct"])
-            if dv is not None and 0 <= dv <= 200:
-                rule["promo_deviation_pct"] = dv
-        promo_kw = {"promo_mode": int(rule.get("promo_mode") or 0),
-                    "promo_entry": rule.get("promo_entry") or "RECOMMEND",
-                    "promo_deviation_pct": _f(rule.get("promo_deviation_pct")) or 0}
+        # массовая настройка автодобавления в акции (этап 2б): '' / on / off
+        if d.get("promo_auto_add") is not None:
+            pa = str(d["promo_auto_add"]).strip().lower()
+            if pa in ("on", "off"):
+                rule["promo_auto_add"] = pa
+            elif pa in ("1", "да", "разрешить", "включить"):
+                rule["promo_auto_add"] = "on"
+            elif pa in ("0", "нет", "запретить", "выключить"):
+                rule["promo_auto_add"] = "off"
+            else:
+                rule["promo_auto_add"] = ""
+        promo_kw = {"promo_auto_add": rule.get("promo_auto_add") or ""}
         try:
             r = _rule_from({"mode": rule["mode"], "min": rule["min_price"], "max": rule["max_price"],
                             "target": rule["target"], "tolerance": rule["tolerance"],
@@ -824,7 +765,10 @@ CSV_HEAD = ["product_id", "Артикул", "Название", "Цена", "К�
             "Минимум", "Максимум", "Цена удержания", "Допуск %", "Под MPSpace (1 = да)",
             "Тип контроля (seller/buyer)", "Стратегия при максимуме (0/1)", "Теги", "Остаток (шт.)",
             "Акции (0/1/3)", "Вход в акции (RECOMMEND/AUTO)", "Отклонение от целевой %",
-            "Себестоимость, ₽"]
+            "Себестоимость, ₽", "Автодобавление в акции (on/off/пусто)"]
+# значения нового столбца автодобавления (этап 2б) при загрузке CSV
+_AUTO_MAP = {"on": "on", "off": "off", "1": "on", "да": "on", "разрешить": "on", "включить": "on",
+             "0": "off", "нет": "off", "запретить": "off", "выключить": "off"}
 
 
 @app.route("/rules.csv")
@@ -842,9 +786,9 @@ def rules_csv():
                     "1" if r.get("locked") else "",
                     (r.get("control_basis") or ""), int(r.get("max_strategy") or 0), r.get("tags") or "",
                     num(p.get("stock_total")) if p.get("stock_total") is not None else "",
-                    int(r.get("promo_mode") or 0), r.get("promo_entry") or "RECOMMEND",
-                    num(_f(r.get("promo_deviation_pct")) or 0),
-                    num(p.get("cost")) if p.get("cost") is not None else ""])
+                    "", "", "",
+                    num(p.get("cost")) if p.get("cost") is not None else "",
+                    r.get("promo_auto_add") or ""])
     return Response("﻿" + buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": "attachment; filename=rules_ozon.csv"})
 
@@ -864,7 +808,9 @@ def rules_import():
             continue
     delim = ";" if text.count(";") >= text.count(",") else ","
     reader = csv.reader(io.StringIO(text), delimiter=delim)
-    next(reader, None)
+    header = next(reader, None)
+    # новый столбец автодобавления (этап 2б) — только в файлах новой версии
+    has_auto = bool(header) and any("автодобавление" in str(h).strip().lower() for h in header)
     ok, bad, locked_n = 0, [], 0
     num = lambda v: _f((v or "").replace(" ", "").replace("\xa0", "").replace(",", "."))
     for row in reader:
@@ -890,18 +836,24 @@ def rules_import():
             cb = (row[11] if len(row) > 11 else (cur.get("control_basis") or "")).strip().lower()
             ms = (row[12] if len(row) > 12 else str(int(cur.get("max_strategy") or 0))).strip()
             tags = (row[13] if len(row) > 13 else (cur.get("tags") or "")).strip()[:500]
-            pm = (str(row[15]) if len(row) > 15 else str(cur.get("promo_mode") or 0)).strip()
-            pe = (row[16] if len(row) > 16 else (cur.get("promo_entry") or "RECOMMEND")).strip()
-            dv = row[17] if len(row) > 17 else cur.get("promo_deviation_pct")
-            dv = _f(dv) if dv not in (None, "") else None
             r = _rule_from({"mode": mode, "min": num(row[6]), "max": num(row[7]), "target": num(row[8]),
                             "tolerance": num(row[9]), "control_basis": cb, "max_strategy": ms, "tags": tags})
-            if pm in ("0", "1", "3"):
-                r["promo_mode"] = int(pm)
-            if pe.upper() in ("RECOMMEND", "AUTO", "0", "1"):
-                r["promo_entry"] = {"0": "RECOMMEND", "1": "AUTO"}.get(pe.upper(), pe.upper())
-            if dv is not None:
-                r["promo_deviation_pct"] = dv
+            # этап 2б: автодобавление. Новый столбец — в конце файла. В старых файлах его нет:
+            # тогда старые столбцы акций переводятся по правилам миграции (как db.init()),
+            # а если нет и их (файл этапа 1) — настройку товара не трогаем
+            if has_auto:
+                r["promo_auto_add"] = _AUTO_MAP.get((row[19] if len(row) > 19 else "").strip().lower(), "")
+            elif len(row) > 15:
+                pm2 = (str(row[15]) if len(row) > 15 else "0").strip()
+                pe2 = (row[16] if len(row) > 16 else "RECOMMEND").strip().upper()
+                if pm2 == "1":
+                    r["promo_auto_add"] = "off"
+                elif pm2 == "3" and pe2 == "AUTO":
+                    r["promo_auto_add"] = "on"
+                else:
+                    r["promo_auto_add"] = ""
+            else:
+                r["promo_auto_add"] = cur.get("promo_auto_add") or ""
             if is_locked:
                 # «Под MPSpace»: режим остаётся «только следить», но мин/макс/теги/тип/стратегия
                 # из файла применяются — для подсветки нарушений (как было раньше)

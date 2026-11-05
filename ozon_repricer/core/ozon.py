@@ -196,6 +196,7 @@ class MockOzonClient:
                     "product_id": pid, "offer_id": f"BM-{100 + i}", "sku": 1500000000 + i, "name": n,
                     "price": float(price), "old_price": float(round(price * 1.4)), "min_price": 0.0,
                     "promo": rnd.choice([1.0, 1.0, 0.9, 0.85, 0.8]),
+                    "auto_add_enabled": rnd.choice([True, False]),  # этап 2б: auto_add_to_ozon_actions_list_enabled
                     "stock_fbo": rnd.choice([0, 0, 2, 5, 9, 14]),
                     "stock_fbs": rnd.choice([0, 1, 3, 6, 11]),
                 }
@@ -321,7 +322,8 @@ class MockOzonClient:
         return {
             "offer_id": s["offer_id"], "product_id": s["product_id"],
             "price": {"price": s["price"], "old_price": s["old_price"], "marketing_seller_price": seller,
-                      "min_price": s["min_price"], "currency_code": "RUB", "auto_action_enabled": False},
+                      "min_price": s["min_price"], "currency_code": "RUB", "auto_action_enabled": False,
+                      "auto_add_to_ozon_actions_list_enabled": bool(s.get("auto_add_enabled"))},
             "price_indexes": {
                 "color_index": random.choice(["GREEN", "YELLOW", "RED"]),
                 "ozon_index_data": {"min_price": comp, "min_price_currency": "RUB", "price_index_value": idx},
@@ -385,8 +387,12 @@ class MockOzonClient:
                 res.append({"product_id": p["product_id"], "updated": False,
                             "errors": [{"code": "NOT_FOUND", "message": "нет товара"}]})
                 continue
-            s["price"] = float(p["price"])
-            s["old_price"] = float(p.get("old_price", s["old_price"]))
+            # этап 2б: поле автодобавления в акции (не изменение цены)
+            if "auto_add_to_ozon_actions_list_enabled" in p:
+                s["auto_add_enabled"] = bool(p["auto_add_to_ozon_actions_list_enabled"])
+            if "price" in p:
+                s["price"] = float(p["price"])
+                s["old_price"] = float(p.get("old_price", s["old_price"]))
             if "min_price" in p:
                 s["min_price"] = float(p["min_price"])
             res.append({"product_id": p["product_id"], "offer_id": s["offer_id"], "updated": True, "errors": []})
