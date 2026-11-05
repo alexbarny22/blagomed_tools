@@ -4,6 +4,7 @@ xlsx_writer.py
 dashboard_template.html
 apply_template.php
 update.py
+ai_advisor.py
 config.example.py
 run.sh
 demo.bat
