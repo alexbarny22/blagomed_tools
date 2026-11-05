@@ -24,6 +24,10 @@ DEFAULT_SETTINGS = {
     "banner_minmax_seen": "0",     # видел ли пользователь плашку о новом смысле мин/макс («Понятно»)
     "migration_dryrun": "0",       # 1 = при обновлении базы принудительно включена тренировка (проверьте мин/макс)
     "actions_interval_min": "120", # как часто перечитывать список акций Ozon (мин); «Проверить сейчас» — всегда
+    # Этап 3 — прибыль и безопасный минимум:
+    "tax_pct": "",                  # налог, % от выручки (пусто = 0, ставку вводит пользователь)
+    "cost_divider": "1.15",         # при импорте себестоимости из файла: значение уже с наценкой, делится на это
+    "min_margin_pct": "10",         # минимальная маржа для кнопки «Рассчитать безопасный минимум», %
 }
 
 # Ключи Ozon НЕ вписываются в код: они вводятся в интерфейсе (вкладка «Настройки»)
@@ -38,7 +42,13 @@ CREATE TABLE IF NOT EXISTS products (
     price REAL, old_price REAL, seller_price REAL, ozon_min_price REAL, buyer_est REAL,
     color_index TEXT, idx_ozon_min REAL, idx_ozon_val REAL, idx_ext_min REAL, idx_ext_val REAL,
     actions TEXT, active INTEGER DEFAULT 1, updated_at TEXT,
-    stock_fbo REAL, stock_fbs REAL, stock_fbp REAL, stock_total REAL
+    stock_fbo REAL, stock_fbs REAL, stock_fbp REAL, stock_total REAL,
+    cost REAL,                        -- себестоимость, ₽ за штуку (этап 3)
+    acquiring REAL,                   -- эквайринг Ozon, ₽
+    comm_sales_pct_fbo REAL, comm_sales_pct_fbs REAL,          -- комиссия Ozon, %
+    comm_direct_max_fbo REAL, comm_direct_max_fbs REAL,        -- логистика (max), ₽
+    comm_direct_min_fbo REAL, comm_direct_min_fbs REAL,        -- логистика (min), ₽ — для подсказки
+    comm_mile_fbo REAL, comm_mile_fbs REAL                     -- последняя миля, ₽
 );
 CREATE TABLE IF NOT EXISTS rules (
     product_id INTEGER PRIMARY KEY,
@@ -150,6 +160,15 @@ def init():
             con.execute("ALTER TABLE rules ADD COLUMN promo_mode INTEGER DEFAULT 0")
             con.execute("ALTER TABLE rules ADD COLUMN promo_entry TEXT DEFAULT 'RECOMMEND'")
             con.execute("ALTER TABLE rules ADD COLUMN promo_deviation_pct REAL DEFAULT 0")
+        # Этап 3 (2026.11.24): прибыль и безопасный минимум — себестоимость и расходы Ozon
+        pcols3 = [r[1] for r in con.execute("PRAGMA table_info(products)")]
+        for col3, ct3 in (("cost", "REAL"), ("acquiring", "REAL"),
+                          ("comm_sales_pct_fbo", "REAL"), ("comm_sales_pct_fbs", "REAL"),
+                          ("comm_direct_max_fbo", "REAL"), ("comm_direct_max_fbs", "REAL"),
+                          ("comm_direct_min_fbo", "REAL"), ("comm_direct_min_fbs", "REAL"),
+                          ("comm_mile_fbo", "REAL"), ("comm_mile_fbs", "REAL")):
+            if col3 not in pcols3:
+                con.execute(f"ALTER TABLE products ADD COLUMN {col3} {ct3}")
 
 
 def q(sql, args=(), one=False):
@@ -275,6 +294,12 @@ def set_hidden(pid, hidden: bool):
 def is_locked(pid) -> bool:
     r = q("SELECT locked FROM rules WHERE product_id=?", (pid,), one=True)
     return bool(r and r["locked"])
+
+
+def set_min(pid, value):
+    """Обновить только минимум правила товара, не трогая остальные поля правила."""
+    ex("INSERT INTO rules(product_id, min_price) VALUES(?, ?) "
+       "ON CONFLICT(product_id) DO UPDATE SET min_price=excluded.min_price", (pid, value))
 
 
 def changes_since(pid, minutes, include_min_only=False):

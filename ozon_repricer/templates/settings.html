@@ -49,6 +49,19 @@
     </select></div>
   <div class="form-row"><label>Хранить историю, дней</label><input type="number" name="history_days" min="30" value="{{ S.history_days }}"></div>
 </div>
+
+<div class="panel">
+  <h2>Прибыль и безопасный минимум</h2>
+  <div class="form-row"><label>Налог, % от выручки</label>
+    <input type="number" name="tax_pct" min="0" step="0.1" value="{{ S.tax_pct }}" placeholder="0"></div>
+  <div class="form-row"><span></span><div class="hint">Вашу ставку укажите сами (например 6 для УСН «доходы» или 15 для УСН «доходы минус расходы»). Пусто — налог не учитывается.</div></div>
+  <div class="form-row"><label>Себестоимость из файла уже с наценкой — разделить на</label>
+    <input type="number" name="cost_divider" min="1" step="0.05" value="{{ S.cost_divider }}"></div>
+  <div class="form-row"><span></span><div class="hint">Файл «Благомед_себестоимость_*.xlsx» из скрипта blagomed_cost.py уже содержит себестоимость с наценкой ×{{ S.cost_divider }}. При загрузке значение делится на это число. Поставьте 1, если наценки в файле нет.</div></div>
+  <div class="form-row"><label>Минимальная маржа, %</label>
+    <input type="number" name="min_margin_pct" min="0" max="100" step="0.5" value="{{ S.min_margin_pct }}"></div>
+  <div class="form-row"><span></span><div class="hint">Кнопка «Рассчитать безопасный минимум» подберёт минимальную цену селлера, при которой прибыль не меньше этой маржи (без учёта скидок акций).</div></div>
+</div>
 <button class="btn primary">Сохранить настройки</button>
 </form>
 <div class="panel" style="margin-top:24px">

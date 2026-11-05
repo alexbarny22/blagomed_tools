@@ -45,10 +45,15 @@
     <input type="file" name="file" accept=".csv" id="impfile" hidden onchange="document.getElementById('imp').submit()">
     <button type="button" class="btn" onclick="document.getElementById('impfile').click()">Загрузить правила</button>
   </form>
+  <form method="post" action="{{ url_for('cost_import') }}" enctype="multipart/form-data" id="imp-cost" style="display:inline">
+    <input type="file" name="file" accept=".xlsx,.xls" id="costfile" hidden onchange="document.getElementById('imp-cost').submit()">
+    <button type="button" class="btn" onclick="document.getElementById('costfile').click()" title="Загрузка себестоимости из Excel (формат blagomed_cost.py «Благомед_себестоимость_*.xlsx» или простой файл «Артикул» + «Себестоимость»). Значение делится на настроенный «делитель наценки».">Загрузить себестоимость (Excel)</button>
+  </form>
 </div>
 
 <div class="colpanel" id="colpanel" hidden>
   <b>Колонки:</b>
+  <label data-col-toggle="profit"><input type="checkbox"> Прибыль</label>
   <label data-col-toggle="old_price"><input type="checkbox"> Зачёркнутая</label>
   <label data-col-toggle="buyer_est"><input type="checkbox"> ≈ Покупатель</label>
   <label data-col-toggle="color"><input type="checkbox"> Индекс</label>
@@ -67,6 +72,7 @@
   <label>Макс, % от цены селлера</label><input type="number" id="b-max" placeholder="130">
   <label><input type="checkbox" id="b-target"> цель = текущая цена</label>
   <button class="btn primary" onclick="bulkApply()">Применить</button>
+<button class="btn" id="b-safemin" onclick="bulkSafeMin()" title="Рассчитать по настройке «Минимальная маржа, %» (с учётом себестоимости и расходов Ozon) и записать в поле «Мин». Товары «Под MPSpace» пропускаются.">Мин. маржа → Мин</button>
   <button class="btn" onclick="bulkClear()">Сбросить правила</button>
   <span class="sep"></span>
   <label title="Работа с акциями Ozon: 0 — выключить, 1 — только выходить, 3 — входить и выходить">Акции</label>
@@ -109,6 +115,7 @@
     <th data-k="price" class="num">Цена</th>
     <th data-k="old_price" class="num col" data-col="old_price">Зачёркн.</th>
     <th data-k="seller_price" class="num" title="Цена с учётом скидок и акций продавца">Со скидками</th>
+    <th class="num col" data-col="profit" title="Прибыль с продажи по цене со скидками продавца (руб. и %). Наведите на значение — увидите разбивку по статьям">Прибыль</th>
     <th data-k="buyer_est" class="num col" data-col="buyer_est" title="Расчёт по индексу цен Ozon — близко к цене по Ozon Карте">≈ Покупатель</th>
     <th data-k="color" class="col" data-col="color" title="Индекс цен Ozon">Индекс</th>
     <th class="nosort col" data-col="cb" title="Тип контроля для этого товара">Контроль</th>
@@ -132,6 +139,7 @@
 {% block scripts %}
 <script>
 const MODES = {{ MODES|tojson }};
+const MARGIN = {{ S.min_margin_pct|default(10)|float }};
 let DATA = [], cardFilter = 'all', sortKey = 'name', sortDir = 1, tagFilter = '';
 const sel = new Set();
 const rub = v => (v === null || v === undefined || v === '') ? '—' : Math.round(v).toLocaleString('ru-RU');
@@ -140,8 +148,28 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;
 const val = v => (v === null || v === undefined) ? '' : Math.round(v);
 const tagsOf = p => (p.tags || '').split(',').map(t => t.trim()).filter(Boolean);
 
+// прибыль (этап 3): ячейка таблицы и текст разбивки в подсказке
+function profitTip(pr) {
+  const r = v => Math.round(v).toLocaleString('ru-RU');
+  const L = ['Цена со скидками продавца: ' + r(pr.sell) + ' ₽'];
+  L.push('Комиссия Ozon (' + pr.scheme + ', ' + pr.commission_pct + '%): −' + r(pr.commission) + ' ₽');
+  L.push('Логистика Ozon: −' + r(pr.logistics_direct) + ' ₽' + (pr.logistics_min ? ' (минимум ' + r(pr.logistics_min) + ' ₽)' : ''));
+  L.push('Последняя миля: −' + r(pr.last_mile) + ' ₽');
+  L.push('Эквайринг: −' + r(pr.acquiring) + ' ₽');
+  L.push(pr.tax_pct ? 'Налог (' + pr.tax_pct + '%): −' + r(pr.tax) + ' ₽' : 'Налог: 0 ₽ (ставка не указана)');
+  L.push('Себестоимость: −' + r(pr.cost) + ' ₽');
+  L.push('Прибыль: ' + r(pr.profit) + ' ₽ (' + Math.round(pr.profit_pct) + '%)');
+  return L.join('\n');
+}
+function profitCell(p) {
+  const pr = p.profit;
+  const val = pr && !pr.error ? `${rub(pr.profit)} ₽ / ${Math.round(pr.profit_pct)}%` : '—';
+  const tip = pr ? (pr.error || profitTip(pr)) : '';
+  return `<td class="num" data-col="profit" title="${esc(tip)}">${val}</td>`;
+}
+
 // видимость колонок (запоминается в localStorage, со страховкой от ошибок)
-const COL_DEFAULT = {old_price: false, buyer_est: false, color: false, cb: true, ms: true, promo: true, tags: false};
+const COL_DEFAULT = {old_price: false, buyer_est: false, color: false, cb: true, ms: true, promo: true, tags: false, profit: true};
 let colVis = Object.assign({}, COL_DEFAULT);
 try {
   const saved = JSON.parse(localStorage.getItem('rp-cols') || 'null');
@@ -231,6 +259,7 @@ function render() {
       <td class="num">${rub(p.price)}</td>
       <td class="num muted" data-col="old_price">${p.old_price ? rub(p.old_price) : '—'}</td>
       <td class="num"><b>${rub(p.seller_price || p.price)}</b></td>
+      ${profitCell(p)}
       <td class="num" data-col="buyer_est">${p.buyer_est ? '≈ ' + rub(p.buyer_est) : '—'}</td>
       <td data-col="color"><span class="dot ${p.color || ''}" title="${p.color || 'нет данных'}"></span></td>
       <td class="edit" data-col="cb"><select data-f="cb" title="Тип контроля для этого товара"${lockAttr(p)}>
@@ -297,6 +326,15 @@ async function bulkApply() {
   const r = await api('/api/rules/bulk', body);
   toast(`Обновлено правил: ${r.done}` + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')
     + (r.errors.length ? '. Ошибки: ' + r.errors.join('; ') : ''), 6000);
+  load();
+}
+async function bulkSafeMin() {
+  if (!sel.size) { toast('Выберите товары'); return; }
+  if (!confirm(`Записать безопасный минимум (по марже ${MARGIN}%) в поле «Мин» для ${sel.size} товаров? Товары «Под MPSpace» будут пропущены.`)) return;
+  const r = await api('/api/safe_min/batch', {ids: [...sel]});
+  toast('Применён безопасный минимум: ' + r.done
+    + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')
+    + (r.errors.length ? '. Не посчитан: ' + r.errors.join('; ') : ''), 8000);
   load();
 }
 async function bulkClear() {
