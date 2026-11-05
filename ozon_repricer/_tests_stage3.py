@@ -323,9 +323,12 @@ def test_csv_cost_column():
         import app as A
         cl = A.app.test_client()
         data = cl.get("/rules.csv").get_data(as_text=True)
-        assert "Себестоимость, ₽" in data
+        assert "Себестоимость, ₽" in data and "Автодобавление в акции (on/off/пусто)" in data
         head = data.splitlines()[0].split(";")
-        assert head[-1] == "Себестоимость, ₽"
+        # с этапа 2б новые столбцы добавляются только в конец: последний — автодобавление,
+        # предпоследний — себестоимость
+        assert head[-1] == "Автодобавление в акции (on/off/пусто)", head[-1]
+        assert head[-2] == "Себестоимость, ₽", head[-2]
 
         rows = list(csvmod.reader(io.StringIO(data), delimiter=";"))
         found = [row for row in rows[1:] if row[0] == "1"]
