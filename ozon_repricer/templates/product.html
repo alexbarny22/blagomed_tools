@@ -103,6 +103,48 @@
     </div>
 
     <div class="panel">
+      <h2>Акции Ozon</h2>
+      <p class="muted" style="font-size:12.5px;margin-top:-6px">«Только выходить» — выход при цене в акции ниже минимума селлера.
+        «Входить и выходить» — дополнительно вход в выгодные кандидаты с наценкой к целевой цене. Под MPSpace действия
+        записываются в журнал, но в Ozon не отправляются.</p>
+      <div class="form-row"><label>Режим акций</label>
+        <select id="r-promo">
+          <option value="0" {{ 'selected' if rule.promo_mode|int == 0 }}>не трогать</option>
+          <option value="1" {{ 'selected' if rule.promo_mode|int == 1 }}>только выходить</option>
+          <option value="3" {{ 'selected' if rule.promo_mode|int == 3 }}>входить и выходить</option>
+        </select></div>
+      <div class="form-row"><label>Вход в акции</label>
+        <select id="r-entry">
+          <option value="RECOMMEND" {{ 'selected' if (rule.promo_entry or 'RECOMMEND') == 'RECOMMEND' }}>только рекомендации</option>
+          <option value="AUTO" {{ 'selected' if rule.promo_entry == 'AUTO' }}>входить автоматически</option>
+        </select></div>
+      <div class="form-row"><label>Наценка к целевой, %</label><input type="number" step="0.5" id="r-dev" value="{{ rule.promo_deviation_pct|float if rule.promo_deviation_pct }}"></div>
+      {% if promo_actions %}
+      <table style="min-width:0;font-size:13px">
+        <thead><tr><th>Акция</th><th class="num">Цена в акции</th><th></th></tr></thead>
+        <tbody>
+        {% for a in promo_actions %}
+          <tr>
+            <td>{{ a.title }} <span class="muted">({{ 'кандидат' if a.kind == 'candidate' else 'участник' }})</span></td>
+            <td class="num">{{ a.action_price|int if a.action_price else '—' }}</td>
+            <td style="white-space:nowrap">
+              {% if a.kind == 'candidate' %}
+              <button class="btn small" onclick="promoAction({{ a.action_id }}, 'enter')">вход</button>
+              {% elif a.kind == 'participant' %}
+              <button class="btn small" onclick="promoAction({{ a.action_id }}, 'exit')">выход</button>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="muted" style="font-size:12px">Список акций обновляется при каждой проверке вместе с синхронизацией товаров.</p>
+      {% else %}
+      <p class="muted">Товар пока не участвует в акциях Ozon и не числится кандидатом. Список обновится при следующей проверке.</p>
+      {% endif %}
+    </div>
+
+    <div class="panel">
       <h2>Поставить цену вручную</h2>
       <p class="muted" style="font-size:12.5px;margin-top:-6px">Отправляется в Ozon сразу, даже в режиме тренировки.</p>
       <div class="form-row"><label>Цена, ₽</label><input type="number" id="m-price" value="{{ p.price|int if p.price }}"></div>
@@ -128,9 +170,16 @@ async function draw(p) {
 async function saveRule() {
   const v = id => document.getElementById(id).value;
   const r = await api('/api/rule', {product_id: PID, mode: v('r-mode'), min: v('r-min'), max: v('r-max'),
-    target: v('r-target'), tolerance: v('r-tol'), max_strategy: v('r-ms'), control_basis: v('r-cb'), tags: v('r-tags')});
+    target: v('r-target'), tolerance: v('r-tol'), max_strategy: v('r-ms'), control_basis: v('r-cb'), tags: v('r-tags'),
+    promo_mode: v('r-promo'), promo_entry: v('r-entry'), promo_deviation_pct: v('r-dev')});
   toast(r.ok ? 'Правило сохранено: ' + r.status_text : r.message);
   if (r.ok) setTimeout(() => location.reload(), 900);
+}
+async function promoAction(actionId, op) {
+  if (!confirm(op === 'enter' ? 'Войти в акцию? Цена будет выбрана по режиму «Вход в акции» и наценке к целевой.' : 'Выйти из акции?')) return;
+  const r = await api('/api/action/' + PID, {action_id: actionId, op});
+  toast(r.ok ? r.message : r.message, 6000);
+  if (r.ok) setTimeout(() => location.reload(), 1200);
 }
 async function manual() {
   const v = id => document.getElementById(id).value;

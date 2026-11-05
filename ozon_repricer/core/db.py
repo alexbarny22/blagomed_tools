@@ -65,6 +65,15 @@ CREATE INDEX IF NOT EXISTS ix_changes ON changes(product_id, ts);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, level TEXT, message TEXT
 );
+CREATE TABLE IF NOT EXISTS product_actions (
+    product_id INTEGER NOT NULL,
+    action_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,             -- participant | candidate
+    title TEXT, date_from TEXT, date_to TEXT, status TEXT,
+    price REAL, action_price REAL, max_action_price REAL,
+    PRIMARY KEY (product_id, action_id, kind)
+);
+CREATE INDEX IF NOT EXISTS ix_pa ON product_actions(product_id);
 """
 
 
@@ -128,6 +137,11 @@ def init():
         pcols = [r[1] for r in con.execute("PRAGMA table_info(products)")]
         if "image" not in pcols:  # фото товара
             con.execute("ALTER TABLE products ADD COLUMN image TEXT")
+        # этап 2 (2026.11.17): работа с акциями Ozon
+        if "promo_mode" not in cols:
+            con.execute("ALTER TABLE rules ADD COLUMN promo_mode INTEGER DEFAULT 0")
+            con.execute("ALTER TABLE rules ADD COLUMN promo_entry TEXT DEFAULT 'RECOMMEND'")
+            con.execute("ALTER TABLE rules ADD COLUMN promo_deviation_pct REAL DEFAULT 0")
 
 
 def q(sql, args=(), one=False):
@@ -163,19 +177,37 @@ def get_rule(pid):
     r = q("SELECT * FROM rules WHERE product_id=?", (pid,), one=True)
     return r or {"product_id": pid, "mode": "watch", "min_price": None, "max_price": None,
                  "target": None, "tolerance": 2, "note": None, "locked": 0, "hidden": 0,
-                 "max_strategy": 0, "control_basis": "", "tags": ""}
+                 "max_strategy": 0, "control_basis": "", "tags": "",
+                 "promo_mode": 0, "promo_entry": "RECOMMEND", "promo_deviation_pct": 0}
 
 
 def save_rule(pid, mode="watch", min_price=None, max_price=None, target=None, tolerance=2, note=None,
-              max_strategy=0, control_basis="", tags=""):
+              max_strategy=0, control_basis="", tags="",
+              promo_mode=0, promo_entry="RECOMMEND", promo_deviation_pct=0):
     ex("""INSERT INTO rules(product_id, mode, min_price, max_price, target, tolerance, note,
-             max_strategy, control_basis, tags)
-          VALUES(?,?,?,?,?,?,?,?,?,?)
+             max_strategy, control_basis, tags, promo_mode, promo_entry, promo_deviation_pct)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(product_id) DO UPDATE SET mode=excluded.mode, min_price=excluded.min_price,
           max_price=excluded.max_price, target=excluded.target, tolerance=excluded.tolerance,
           note=excluded.note, max_strategy=excluded.max_strategy,
-          control_basis=excluded.control_basis, tags=excluded.tags""",
-       (pid, mode, min_price, max_price, target, tolerance, note, max_strategy, control_basis, tags))
+          control_basis=excluded.control_basis, tags=excluded.tags,
+          promo_mode=excluded.promo_mode, promo_entry=excluded.promo_entry,
+          promo_deviation_pct=excluded.promo_deviation_pct""",
+       (pid, mode, min_price, max_price, target, tolerance, note, max_strategy, control_basis, tags,
+        promo_mode, promo_entry, promo_deviation_pct))
+
+
+def save_actions(rows):
+    """Полная перезапись участия товаров в акциях Ozon (вызывается из sync)."""
+    with _lock, connect() as con:
+        con.execute("DELETE FROM product_actions")
+        con.executemany("""INSERT INTO product_actions(product_id, action_id, kind, title, date_from,
+                          date_to, status, price, action_price, max_action_price)
+                          VALUES(?,?,?,?,?,?,?,?,?,?)""", rows)
+
+
+def get_product_actions(pid):
+    return q("SELECT * FROM product_actions WHERE product_id=? ORDER BY date_from, action_id", (pid,))
 
 
 def set_locked(pid, locked: bool):

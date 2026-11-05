@@ -2,6 +2,7 @@
 import os
 import time
 import random
+from datetime import datetime, timedelta
 import requests
 
 BASE_URL = "https://api-seller.ozon.ru"
@@ -95,6 +96,67 @@ class OzonClient:
             result.extend(data.get("result") or [])
         return result
 
+    # --- акции ---
+    def _get(self, path: str) -> dict:
+        if not self.client_id or not self.api_key:
+            raise OzonError("Не заданы Client-Id и Api-Key (страница «Настройки»).")
+        headers = {
+            "Client-Id": self.client_id,
+            "Api-Key": self.api_key,
+            "Content-Type": "application/json",
+        }
+        last_err = None
+        for attempt in range(5):
+            try:
+                r = self.session.get(BASE_URL + path, headers=headers, timeout=self.timeout)
+            except requests.RequestException as e:
+                last_err = f"Нет связи с Ozon: {e}"
+                time.sleep(2 + attempt * 3)
+                continue
+            if r.status_code == 429 or r.status_code >= 500:
+                last_err = f"Ozon ответил {r.status_code}: {r.text[:300]}"
+                time.sleep(2 + attempt * 3)
+                continue
+            if r.status_code in (401, 403):
+                raise OzonError("Ozon отклонил ключи (проверьте Client-Id и Api-Key, у ключа должны быть права на цены).")
+            if r.status_code != 200:
+                raise OzonError(f"Ozon ответил {r.status_code}: {r.text[:500]}")
+            return r.json()
+        raise OzonError(last_err or "Ozon не отвечает")
+
+    def get_actions(self) -> list:
+        """Акции, к которым могут присоединиться продавцы (/v1/actions, GET)."""
+        data = self._get("/v1/actions")
+        return data.get("result") or []
+
+    def get_action_products(self, action_id) -> list:
+        """Товары, участвующие в акции (/v1/actions/products)."""
+        data = self._post("/v1/actions/products",
+                          {"action_id": action_id, "limit": 1000, "offset": 0})
+        return (data.get("result") or {}).get("products") or []
+
+    def get_action_candidates(self, action_id) -> list:
+        """Товары-кандидаты для входа в акцию (/v1/actions/candidates)."""
+        data = self._post("/v1/actions/candidates",
+                          {"action_id": action_id, "limit": 1000, "offset": 0})
+        return (data.get("result") or {}).get("products") or []
+
+    def activate_action(self, action_id, products: list):
+        """Вход товаров в акцию (/v1/actions/products/activate).
+        products: [{product_id, action_price}]. Возвращает (product_ids, rejected)."""
+        data = self._post("/v1/actions/products/activate",
+                          {"action_id": action_id, "products": products})
+        res = data.get("result") or {}
+        return res.get("product_ids") or [], res.get("rejected") or []
+
+    def deactivate_action(self, action_id, product_ids: list):
+        """Выход товаров из акции (/v1/actions/products/deactivate).
+        Возвращает (product_ids, rejected)."""
+        data = self._post("/v1/actions/products/deactivate",
+                          {"action_id": action_id, "product_ids": [int(x) for x in product_ids]})
+        res = data.get("result") or {}
+        return res.get("product_ids") or [], res.get("rejected") or []
+
 
 class MockOzonClient:
     """Имитация Ozon для проверки без настоящих ключей (переменная OZON_MOCK=1)."""
@@ -120,6 +182,118 @@ class MockOzonClient:
                     "stock_fbs": rnd.choice([0, 1, 3, 6, 11]),
                 }
             MockOzonClient._state = st
+        if getattr(MockOzonClient, "_actions", None) is None:
+            MockOzonClient._actions = self._build_actions()
+
+    @staticmethod
+    def _build_actions(action_id=None):
+        """Детерминированная имитация акций Ozon (3 акции, завершившаяся — при «отключённой»)."""
+        rnd = random.Random(11)
+        st = MockOzonClient._state
+
+        def iso_dt(dt):
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def days(delta):
+            now = datetime.utcnow()
+            return iso_dt(now), iso_dt(now + timedelta(days=delta)), iso_dt(now - timedelta(days=abs(delta)))
+
+        _, end14, start5 = days(14)
+        _, end21, start7 = days(21)
+        _, end60, start90 = days(60)
+        acts = {
+            63301: {"id": 63301, "title": "Скидка продавца: медтехника",
+                    "date_start": start5, "date_end": end14, "status": "STARTED",
+                    "participants": {}, "candidates": {}},
+            63302: {"id": 63302, "title": "Умная скидка Лабиринта",
+                    "date_start": start7, "date_end": end21, "status": "NOT_STARTED",
+                    "participants": {}, "candidates": {}},
+            63303: {"id": 63303, "title": "Распродажа лета",
+                    "date_start": start90, "date_end": end60, "status": "ENDED",
+                    "participants": {}, "candidates": {}},
+        }
+        for pid, s in st.items():
+            promo = s.get("promo", 1.0)
+            price = float(s["price"])
+            if promo < 1:  # уже в «Скидке продавца»
+                acts[63301]["participants"][pid] = {"price": price, "action_price": round(price * 0.85),
+                                                    "max_action_price": round(price * 0.9)}
+            else:          # кандидаты для «Скидки продавца»
+                acts[63301]["candidates"][pid] = {"price": price, "action_price": round(price * 0.85),
+                                                  "max_action_price": round(price * 0.97)}
+            # «Умная скидка»: все — кандидаты
+            acts[63302]["candidates"][pid] = {"price": price, "action_price": round(price * 0.8),
+                                              "max_action_price": round(price * 0.95)}
+            # изредка «случайная» цена акции (проверка, что берём предложение Ozon)
+            if rnd.random() < 0.2:
+                crosses = round(price * rnd.choice([0.5, 0.6, 0.7]))
+                acts[63302]["candidates"][pid]["action_price"] = max(crosses, 1)
+        return acts
+
+    def _action_meta(self, a):
+        return {"id": a["id"], "title": a["title"], "date_start": a["date_start"],
+                "date_end": a["date_end"], "status": a["status"],
+                "is_participating": bool(a["participants"])}
+
+    def _get_action(self, action_id):
+        a = MockOzonClient._actions.get(action_id)
+        if a is None:
+            try:
+                a = MockOzonClient._actions.get(int(action_id or 0))
+            except (TypeError, ValueError):
+                a = None
+        return a
+
+    def _prod_rows(self, d):
+        st = MockOzonClient._state
+        out = []
+        for pid, rec in (d or {}).items():
+            s = st.get(pid, {})
+            out.append({"id": pid, "price": rec.get("price", s.get("price", 0)),
+                        "action_price": rec.get("action_price", 0),
+                        "max_action_price": rec.get("max_action_price", 0)})
+        return out
+
+    def get_actions(self):
+        return [self._action_meta(a) for a in MockOzonClient._actions.values()]
+
+    def get_action_products(self, action_id):
+        a = self._get_action(action_id)
+        return self._prod_rows(a["participants"]) if a else []
+
+    def get_action_candidates(self, action_id):
+        a = self._get_action(action_id)
+        return self._prod_rows(a["candidates"]) if a else []
+
+    def activate_action(self, action_id, products):
+        a = self._get_action(action_id)
+        ok, rej = [], []
+        for p in products or []:
+            pid = int(p.get("product_id") or 0)
+            if not a:
+                rej.append({"product_id": pid, "reason": "акция не найдена"})
+                continue
+            s = MockOzonClient._state.get(pid)
+            if not s or pid not in a["candidates"]:
+                rej.append({"product_id": pid, "reason": "товар не подходит для этой акции"})
+                continue
+            ap = int(round(float(p.get("action_price") or s["price"])))
+            a["participants"][pid] = {"price": s["price"], "action_price": ap}
+            a["candidates"].pop(pid, None)
+            ok.append(pid)
+        return ok, rej
+
+    def deactivate_action(self, action_id, product_ids):
+        a = self._get_action(action_id)
+        ok, rej = [], []
+        for pid in product_ids or []:
+            pid = int(pid)
+            if a and pid in a["participants"]:
+                del a["participants"][pid]
+                ok.append(pid)
+            else:
+                rej.append({"product_id": pid, "reason": "товар не участвует в акции"})
+        return ok, rej
 
     def _item(self, s):
         seller = round(s["price"] * s["promo"])
