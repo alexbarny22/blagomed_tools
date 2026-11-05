@@ -148,7 +148,9 @@
           <option value="RECOMMEND" {{ 'selected' if (rule.promo_entry or 'RECOMMEND') == 'RECOMMEND' }}>только рекомендации</option>
           <option value="AUTO" {{ 'selected' if rule.promo_entry == 'AUTO' }}>входить автоматически</option>
         </select></div>
-      <div class="form-row"><label>Наценка к целевой, %</label><input type="number" step="0.5" id="r-dev" value="{{ rule.promo_deviation_pct|float if rule.promo_deviation_pct }}"></div>
+      <div class="form-row"><label>Допустимо ниже цели, %</label>
+        <input type="number" step="0.5" id="r-dev" value="{{ rule.promo_deviation_pct|float if rule.promo_deviation_pct }}"></div>
+      <div class="form-row"><span></span><div class="hint">на сколько процентов цена акции может быть ниже цены удержания</div></div>
       {% if promo_actions %}
       <table style="min-width:0;font-size:13px">
         <thead><tr><th>Акция</th><th class="num">Цена в акции</th><th></th></tr></thead>

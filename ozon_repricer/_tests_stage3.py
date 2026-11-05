@@ -230,6 +230,50 @@ def _make_simple_xlsx():
     return buf.getvalue()
 
 
+def _make_blagomed_dups_xlsx():
+    """Формат blagomed_cost.py + дубли «Артикула поставщика» с разной себестоимостью:
+    ART-B1 встречается ещё раз с 1600 (больше исходных 1500), ART-B2 — с 2000 (меньше 2300)."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(_make_blagomed_xlsx()))
+    ws = wb["Себестоимость"]
+    ws.cell(row=6, column=2, value="ART-B1")
+    ws.cell(row=6, column=5, value=1600)
+    ws.cell(row=7, column=2, value="ART-B2")
+    ws.cell(row=7, column=5, value=2000)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_cost_import_duplicates_take_max():
+    """Дубли «Артикула поставщика» в файле: берётся БОЛЬШАЯ себестоимость,
+    такие артикулы перечисляются в отчёте об импорте."""
+    with Ctx():
+        put(1, 4000, offer_id="ART-B1")
+        put(2, 3000, offer_id="ART-B2")
+        import app as A
+        rows, dups = A.parse_cost_rows(_make_blagomed_dups_xlsx())
+        assert rows == [("ART-B1", 1600), ("ART-B2", 2300), ("NO-SUCH", 100)], rows
+        assert dups == ["ART-B1", "ART-B2"], dups
+
+        cl = A.app.test_client()
+        db.set_setting("cost_divider", "1.15")
+        r = cl.post("/cost/import",
+                    data={"file": (io.BytesIO(_make_blagomed_dups_xlsx()),
+                                   "Благомед_себестоимость_2026_11.xlsx")},
+                    content_type="multipart/form-data", follow_redirects=True)
+        assert r.status_code == 200
+        # взята БОЛЬШАЯ: для ART-B1 — 1600, а не исходная 1500
+        assert abs(db.q("SELECT cost FROM products WHERE product_id=1", one=True)["cost"] - 1600 / 1.15) < 0.01
+        assert abs(db.q("SELECT cost FROM products WHERE product_id=2", one=True)["cost"] - 2300 / 1.15) < 0.01
+        # список дублей в журнале событий
+        msgs = " ".join(e["message"] for e in db.q("SELECT message FROM events WHERE level='info'"))
+        assert "дублей артикулов 2 (ART-B1, ART-B2)" in msgs, msgs
+        # и в flash-сообщении на странице
+        html = r.data.decode("utf-8", "ignore")
+        assert "Дубли в файле — взята большая себестоимость: ART-B1, ART-B2" in html
+
+
 def test_cost_import_excel_blagomed_and_simple():
     """Импорт себестоимости: формат blagomed_cost.py (делитель по умолчанию 1.15),
     простой файл (делитель 1), отчёт «загружено / не найдено», ручная запись в карточке."""
@@ -239,8 +283,11 @@ def test_cost_import_excel_blagomed_and_simple():
         put(3, 2500, offer_id="ART-S1")
         put(4, 2000, offer_id="ART-MAN")
         import app as A
-        assert A.parse_cost_rows(_make_blagomed_xlsx()) == [("ART-B1", 1500), ("ART-B2", 2300), ("NO-SUCH", 100)]
-        assert A.parse_cost_rows(_make_simple_xlsx()) == [("ART-S1", 999.5)]
+        rows, dups = A.parse_cost_rows(_make_blagomed_xlsx())
+        assert rows == [("ART-B1", 1500), ("ART-B2", 2300), ("NO-SUCH", 100)], rows
+        assert dups == []
+        rs, d2 = A.parse_cost_rows(_make_simple_xlsx())
+        assert rs == [("ART-S1", 999.5)] and d2 == []
 
         cl = A.app.test_client()
         # файл «Благомед...» при делителе 1.15

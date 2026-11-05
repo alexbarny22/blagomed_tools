@@ -481,7 +481,10 @@ def parse_cost_rows(raw: bytes) -> list:
     Принимает файл «Благомед_себестоимость_*.xlsx» (лист «Себестоимость», столбцы
     «Артикул поставщика» и «Себестоимость») и простой файл со столбцами «Артикул» +
     «Себестоимость». Столбцы ищутся по названию в одной из первых строк.
-    Возвращает [(артикул, себестоимость_по_файлу), ...].
+    Если артикул встречается в файле несколько раз — берётся БОЛЬШАЯ себестоимость,
+    артикул попадает в список дублей для отчёта.
+
+    Возвращает ([(артикул, себестоимость_по_файлу), ...], [артикулы с дублями, ...]).
     """
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
@@ -508,7 +511,7 @@ def parse_cost_rows(raw: bytes) -> list:
         art_i = cost_i = None
     if header is None:
         return []
-    out = []
+    best, order, dups = {}, [], []
     for row in ws.iter_rows(min_row=header + 1, values_only=True):
         if not row or art_i >= len(row) or cost_i >= len(row):
             continue
@@ -521,8 +524,16 @@ def parse_cost_rows(raw: bytes) -> list:
         c = _f(str(cv).replace("\xa0", " ").replace(" ", "").replace(",", "."))
         if c is None or c <= 0:
             continue
-        out.append((art, round(c, 2)))
-    return out
+        c = round(c, 2)
+        if art in best:
+            if c > best[art]:            # несколько строк — берём БОЛЬШУЮ
+                best[art] = c
+            if art not in dups:
+                dups.append(art)
+        else:
+            best[art] = c
+            order.append(art)            # порядок первого вхождения
+    return [(art, best[art]) for art in order], dups
 
 
 @app.route("/api/cost", methods=["POST"])
@@ -552,7 +563,7 @@ def cost_import():
         return redirect(url_for("index"))
     raw = f.read()
     try:
-        rows = parse_cost_rows(raw)
+        rows, dups = parse_cost_rows(raw)
     except Exception as e:
         flash(f"Не удалось прочитать файл Excel: {e}")
         return redirect(url_for("index"))
@@ -579,10 +590,15 @@ def cost_import():
             continue
         db.ex("UPDATE products SET cost=? WHERE product_id=?", (round(cost / divider, 2), pid))
         loaded += 1
-    db.log("info", f"Импорт себестоимости: загружено {loaded}, не найдено {len(missing)}, "
+    dups_note = f"дублей артикулов {len(dups)} ({', '.join(dups[:30])})" if dups else "дублей нет"
+    db.log("info", f"Импорт себестоимости: загружено {loaded}, не найдено {len(missing)}, {dups_note}, "
                    f"делитель наценки {divider:g}"
                    + (f"; артикулы не найдены: {', '.join(missing[:30])}" if missing else ""))
     msg = f"Себестоимость: загружено {loaded} (делитель наценки {divider:g})."
+    if dups:
+        msg += f" Дубли в файле — взята большая себестоимость: {', '.join(dups[:15])}"
+        if len(dups) > 15:
+            msg += f" и ещё {len(dups) - 15}"
     if missing:
         msg += f" Не найдено на Ozon ({len(missing)}): {', '.join(missing[:20])}"
         if len(missing) > 20:
