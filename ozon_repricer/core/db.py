@@ -190,6 +190,15 @@ def init():
             con.execute("INSERT INTO events(ts, level, message) VALUES(?, 'info', ?)",
                         (now(), f"Акции Ozon: настройка автодобавления перенесена из старых режимов: "
                                 f"«запретить» — {n_off} товаров, «разрешить» — {n_on}, «не трогать» — {n_rest}"))
+        # замечания ревью (2026.11.27-2): состояние попыток автодобавления — throttle 6 часов,
+        # остановка после 2 неудач («Ozon принял, но не применил») до изменения настройки пользователем
+        con.execute("""CREATE TABLE IF NOT EXISTS auto_add_state (
+            product_id INTEGER PRIMARY KEY,
+            last_attempt TEXT,
+            fail_count INTEGER NOT NULL DEFAULT 0,
+            stopped INTEGER NOT NULL DEFAULT 0,
+            setting TEXT NOT NULL DEFAULT ''
+        )""")
 
 
 def q(sql, args=(), one=False):
@@ -233,6 +242,11 @@ def get_rule(pid):
 def save_rule(pid, mode="watch", min_price=None, max_price=None, target=None, tolerance=2, note=None,
               max_strategy=0, control_basis="", tags="",
               promo_mode=0, promo_entry="RECOMMEND", promo_deviation_pct=0, promo_auto_add=""):
+    # настройка автодобавления изменилась пользователем (форма, массово, CSV) — снимаем состояние
+    # остановленных/неудачных попыток, чтобы ограничение «до изменения настройки» не блокировало её
+    _old_paa = q("SELECT promo_auto_add FROM rules WHERE product_id=?", (pid,), one=True)
+    if _old_paa is not None and (_old_paa.get("promo_auto_add") or "") != (promo_auto_add or ""):
+        ex("DELETE FROM auto_add_state WHERE product_id=?", (pid,))
     ex("""INSERT INTO rules(product_id, mode, min_price, max_price, target, tolerance, note,
              max_strategy, control_basis, tags, promo_mode, promo_entry, promo_deviation_pct, promo_auto_add)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -311,6 +325,25 @@ def set_locked(pid, locked: bool):
 def set_auto_add_enabled(pid, value):
     """Фактическое значение auto_add_to_ozon_actions_list_enabled после успешной отправки."""
     ex("UPDATE products SET auto_add_enabled=? WHERE product_id=?", (value, pid))
+
+
+def get_auto_add_state(pid):
+    """Состояние попыток отправки настройки автодобавления (throttle 6 часов, 2 неудачи → стоп)."""
+    return q("SELECT * FROM auto_add_state WHERE product_id=?", (pid,), one=True)
+
+
+def save_auto_add_state(pid, last_attempt=None, fail_count=0, stopped=0, setting=""):
+    """Запомнить попытку/итог отправки настройки автодобавления (последняя отправка и счётчик неудач)."""
+    ex("""INSERT INTO auto_add_state(product_id, last_attempt, fail_count, stopped, setting)
+         VALUES(?,?,?,?,?)
+         ON CONFLICT(product_id) DO UPDATE SET last_attempt=excluded.last_attempt,
+         fail_count=excluded.fail_count, stopped=excluded.stopped, setting=excluded.setting""",
+       (pid, last_attempt, int(fail_count or 0), int(bool(stopped)), setting or ""))
+
+
+def clear_auto_add_state(pid):
+    """Сбросить состояние попыток (настройка изменена пользователем или больше не нужна)."""
+    ex("DELETE FROM auto_add_state WHERE product_id=?", (pid,))
 
 
 def set_hidden(pid, hidden: bool):

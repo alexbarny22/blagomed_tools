@@ -256,6 +256,11 @@ def attention_for(p: dict, rule: dict, s):
             reasons.append("Ozon не принял настройку автодобавления")
         elif last_real["ok"] == 0 and src != "отложено":
             reasons.append("ошибка при последней отправке цены в Ozon")
+    # этап 2б (замечания ревью): Ozon принял запрос, но настройка автодобавления так и не применилась
+    # после 2 попыток — попытки остановлены до изменения настройки пользователем
+    st_aa = db.get_auto_add_state(p["product_id"])
+    if st_aa and st_aa["stopped"]:
+        reasons.append("Ozon не применяет настройку автодобавления")
     if rule.get("mode") in ("guard", "hold") and not rule.get("locked"):
         if p.get("stock_total") is not None and p["stock_total"] == 0:
             reasons.append("остаток 0")
@@ -612,6 +617,12 @@ class Repricer:
                   (db.now(), p["product_id"], p["offer_id"], None, p.get("price"), p.get("price"),
                    p.get("old_price") or 0, None, reason, "акции: автодобавление",
                    int(dry_run), int(ok), error))
+        def aa_last(pid, dry_run):
+            return db.q("SELECT ts, reason FROM changes WHERE product_id=? AND source='акции: автодобавление' "
+                        "AND dry_run=? ORDER BY id DESC LIMIT 1", (pid, int(dry_run)), one=True)
+
+        now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_6h = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
         to_send, meta, skipped = [], [], 0
         for p in products:
             pid = p["product_id"]
@@ -641,6 +652,19 @@ class Repricer:
                                plan["price"], plan["old_price"], plan.get("min_price"), plan["reason"],
                                "отложено", int(dry), block))
                     plan = None
+                    if auto_target is None:
+                        # цена заблокирована паузой/лимитом, а настройку автодобавления менять не нужно —
+                        # товар пропускаем (иначе в to_send попал бы пустой запрос на весь список)
+                        continue
+            if auto_target is not None and not p.get("price"):
+                # нет цены — настройку автодобавления не отправляем (Ozon нужен товар с ценой),
+                # в журнал пишем причину не чаще раза в 6 часов на товар
+                prev = aa_last(pid, dry)
+                if not prev or prev["ts"] < now_6h or "нет цены" not in (prev["reason"] or ""):
+                    log_auto(p, 1 if dry else 0, 1,
+                             ("тренировка: нет цены — автодобавление не отправляется" if dry
+                              else "нет цены — автодобавление не отправлялось"))
+                continue
             if dry:
                 if plan:
                     prev = db.q("SELECT * FROM changes WHERE product_id=? AND dry_run=1 ORDER BY id DESC LIMIT 1",
@@ -653,11 +677,38 @@ class Repricer:
                               (db.now(), pid, p["offer_id"], plan["controlled"], p["price"], plan["price"],
                                plan["old_price"], plan.get("min_price"), plan["reason"],
                                "мин. цена" if plan.get("min_only") else "авто"))
+                # тренировка: запись «что сделал бы — автодобавление» не чаще раза в 6 часов на товар
                 if auto_target is not None:
-                    log_auto(p, 1, 1, "тренировка: что сделал бы — автодобавление в акции "
-                                      + ("включить" if auto_target else "выключить"))
+                    prev = aa_last(pid, 1)
+                    intent = "включить" if auto_target else "выключить"
+                    if not prev or prev["ts"] < now_6h or intent not in (prev["reason"] or ""):
+                        log_auto(p, 1, 1, "тренировка: что сделал бы — автодобавление в акции " + intent)
                 continue
-            # боевой режим: одно тело на товар — цена и настройка автодобавления вместе
+            # боевой режим: автоотправку повторяем не чаще раза в 6 часов на товар; после 2 неудач
+            # (Ozon принял запрос, но products.auto_add_enabled так и не совпал) — «Требует внимания»
+            # и остановка попыток до изменения настройки пользователем
+            fail_before = 0
+            if auto_target is not None:
+                st = db.get_auto_add_state(pid)
+                if st and st["setting"] != want:
+                    db.clear_auto_add_state(pid)
+                    st = None
+                if st and st["stopped"]:
+                    continue
+                if st and st["last_attempt"] and st["last_attempt"] >= now_6h:
+                    continue  # не чаще раза в 6 часов на товар
+                if st and st["last_attempt"]:
+                    # 6 часов прошли, а настройка так и не применилась — прошлая попытка не удалась
+                    fail_before = (st["fail_count"] or 0) + 1
+                    if fail_before >= 2:
+                        db.save_auto_add_state(pid, last_attempt=now_s, fail_count=fail_before,
+                                               stopped=1, setting=want)
+                        log_auto(p, 0, 0, "Ozon не применяет настройку автодобавления — попытки "
+                                          "остановлены до изменения настройки")
+                        db.log("warn", f"Товар {p['offer_id']}: Ozon не применяет настройку "
+                                       f"автодобавления — попытки остановлены до изменения настройки")
+                        continue
+            # одно тело на товар — цена и настройка автодобавления вместе
             body = None
             if plan:
                 body = price_body(p, plan["price"], plan["old_price"], plan.get("min_price"))
@@ -667,6 +718,10 @@ class Repricer:
                     body = price_body(p, p.get("price") or 0, p.get("old_price") or 0,
                                       mn if push_min and mn else None)
                 body["auto_add_to_ozon_actions_list_enabled"] = bool(auto_target)
+                db.save_auto_add_state(pid, last_attempt=now_s, fail_count=fail_before,
+                                       stopped=0, setting=want)
+            if body is None:
+                continue  # защита: пустой запрос в /v1/product/import/prices не шлём никогда
             to_send.append(body)
             meta.append((p, plan, auto_target))
         sent = errors = promo_done = 0

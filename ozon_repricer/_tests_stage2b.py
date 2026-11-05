@@ -5,7 +5,10 @@
 auto_add_to_ozon_actions_list_enabled, отправку настройки автодобавления в /v1/product/import/prices
 (вместе с ценой и без изменения цены), тренировку и «Под MPSpace», ошибку Ozon по этому полю,
 диагностику участников с ценой выше требуемой, CSV с новым столбцом и старые файлы,
-отсутствие невыполнимых кнопок входа/выхода в интерфейсе.
+отсутствие невыполнимых кнопок входа/выхода в интерфейсе. Замечания ревью: пауза/лимит
+цены не роняет весь список через None в import_prices, повтор автоотправки не чаще 6 часов
+и остановка после 2 неудач, тренировочные записи «что сделал бы» тоже не чаще 6 часов,
+«нет цены» — без отправки и с записью в журнал.
 
 Без внешних зависимостей: простые функции, запуск:  python _tests_stage2b.py
 """
@@ -16,6 +19,7 @@ import sqlite3
 import sys
 import tempfile
 import traceback
+from datetime import datetime, timedelta
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
@@ -411,6 +415,136 @@ def test_sync_stores_auto_add_enabled():
         for r in rows:
             want = 1 if MockOzonClient._state[r["product_id"]].get("auto_add_enabled") else 0
             assert r["auto_add_enabled"] == want, (r, want)
+
+
+def test_guard_block_does_not_break_list():
+    """Замечание 1 (критично): товар на паузе (план заблокирован guard_against_loops)
+    + товар с promo_auto_add='off' — в to_send не попадает None и import_prices не падает,
+    цена другого товара меняется во всех 4 запусках подряд."""
+    with Ctx() as c:
+        pids = sorted(MockOzonClient._state)
+        pa, pb, pc = pids[0], pids[1], pids[2]
+        db.set_setting("cooldown_min", "60")
+        # A — «на паузе»: последнее изменение цены записано только что
+        put(pa, 1000)
+        db.save_rule(pa, mode="guard", min_price=1200, max_price=1200)
+        db.ex("INSERT INTO changes(ts, product_id, offer_id, controlled_before, price_before, price_after, "
+              "old_price_after, min_after, reason, source, dry_run, ok, error) "
+              "VALUES(?,?,?,?,?,?,?,?,?,?,0,1,NULL)",
+              (db.now(), pa, f"T-{pa}", 1000, 1000, 1200, 1200, None, "тест", "авто"))
+        # B — меняется только автодобавление (off), цена без изменений
+        put(pb, 1000, auto_add_enabled=1)
+        db.save_rule(pb, mode="watch", promo_auto_add="off")
+        db.save_rule(pc, mode="guard", min_price=1200, max_price=1200)
+        sent_all = []
+        for i in range(4):
+            put(pc, 400 if i % 2 == 0 else 700)
+            db.ex("DELETE FROM changes WHERE product_id=?", (pc,))  # снимаем паузу только у C
+            cl = RecordingClient(c.mock)
+            out = c.rep.apply_rules(cl, db.get_settings())  # раньше здесь падал import_prices
+            assert not any(b is None for b in cl.sent), "None не должен попадать в import_prices"
+            assert out[1] == 0, out  # errors == 0: список не «упал» из-за паузного товара
+            sent_all += cl.sent
+        prices_c = [b["price"] for b in sent_all if b["product_id"] == int(pc)]
+        assert len(prices_c) == 4 and set(prices_c) == {"1200"}, prices_c
+
+
+def test_training_auto_log_throttle():
+    """Замечание 3: в тренировке запись «что сделал бы — автодобавление» не чаще раза в 6 часов
+    на товар; при изменении настройки — новая запись сразу."""
+    with Ctx() as c:
+        pid = sorted(MockOzonClient._state)[0]
+        db.set_setting("dry_run", "1")
+        put(pid, 1000, auto_add_enabled=0)
+        db.save_rule(pid, mode="hold", target=900, promo_auto_add="on")
+        for _ in range(4):
+            c.rep.apply_rules(RecordingClient(c.mock), db.get_settings())
+        rows = db.q("SELECT reason FROM changes WHERE dry_run=1 AND source='акции: автодобавление' "
+                    "AND reason LIKE '%что сделал бы%'")
+        assert len(rows) == 1, rows
+        # настройка изменена — «что сделал бы» пишется и вскоре (новое направление)
+        db.save_rule(pid, mode="hold", target=900, promo_auto_add="off")
+        put(pid, 1000, auto_add_enabled=1)
+        c.rep.apply_rules(RecordingClient(c.mock), db.get_settings())
+        rows2 = db.q("SELECT reason FROM changes WHERE dry_run=1 AND source='акции: автодобавление' "
+                     "AND reason LIKE '%что сделал бы%'")
+        assert len(rows2) == 2, len(rows2)
+        assert any("выключить" in r["reason"] for r in rows2), rows2
+
+
+def test_no_price_auto_not_sent():
+    """Замечание 4: у товара без цены (price=0) автодобавление не отправляется,
+    в журнал пишется «нет цены» (и в тренировке, и в боевом режиме)."""
+    with Ctx() as c:
+        pid = sorted(MockOzonClient._state)[0]
+        db.save_rule(pid, mode="watch", promo_auto_add="on")
+        # боевой режим
+        put(pid, 0, auto_add_enabled=0)
+        cl = RecordingClient(c.mock)
+        out = c.rep.apply_rules(cl, db.get_settings())
+        assert out[3] == 0 and not cl.sent, cl.sent
+        row = db.q("SELECT reason, ok FROM changes WHERE source='акции: автодобавление' "
+                   "ORDER BY id DESC LIMIT 1", one=True)
+        assert row and "нет цены" in row["reason"] and row["ok"] == 1, row
+        # тренировка — запись «нет цены» тоже есть, отправки нет
+        db.set_setting("dry_run", "1")
+        cl2 = RecordingClient(c.mock)
+        out = c.rep.apply_rules(cl2, db.get_settings())
+        assert out[0] == 0 and out[3] == 0 and not cl2.sent, (out, cl2.sent)
+        row2 = db.q("SELECT reason, dry_run FROM changes WHERE source='акции: автодобавление' "
+                    "ORDER BY id DESC LIMIT 1", one=True)
+        assert row2 and "нет цены" in row2["reason"] and row2["dry_run"] == 1, row2
+
+
+def test_auto_not_applied_throttle_and_stop():
+    """Замечание 2: Ozon принял запрос, но products.auto_add_enabled так и не совпал с настройкой.
+    Повтор не чаще раза в 6 часов на товар (4 запуска → 1 отправка); после 2 неудач —
+    «Требует внимания», событие и остановка попыток до изменения настройки пользователем."""
+    with Ctx() as c:
+        pid = sorted(MockOzonClient._state)[0]
+        db.set_setting("cooldown_min", "0")
+        db.save_rule(pid, mode="watch", promo_auto_add="off")
+        put(pid, 1000, auto_add_enabled=1)
+        cl = RecordingClient(c.mock)
+        assert c.rep.apply_rules(cl, db.get_settings())[3] == 1
+        # «Ozon не применил»: после каждой синхронизации значение вновь 1 (прошло < 6 часов)
+        for _ in range(3):
+            put(pid, 1000, auto_add_enabled=1)
+            cl2 = RecordingClient(c.mock)
+            c.rep.apply_rules(cl2, db.get_settings())
+            assert not [b for b in cl2.sent if "auto_add_to_ozon_actions_list_enabled" in b], \
+                "повторная отправка раньше 6 часов"
+        # прошло 6 часов, настройка так и не совпала — вторая попытка
+        old = (datetime.now() - timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+        db.save_auto_add_state(pid, last_attempt=old, fail_count=0, stopped=0, setting="off")
+        put(pid, 1000, auto_add_enabled=1)
+        cl3 = RecordingClient(c.mock)
+        assert c.rep.apply_rules(cl3, db.get_settings())[3] == 1
+        assert any("auto_add_to_ozon_actions_list_enabled" in b for b in cl3.sent), cl3.sent
+        # ещё 6 часов и вторая неудача — попытки прекращены
+        db.save_auto_add_state(pid, last_attempt=old, fail_count=1, stopped=0, setting="off")
+        put(pid, 1000, auto_add_enabled=1)
+        cl4 = RecordingClient(c.mock)
+        assert c.rep.apply_rules(cl4, db.get_settings())[3] == 0
+        assert not cl4.sent, cl4.sent
+        st = db.get_auto_add_state(pid)
+        assert st and st["stopped"] == 1 and st["fail_count"] == 2, st
+        p = db.q("SELECT * FROM products WHERE product_id=?", (pid,), one=True)
+        atn = engine.attention_for(p, db.get_rule(pid), db.get_settings())
+        assert "Ozon не применяет настройку автодобавления" in atn, atn
+        warns = " ".join(e["message"] for e in db.q("SELECT message FROM events WHERE level='warn'"))
+        assert "Ozon не применяет настройку автодобавления" in warns, warns
+        # ещё один запуск — не отправляем
+        put(pid, 1000, auto_add_enabled=1)
+        cl5 = RecordingClient(c.mock)
+        assert c.rep.apply_rules(cl5, db.get_settings())[3] == 0
+        assert not cl5.sent
+        # настройка изменена пользователем — состояние сброшено, попытки возобновлены
+        db.save_rule(pid, mode="watch", promo_auto_add="on")
+        put(pid, 1000, auto_add_enabled=0)
+        cl6 = RecordingClient(c.mock)
+        assert c.rep.apply_rules(cl6, db.get_settings())[3] == 1
+        assert any("auto_add_to_ozon_actions_list_enabled" in b for b in cl6.sent), cl6.sent
 
 
 def main():
