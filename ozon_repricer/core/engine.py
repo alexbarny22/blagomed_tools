@@ -59,6 +59,93 @@ def buyer_estimate(item: dict):
     return None
 
 
+# ---------- прибыль с продажи и безопасный минимум (этап 3) ----------
+def cost_scheme(p: dict) -> str:
+    """Схема отгрузки для расчёта расходов Ozon: FBS, если остаток только на FBS, иначе FBO."""
+    fbo = (_f(p.get("stock_fbo")) or 0) > 0
+    fbs = (_f(p.get("stock_fbs")) or 0) > 0
+    return "FBS" if fbs and not fbo else "FBO"
+
+
+def ozon_fees(p: dict):
+    """Комиссия Ozon по схеме товара (FBO/FBS): dict с разбивкой или None, если данных нет.
+
+    Логистика берётся консервативно по максимуму (*_direct_flow_trans_max_amount),
+    минимум сохраняется для подсказки. Эквайринг — поле acquiring.
+    """
+    scheme = cost_scheme(p)
+    sfx = "_fbo" if scheme == "FBO" else "_fbs"
+    sales = _f(p.get("comm_sales_pct" + sfx))
+    direct = _f(p.get("comm_direct_max" + sfx))
+    direct_min = _f(p.get("comm_direct_min" + sfx))
+    mile = _f(p.get("comm_mile" + sfx))
+    if sales is None and direct is None and mile is None:
+        return None
+    return {"scheme": scheme, "commission_pct": sales or 0,
+            "logistics_direct": direct or 0, "logistics_direct_min": direct_min or 0,
+            "last_mile": mile or 0, "acquiring": _f(p.get("acquiring")) or 0}
+
+
+def profit_of(p: dict, s: dict = None):
+    """Прибыль с продажи по цене с акциями продавца (этап 3).
+
+    Возвращает dict с расчётом либо {"error": "..."}:
+      — "нет себестоимости" — себестоимость не заполнена;
+      — "нет данных Ozon о комиссиях" — Ozon не прислал комиссии/эквайринг.
+    Формула: прибыль = цена_с_акциями − комиссия%×цена − логистика − эквайринг − налог%×цена − себестоимость.
+    Процент прибыли — от цены с акциями продавца.
+    """
+    cost = _f(p.get("cost"))
+    fees = ozon_fees(p)
+    if cost is None:
+        return {"error": "нет себестоимости"}
+    if not fees:
+        return {"error": "нет данных Ozon о комиссиях"}
+    sell = p.get("seller_price") or p.get("price")
+    if not sell or sell <= 0:
+        return {"error": "нет цены со скидками продавца"}
+    tax_pct = _f((s or {}).get("tax_pct")) or 0
+    commission = sell * fees["commission_pct"] / 100
+    tax = sell * tax_pct / 100
+    logistics = fees["logistics_direct"] + fees["last_mile"]
+    expenses = commission + logistics + fees["acquiring"] + tax + cost
+    profit = sell - expenses
+    return {"sell": sell, "cost": cost, "scheme": fees["scheme"],
+            "commission_pct": fees["commission_pct"], "commission": commission,
+            "logistics_direct": fees["logistics_direct"], "logistics_min": fees["logistics_direct_min"],
+            "last_mile": fees["last_mile"], "acquiring": fees["acquiring"],
+            "tax_pct": tax_pct, "tax": tax, "profit": profit,
+            "profit_pct": profit / sell * 100 if sell else 0}
+
+
+def safe_min_calc(p: dict, s: dict = None):
+    """Минимальная цена селлера, при которой прибыль >= минимальной маржи (этап 3).
+
+    Комиссия и налог — проценты от цены, логистика и себестоимость — фиксированные ₽:
+        мин = (себестоимость + логистика + последняя_миля + эквайринг)
+              / (1 − комиссия% − налог% − маржа%), округление вверх до рубля.
+    Возвращает (значение | None, причина | ''). Причина непустая, когда посчитать нельзя.
+    Считается для цены без скидок акций.
+    """
+    s = s or {}
+    cost = _f(p.get("cost"))
+    fees = ozon_fees(p)
+    if cost is None:
+        return None, "нет себестоимости: заполните её в карточке или загрузите из Excel"
+    if not fees:
+        return None, "нет данных Ozon о комиссиях"
+    tax_pct = _f(s.get("tax_pct")) or 0
+    margin = _f(s.get("min_margin_pct"))
+    if margin is None:
+        margin = 10
+    denom = 1 - fees["commission_pct"] / 100 - tax_pct / 100 - margin / 100
+    if denom <= 0:
+        return None, (f"маржа недостижима: комиссия {fees['commission_pct']:g}% + налог {tax_pct:g}% "
+                      f"+ маржа {margin:g}% уже покрывают всю цену")
+    numer = cost + fees["logistics_direct"] + fees["last_mile"] + fees["acquiring"]
+    return math.ceil(numer / denom), ""
+
+
 def control_basis(rule, s):
     """Тип контроля для товара: у правила приоритет над общей настройкой."""
     if rule:
@@ -172,6 +259,12 @@ def attention_for(p: dict, rule: dict, s):
             reasons.append("остаток 0")
     if (p.get("color_index") or "").upper() == "RED":
         reasons.append("красный индекс цен")
+    # «Ozon добавит в акцию ниже минимума» — цена автодобавления из таблицы auto_add
+    if mn:
+        for _ in db.q("SELECT 1 FROM auto_add WHERE product_id=? AND price_to_auto_add IS NOT NULL "
+                      "AND price_to_auto_add < ? - 0.5", (p["product_id"], mn)):
+            reasons.append("Ozon добавит в акцию ниже минимума")
+            break
     return reasons
 
 
@@ -449,6 +542,21 @@ class Repricer:
             }
             row["stock_fbo"], row["stock_fbs"], row["stock_fbp"], row["stock_total"] = \
                 stocks.get(pid, (None, None, None, None))
+            # расходы Ozon (этап 3): комиссии и эквайринг уже приходят в ответе цен —
+            # сохраняются без дополнительных запросов; если Ozon их не прислал — прежние значения
+            # остаются (не затираются)
+            got_comm = it.get("commissions") is not None or "acquiring" in it
+            if got_comm:
+                comm = it.get("commissions") or {}
+                row["acquiring"] = _f(it.get("acquiring"))
+                row["comm_sales_pct_fbo"] = _f(comm.get("sales_percent_fbo"))
+                row["comm_sales_pct_fbs"] = _f(comm.get("sales_percent_fbs"))
+                row["comm_direct_max_fbo"] = _f(comm.get("fbo_direct_flow_trans_max_amount"))
+                row["comm_direct_max_fbs"] = _f(comm.get("fbs_direct_flow_trans_max_amount"))
+                row["comm_direct_min_fbo"] = _f(comm.get("fbo_direct_flow_trans_min_amount"))
+                row["comm_direct_min_fbs"] = _f(comm.get("fbs_direct_flow_trans_min_amount"))
+                row["comm_mile_fbo"] = _f(comm.get("fbo_deliv_to_customer_amount"))
+                row["comm_mile_fbs"] = _f(comm.get("fbs_deliv_to_customer_amount"))
             base_cols = ["product_id", "offer_id", "price", "old_price", "seller_price", "ozon_min_price",
                          "buyer_est", "color_index", "idx_ozon_min", "idx_ozon_val", "idx_ext_min",
                          "idx_ext_val", "actions", "active", "updated_at"]
@@ -468,6 +576,24 @@ class Repricer:
                 vals += [":stock_fbo", ":stock_fbs", ":stock_fbp", ":stock_total"]
                 sets += ["stock_fbo=excluded.stock_fbo", "stock_fbs=excluded.stock_fbs",
                          "stock_fbp=excluded.stock_fbp", "stock_total=excluded.stock_total"]
+            if got_comm:
+                base_cols += ["acquiring", "comm_sales_pct_fbo", "comm_sales_pct_fbs",
+                              "comm_direct_max_fbo", "comm_direct_max_fbs",
+                              "comm_direct_min_fbo", "comm_direct_min_fbs",
+                              "comm_mile_fbo", "comm_mile_fbs"]
+                vals += [":acquiring", ":comm_sales_pct_fbo", ":comm_sales_pct_fbs",
+                         ":comm_direct_max_fbo", ":comm_direct_max_fbs",
+                         ":comm_direct_min_fbo", ":comm_direct_min_fbs",
+                         ":comm_mile_fbo", ":comm_mile_fbs"]
+                sets += ["acquiring=excluded.acquiring",
+                         "comm_sales_pct_fbo=excluded.comm_sales_pct_fbo",
+                         "comm_sales_pct_fbs=excluded.comm_sales_pct_fbs",
+                         "comm_direct_max_fbo=excluded.comm_direct_max_fbo",
+                         "comm_direct_max_fbs=excluded.comm_direct_max_fbs",
+                         "comm_direct_min_fbo=excluded.comm_direct_min_fbo",
+                         "comm_direct_min_fbs=excluded.comm_direct_min_fbs",
+                         "comm_mile_fbo=excluded.comm_mile_fbo",
+                         "comm_mile_fbs=excluded.comm_mile_fbs"]
             db.ex((f"INSERT INTO products({', '.join(base_cols)}) VALUES({', '.join(vals)}) "
                    f"ON CONFLICT(product_id) DO UPDATE SET {', '.join(sets)}"), {**row, "ts": ts})
             last = db.q("SELECT * FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 1", (pid,), one=True)

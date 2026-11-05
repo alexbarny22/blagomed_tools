@@ -12,7 +12,8 @@ from flask import Flask, jsonify, render_template, request, redirect, url_for, R
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core import db  # noqa: E402
-from core.engine import Repricer, MODES, status_of, controlled_price, _f, attention_for, control_basis  # noqa: E402
+from core.engine import (Repricer, MODES, status_of, controlled_price, _f, attention_for, control_basis,  # noqa: E402
+                         profit_of, safe_min_calc, cost_scheme)
 from core.ozon import make_client, OzonError  # noqa: E402
 
 HOST, PORT = os.environ.get("REPRICER_HOST", "127.0.0.1"), int(os.environ.get("REPRICER_PORT", "8765"))
@@ -108,10 +109,14 @@ def product(pid):
     actions = json.loads(p.get("actions") or "[]")
     promo_actions = db.q("SELECT * FROM product_actions WHERE product_id=? ORDER BY action_id", (pid,))
     auto_add = db.get_auto_add(pid)
+    pr = profit_of(p, s)
+    sm, sm_reason = safe_min_calc(p, s)
     return render_template("product.html", p=p, rule=rule, st=st, st_text=st_text, changes=changes,
                            actions=actions, promo_actions=promo_actions, auto_add=auto_add,
                            controlled=controlled_price(p, rule, s),
-                           attention=attention_for(p, rule, s), basis=control_basis(rule, s))
+                           attention=attention_for(p, rule, s), basis=control_basis(rule, s),
+                           profit=pr, comm_scheme=cost_scheme(p), profit_tip=profit_tip_text(pr),
+                           safe_min={"value": sm, "reason": sm_reason})
 
 
 @app.route("/changes")
@@ -140,7 +145,7 @@ def settings():
         f = request.form
         for key in ("client_id", "interval_min", "cooldown_min", "max_step_pct", "max_changes_day",
                     "control_basis", "visibility", "history_days", "strict_overshoot_pct",
-                    "actions_interval_min"):
+                    "actions_interval_min", "tax_pct", "cost_divider", "min_margin_pct"):
             if key in f:
                 db.set_setting(key, f.get(key, "").strip())
         if f.get("api_key", "").strip() and "•" not in f.get("api_key"):
@@ -164,6 +169,7 @@ def api_products():
     for p in db.q("SELECT * FROM products WHERE active=1 ORDER BY name"):
         rule = rules.get(p["product_id"]) or db.get_rule(p["product_id"])
         st, st_text = status_of(p, rule, s)
+        sm, sm_reason = safe_min_calc(p, s)
         out.append({
             "product_id": p["product_id"], "offer_id": p["offer_id"], "name": p["name"] or "",
             "price": p["price"], "old_price": p["old_price"], "seller_price": p["seller_price"],
@@ -178,6 +184,9 @@ def api_products():
             "promo_deviation": _f(rule.get("promo_deviation_pct")) or 0,
             "stock_fbo": p.get("stock_fbo"), "stock_fbs": p.get("stock_fbs"),
             "stock_fbp": p.get("stock_fbp"), "stock_total": p.get("stock_total"),
+            "cost": p.get("cost"), "comm_scheme": cost_scheme(p),
+            "profit": profit_of(p, s),
+            "safe_min": {"value": sm, "reason": sm_reason},
             "attention": attention_for(p, rule, s),
             "status": st, "status_text": st_text, "last_change": (last.get(p["product_id"]) or {}).get("ts"),
             "n_actions": len(json.loads(p["actions"] or "[]")), "locked": bool(rule.get("locked")),
@@ -448,6 +457,198 @@ def api_dismiss_banner():
     return jsonify({"ok": True})
 
 
+# ---------------- прибыль (этап 3): себестоимость и безопасный минимум ----------------
+def profit_tip_text(pr) -> str:
+    """Разбивка прибыли по статьям — текст подсказки."""
+    if not pr or pr.get("error"):
+        return (pr or {}).get("error", "")
+    rub = lambda v: f"{round(v):,}".replace(",", " ")
+    lines = [f"Цена со скидками продавца: {rub(pr['sell'])} ₽",
+             f"Комиссия Ozon ({pr['scheme']}, {pr['commission_pct']:g}%): −{rub(pr['commission'])} ₽",
+             f"Логистика Ozon: −{rub(pr['logistics_direct'])} ₽"
+             + (f" (минимум {rub(pr['logistics_min'])} ₽)" if pr.get("logistics_min") else ""),
+             f"Последняя миля: −{rub(pr['last_mile'])} ₽",
+             f"Эквайринг: −{rub(pr['acquiring'])} ₽",
+             (f"Налог ({pr['tax_pct']:g}%): −{rub(pr['tax'])} ₽" if pr.get("tax_pct") else "Налог: 0 ₽ (ставка не указана)"),
+             f"Себестоимость: −{rub(pr['cost'])} ₽",
+             f"Прибыль: {rub(pr['profit'])} ₽ ({round(pr['profit_pct'])}%)"]
+    return "\n".join(lines)
+
+
+def parse_cost_rows(raw: bytes) -> list:
+    """Чтение себестоимости из Excel.
+
+    Принимает файл «Благомед_себестоимость_*.xlsx» (лист «Себестоимость», столбцы
+    «Артикул поставщика» и «Себестоимость») и простой файл со столбцами «Артикул» +
+    «Себестоимость». Столбцы ищутся по названию в одной из первых строк.
+    Если артикул встречается в файле несколько раз — берётся БОЛЬШАЯ себестоимость,
+    артикул попадает в список дублей для отчёта.
+
+    Возвращает ([(артикул, себестоимость_по_файлу), ...], [артикулы с дублями, ...]).
+    """
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    ws = wb["Себестоимость"] if "Себестоимость" in wb.sheetnames else wb[wb.sheetnames[0]]
+    art_i = cost_i = header = None
+    for r_i, row in enumerate(ws.iter_rows(max_row=10, values_only=True)):
+        if not row:
+            continue
+        cells = {}
+        for i, v in enumerate(row):
+            if v is None:
+                continue
+            key = str(v).strip().lower()
+            if key:
+                cells.setdefault(key, i)
+        if "артикул поставщика" in cells:
+            art_i = cells["артикул поставщика"]
+        elif "артикул" in cells:
+            art_i = cells["артикул"]
+        cost_i = cells.get("себестоимость")
+        if art_i is not None and cost_i is not None:
+            header = r_i + 1
+            break
+        art_i = cost_i = None
+    if header is None:
+        return []
+    best, order, dups = {}, [], []
+    for row in ws.iter_rows(min_row=header + 1, values_only=True):
+        if not row or art_i >= len(row) or cost_i >= len(row):
+            continue
+        art, cv = row[art_i], row[cost_i]
+        if art is None or cv is None:
+            continue
+        art = str(art).strip()
+        if not art:
+            continue
+        c = _f(str(cv).replace("\xa0", " ").replace(" ", "").replace(",", "."))
+        if c is None or c <= 0:
+            continue
+        c = round(c, 2)
+        if art in best:
+            if c > best[art]:            # несколько строк — берём БОЛЬШУЮ
+                best[art] = c
+            if art not in dups:
+                dups.append(art)
+        else:
+            best[art] = c
+            order.append(art)            # порядок первого вхождения
+    return [(art, best[art]) for art in order], dups
+
+
+@app.route("/api/cost", methods=["POST"])
+def api_cost():
+    """Ручное задание себестоимости товара (карточка товара). Пустое значение — стереть."""
+    d = request.get_json(force=True)
+    try:
+        pid = int(d.get("product_id") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "Некорректный товар"}), 400
+    v = _f(d.get("cost"))
+    if v is not None:
+        if v < 0:
+            return jsonify({"ok": False, "message": "Себестоимость не может быть меньше 0"}), 400
+        v = round(v, 2)
+    db.ex("UPDATE products SET cost=? WHERE product_id=?", (v, pid))
+    db.log("info", f"Себестоимость товара {pid}: {v}")
+    return jsonify({"ok": True, "cost": v})
+
+
+@app.route("/cost/import", methods=["POST"])
+def cost_import():
+    """Загрузка себестоимости из Excel (кнопка «Загрузить себестоимость (Excel)»)."""
+    f = request.files.get("file")
+    if not f:
+        flash("Файл не выбран")
+        return redirect(url_for("index"))
+    raw = f.read()
+    try:
+        rows, dups = parse_cost_rows(raw)
+    except Exception as e:
+        flash(f"Не удалось прочитать файл Excel: {e}")
+        return redirect(url_for("index"))
+    if not rows:
+        flash("В файле не найдены столбцы «Артикул»/«Себестоимость» или нет данных "
+              "(названия столбцов должны быть в одной из первых строк)")
+        return redirect(url_for("index"))
+    s = db.get_settings()
+    divider = _f(s.get("cost_divider"))
+    if not divider or divider <= 0:
+        divider = 1
+    offers = {}
+    for r in db.q("SELECT product_id, offer_id FROM products WHERE active=1"):
+        key = str(r["offer_id"]).strip()
+        offers.setdefault(key.lower(), r["product_id"])
+        offers.setdefault(key, r["product_id"])
+    loaded, missing, seen_miss = 0, [], set()
+    for art, cost in rows:
+        pid = offers.get(art.strip().lower()) or offers.get(art.strip())
+        if pid is None:
+            if art not in seen_miss:
+                missing.append(art)
+                seen_miss.add(art)
+            continue
+        db.ex("UPDATE products SET cost=? WHERE product_id=?", (round(cost / divider, 2), pid))
+        loaded += 1
+    dups_note = f"дублей артикулов {len(dups)} ({', '.join(dups[:30])})" if dups else "дублей нет"
+    db.log("info", f"Импорт себестоимости: загружено {loaded}, не найдено {len(missing)}, {dups_note}, "
+                   f"делитель наценки {divider:g}"
+                   + (f"; артикулы не найдены: {', '.join(missing[:30])}" if missing else ""))
+    msg = f"Себестоимость: загружено {loaded} (делитель наценки {divider:g})."
+    if dups:
+        msg += f" Дубли в файле — взята большая себестоимость: {', '.join(dups[:15])}"
+        if len(dups) > 15:
+            msg += f" и ещё {len(dups) - 15}"
+    if missing:
+        msg += f" Не найдено на Ozon ({len(missing)}): {', '.join(missing[:20])}"
+        if len(missing) > 20:
+            msg += f" и ещё {len(missing) - 20}"
+    flash(msg)
+    return redirect(url_for("index"))
+
+
+@app.route("/api/safe_min/<int:pid>", methods=["POST"])
+def api_safe_min(pid):
+    """Рассчитать безопасный минимум и применить к полю «Мин» одного товара."""
+    p = db.q("SELECT * FROM products WHERE product_id=?", (pid,), one=True)
+    if not p:
+        return jsonify({"ok": False, "message": "Товар не найден"}), 404
+    if db.is_locked(pid):
+        return jsonify({"ok": False, "message": "Товар «Под MPSpace»: значение только показано — "
+                                                 "перенесите его в MPSpace вручную."}), 409
+    v, reason = safe_min_calc(p, db.get_settings())
+    if v is None:
+        return jsonify({"ok": False, "message": reason}), 400
+    db.set_min(pid, v)
+    db.log("info", f"Безопасный минимум {p['offer_id']}: мин = {v} ₽")
+    return jsonify({"ok": True, "min": v, "message": f"Минимум {v} ₽ применён"})
+
+
+@app.route("/api/safe_min/batch", methods=["POST"])
+def api_safe_min_batch():
+    """Массово применить безопасный минимум (товары «Под MPSpace» пропускаются)."""
+    d = request.get_json(force=True)
+    ids = [int(x) for x in d.get("ids") or []]
+    s = db.get_settings()
+    done, skipped, errors = 0, 0, []
+    for pid in ids:
+        if db.is_locked(pid):
+            skipped += 1  # под MPSpace не применяем — только показываем значение
+            continue
+        p = db.q("SELECT * FROM products WHERE product_id=?", (pid,), one=True)
+        if not p:
+            continue
+        v, reason = safe_min_calc(p, s)
+        if v is None:
+            errors.append(f"{p['offer_id']}: {reason}")
+            continue
+        db.set_min(pid, v)
+        done += 1
+    db.log("info", f"Безопасный минимум (массово): применён к {done}, пропущено (MPSpace) {skipped}, "
+                   f"не посчитано {len(errors)}")
+    return jsonify({"ok": True, "done": done, "skipped": skipped, "errors": errors[:30]})
+
+
 def _period():
     """Период из запроса: days=1..31 или from/to (не больше 31 дня). Возвращает (from, to) строками."""
     from datetime import datetime, timedelta
@@ -622,7 +823,8 @@ def api_test():
 CSV_HEAD = ["product_id", "Артикул", "Название", "Цена", "Контролируемая цена", "Режим (watch/guard/hold)",
             "Минимум", "Максимум", "Цена удержания", "Допуск %", "Под MPSpace (1 = да)",
             "Тип контроля (seller/buyer)", "Стратегия при максимуме (0/1)", "Теги", "Остаток (шт.)",
-            "Акции (0/1/3)", "Вход в акции (RECOMMEND/AUTO)", "Отклонение от целевой %"]
+            "Акции (0/1/3)", "Вход в акции (RECOMMEND/AUTO)", "Отклонение от целевой %",
+            "Себестоимость, ₽"]
 
 
 @app.route("/rules.csv")
@@ -641,7 +843,8 @@ def rules_csv():
                     (r.get("control_basis") or ""), int(r.get("max_strategy") or 0), r.get("tags") or "",
                     num(p.get("stock_total")) if p.get("stock_total") is not None else "",
                     int(r.get("promo_mode") or 0), r.get("promo_entry") or "RECOMMEND",
-                    num(_f(r.get("promo_deviation_pct")) or 0)])
+                    num(_f(r.get("promo_deviation_pct")) or 0),
+                    num(p.get("cost")) if p.get("cost") is not None else ""])
     return Response("﻿" + buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": "attachment; filename=rules_ozon.csv"})
 
@@ -706,6 +909,11 @@ def rules_import():
             p0 = db.q("SELECT price FROM products WHERE product_id=?", (pid,), one=True)
             r = _hold_defaults(r, p0["price"] if p0 else None)
             db.save_rule(pid, **r)
+            # этап 3: себестоимость — новый столбец только в конец; пусто = оставить как есть
+            if len(row) > 18 and row[18].strip():
+                cv = num(row[18])
+                if cv is not None:
+                    db.ex("UPDATE products SET cost=? WHERE product_id=?", (round(cv, 2), pid))
             ok += 1
         except ValueError as e:
             bad.append(f"{row[1]}: {e}")

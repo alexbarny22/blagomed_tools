@@ -330,6 +330,18 @@ class MockOzonClient:
             },
             "marketing_actions": {"actions": ([{"title": "Скидка продавца", "date_from": "2026-10-01T00:00:00Z",
                                                 "date_to": "2026-11-30T00:00:00Z"}] if s["promo"] < 1 else [])},
+            # этап 3: расходы Ozon для расчёта прибыли (как в /v5/product/info/prices)
+            "acquiring": 14.0,
+            "commissions": {
+                "sales_percent_fbo": 17.0,
+                "sales_percent_fbs": 9.0,
+                "fbo_deliv_to_customer_amount": 55.0,
+                "fbs_deliv_to_customer_amount": 85.0,
+                "fbo_direct_flow_trans_min_amount": 120.0,
+                "fbo_direct_flow_trans_max_amount": 240.0,
+                "fbs_direct_flow_trans_min_amount": 60.0,
+                "fbs_direct_flow_trans_max_amount": 130.0,
+            },
         }
 
     def get_all_prices(self, visibility="ALL"):
