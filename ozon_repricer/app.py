@@ -291,7 +291,7 @@ def api_action_batch():
             done += 1
         else:
             errors.append(msg)
-    db.log("info", f"Акция {aid}: {'вход' if op == 'enter' else 'выход'} — выполнено {done}, "
+    db.log("info", f"Акция {aid}: {'вход' if op == 'enter' else 'выход'} — рекомендаций сохранено {done}, "
                    f"пропущено (MPSpace) {skipped}, ошибок {len(errors)}")
     return jsonify({"ok": True, "done": done, "skipped": skipped, "errors": errors[:10]})
 
@@ -684,7 +684,7 @@ def rules_import():
             cb = (row[11] if len(row) > 11 else (cur.get("control_basis") or "")).strip().lower()
             ms = (row[12] if len(row) > 12 else str(int(cur.get("max_strategy") or 0))).strip()
             tags = (row[13] if len(row) > 13 else (cur.get("tags") or "")).strip()[:500]
-            pm = (row[15] if len(row) > 15 else (cur.get("promo_mode") or 0)).strip()
+            pm = (str(row[15]) if len(row) > 15 else str(cur.get("promo_mode") or 0)).strip()
             pe = (row[16] if len(row) > 16 else (cur.get("promo_entry") or "RECOMMEND")).strip()
             dv = row[17] if len(row) > 17 else cur.get("promo_deviation_pct")
             dv = _f(dv) if dv not in (None, "") else None

@@ -130,32 +130,50 @@ class OzonClient:
         return data.get("result") or []
 
     def get_action_products(self, action_id) -> list:
-        """Товары, участвующие в акции (/v1/actions/products)."""
-        data = self._post("/v1/actions/products",
-                          {"action_id": action_id, "limit": 1000, "offset": 0})
-        return (data.get("result") or {}).get("products") or []
+        """Товары, участвующие в акции (/v2/actions/products, постранично по last_id, limit ≤ 100)."""
+        return self._action_pages("/v2/actions/products", action_id)
 
     def get_action_candidates(self, action_id) -> list:
-        """Товары-кандидаты для входа в акцию (/v1/actions/candidates)."""
-        data = self._post("/v1/actions/candidates",
-                          {"action_id": action_id, "limit": 1000, "offset": 0})
-        return (data.get("result") or {}).get("products") or []
+        """Товары-кандидаты для входа в акцию (/v2/actions/candidates, постранично по last_id)."""
+        return self._action_pages("/v2/actions/candidates", action_id)
 
-    def activate_action(self, action_id, products: list):
-        """Вход товаров в акцию (/v1/actions/products/activate).
-        products: [{product_id, action_price}]. Возвращает (product_ids, rejected)."""
-        data = self._post("/v1/actions/products/activate",
-                          {"action_id": action_id, "products": products})
-        res = data.get("result") or {}
-        return res.get("product_ids") or [], res.get("rejected") or []
+    def get_auto_add_products(self, action_id) -> list:
+        """Товары, которые Ozon добавит в акцию автоматически
+        (/v2/actions/auto-add/products/list, пагинация по offset; id товара — поле product_id)."""
+        return self._action_pages("/v2/actions/auto-add/products/list", action_id, offset=0)
 
-    def deactivate_action(self, action_id, product_ids: list):
-        """Выход товаров из акции (/v1/actions/products/deactivate).
-        Возвращает (product_ids, rejected)."""
-        data = self._post("/v1/actions/products/deactivate",
-                          {"action_id": action_id, "product_ids": [int(x) for x in product_ids]})
-        res = data.get("result") or {}
-        return res.get("product_ids") or [], res.get("rejected") or []
+    def _action_pages(self, path: str, action_id, limit: int = 100, offset=None) -> list:
+        """Чтение товаров акции постранично (лимит Ozon: 1..100 за запрос).
+
+        products/candidates идут по last_id: первая страница last_id="", дальше last_id
+        из ответа; стоп, если страница короче limit, last_id пустой или повторился.
+        auto-add идёт по offset. Незнакомые поля в ответе игнорируются.
+        """
+        limit = max(1, min(100, int(limit)))
+        items, last_id, seen = [], "", set()
+        for _ in range(100):
+            body = {"action_id": int(action_id), "limit": limit}
+            if offset is None:
+                body["last_id"] = last_id
+            else:
+                body["offset"] = offset
+            data = self._post(path, body)
+            res = data.get("result") or {}
+            batch = res.get("products") or []
+            items.extend(batch)
+            total = res.get("total") or 0
+            if not batch:
+                break
+            if offset is not None:
+                if len(batch) < limit or offset + len(batch) >= total:
+                    break
+                offset += len(batch)
+            else:
+                last_id = res.get("last_id") or ""
+                if len(batch) < limit or not last_id or last_id in seen:
+                    break
+                seen.add(last_id)
+        return items
 
 
 class MockOzonClient:
@@ -265,35 +283,36 @@ class MockOzonClient:
         a = self._get_action(action_id)
         return self._prod_rows(a["candidates"]) if a else []
 
-    def activate_action(self, action_id, products):
+    def get_auto_add_products(self, action_id):
+        """Товары, которые Ozon добавит в акцию автоматически
+        (живой метод /v2/actions/auto-add/products/list, id — поле product_id;
+        в моке имитируем: Ozon «добавит» всех кандидатов)."""
         a = self._get_action(action_id)
-        ok, rej = [], []
-        for p in products or []:
-            pid = int(p.get("product_id") or 0)
-            if not a:
-                rej.append({"product_id": pid, "reason": "акция не найдена"})
-                continue
-            s = MockOzonClient._state.get(pid)
-            if not s or pid not in a["candidates"]:
-                rej.append({"product_id": pid, "reason": "товар не подходит для этой акции"})
-                continue
-            ap = int(round(float(p.get("action_price") or s["price"])))
-            a["participants"][pid] = {"price": s["price"], "action_price": ap}
-            a["candidates"].pop(pid, None)
-            ok.append(pid)
-        return ok, rej
+        if not a:
+            return []
+        st = MockOzonClient._state
+        out = []
+        for pid, rec in (a.get("candidates") or {}).items():
+            s = st.get(pid, {})
+            out.append({"product_id": pid, "offer_id": s.get("offer_id"), "name": s.get("name"),
+                        "price": rec.get("price", s.get("price", 0)),
+                        "action_price_to_auto_add": rec.get("action_price", 0),
+                        "add_mode": "MANUAL"})
+        return out
 
-    def deactivate_action(self, action_id, product_ids):
-        a = self._get_action(action_id)
-        ok, rej = [], []
-        for pid in product_ids or []:
-            pid = int(pid)
-            if a and pid in a["participants"]:
-                del a["participants"][pid]
-                ok.append(pid)
-            else:
-                rej.append({"product_id": pid, "reason": "товар не участвует в акции"})
-        return ok, rej
+    def _page(self, d, limit, last_id):
+        """Имитация одной страницы /v2/actions/products|candidates (для проверки пагинации)."""
+        d = d or {}
+        rows = list(d.items())
+        start = 0
+        if last_id:
+            keys = list(d)
+            start = keys.index(last_id) + 1 if last_id in keys else len(keys)
+        page = rows[start:start + limit]
+        page_ids = [pid for pid, _ in page]
+        next_last = page_ids[-1] if (start + limit) < len(rows) else ""
+        return {"products": [self._prod_rows({pid: d[pid]})[0] for pid in page_ids],
+                "total": len(rows), "last_id": next_last}
 
     def _item(self, s):
         seller = round(s["price"] * s["promo"])

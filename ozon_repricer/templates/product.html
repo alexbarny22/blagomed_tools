@@ -105,8 +105,9 @@
     <div class="panel">
       <h2>Акции Ozon</h2>
       <p class="muted" style="font-size:12.5px;margin-top:-6px">«Только выходить» — выход при цене в акции ниже минимума селлера.
-        «Входить и выходить» — дополнительно вход в выгодные кандидаты с наценкой к целевой цене. Под MPSpace действия
-        записываются в журнал, но в Ozon не отправляются.</p>
+        «Входить и выходить» — дополнительно вход в выгодные кандидаты с наценкой к целевой цене. Запись в Ozon
+        временно отключена: с 19.10.2026 Ozon убрал методы акций v1, новые пока не подтверждены —
+        входы/выходы сохраняются в журнал только как рекомендации (кнопки со «*»).</p>
       <div class="form-row"><label>Режим акций</label>
         <select id="r-promo">
           <option value="0" {{ 'selected' if rule.promo_mode|int == 0 }}>не трогать</option>
@@ -129,9 +130,9 @@
             <td class="num">{{ a.action_price|int if a.action_price else '—' }}</td>
             <td style="white-space:nowrap">
               {% if a.kind == 'candidate' %}
-              <button class="btn small" onclick="promoAction({{ a.action_id }}, 'enter')">вход</button>
+              <button class="btn small" title="Сейчас только рекомендация (запись в Ozon не выполняется)" onclick="promoAction({{ a.action_id }}, 'enter')">вход*</button>
               {% elif a.kind == 'participant' %}
-              <button class="btn small" onclick="promoAction({{ a.action_id }}, 'exit')">выход</button>
+              <button class="btn small" title="Сейчас только рекомендация (запись в Ozon не выполняется)" onclick="promoAction({{ a.action_id }}, 'exit')">выход*</button>
               {% endif %}
             </td>
           </tr>
@@ -176,7 +177,7 @@ async function saveRule() {
   if (r.ok) setTimeout(() => location.reload(), 900);
 }
 async function promoAction(actionId, op) {
-  if (!confirm(op === 'enter' ? 'Войти в акцию? Цена будет выбрана по режиму «Вход в акции» и наценке к целевой.' : 'Выйти из акции?')) return;
+  if (!confirm(op === 'enter' ? 'Сохранить рекомендацию «вход»? Цена будет выбрана по режиму «Вход в акции» и наценке к целевой. В Ozon пока не отправится (методы записи не подтверждены).' : 'Сохранить рекомендацию «выход»? Из акции пока ничего не выведется — методы записи Ozon не подтверждены.')) return;
   const r = await api('/api/action/' + PID, {action_id: actionId, op});
   toast(r.ok ? r.message : r.message, 6000);
   if (r.ok) setTimeout(() => location.reload(), 1200);

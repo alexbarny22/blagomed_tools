@@ -94,8 +94,8 @@
   <span class="sep"></span>
   <label>Акция Ozon</label>
   <select id="b-action"><option value="">— акции загружаются… —</option></select>
-  <button class="btn" onclick="bulkPromo('enter')">+ в акцию</button>
-  <button class="btn" onclick="bulkPromo('exit')">− из акции</button>
+  <button class="btn" onclick="bulkPromo('enter')" title="Сейчас только рекомендация: методы записи в акцию Ozon не подтверждены">+ в акцию</button>
+  <button class="btn" onclick="bulkPromo('exit')" title="Сейчас только рекомендация: методы записи в акцию Ozon не подтверждены">− из акции</button>
   <span class="spacer" style="flex:1"></span>
   <button class="btn" onclick="selectNone()">Снять выбор</button>
 </div>
@@ -349,14 +349,14 @@ async function bulkPromo(op) {
   if (op === 'enter') {
     const price = prompt(`Цена в акции «${selectedActionTitle()}» для ${sel.size} товаров (₽). Оставьте пустым — возьмём рекомендуемую цену из кандидатов:`, '');
     if (price === null) return;
-    if (!confirm(`Отправить ${sel.size} товаров в акцию «${selectedActionTitle()}»${price.trim() ? ' по цене ' + price.trim() + ' ₽' : ' (рекомендуемая цена)'}?`)) return;
+    if (!confirm(`Сохранить рекомендацию: ${sel.size} товаров → акция «${selectedActionTitle()}»${price.trim() ? ' по цене ' + price.trim() + ' ₽' : ' (рекомендуемая цена)'}? В Ozon пока не отправится: методы записи в акцию не подтверждены.`)) return;
     const r = await api('/api/action/batch', {ids: [...sel], action_id: aid, op: 'enter', action_price: price.trim()});
-    toast(`Добавлено в акцию: ${r.done}` + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')
+    toast(`Рекомендаций «вход» сохранено: ${r.done}` + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')
       + (r.errors.length ? '. Ошибки: ' + r.errors.join('; ') : ''), 6000);
   } else {
-    if (!confirm(`Вывести ${sel.size} товаров из акции «${selectedActionTitle()}»?`)) return;
+    if (!confirm(`Сохранить рекомендацию: ${sel.size} товаров из акции «${selectedActionTitle()}»? Из акции пока ничего не выведется — методы записи Ozon не подтверждены.`)) return;
     const r = await api('/api/action/batch', {ids: [...sel], action_id: aid, op: 'exit'});
-    toast(`Выведено из акции: ${r.done}` + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')
+    toast(`Рекомендаций «выход» сохранено: ${r.done}` + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')
       + (r.errors.length ? '. Ошибки: ' + r.errors.join('; ') : ''), 6000);
   }
   load(); loadActions();

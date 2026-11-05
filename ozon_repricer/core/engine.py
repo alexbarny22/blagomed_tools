@@ -639,10 +639,11 @@ class Repricer:
         return bool(r and r["n"] > 0)
 
     def _apply_promo(self, client, s, dry) -> int:
-        """Автоматические входы и выходы из акций по правилам. Возвращает число выполненных действий.
+        """Автовходы и автовыходы из акций по правилам. Возвращает число записанных действий.
 
-        Промо-цикл работает для товаров с promo_mode != 0, в том числе «под MPSpace» и в режиме
-        тренировки — такие товары только записывают в журнал, что репрайсер сделал бы.
+        С 19.10.2026 Ozon отключил методы товаров акций v1, новые методы входа/выхода
+        пока не подтверждены — поэтому enter/exit фиксируются в журнале ТОЛЬКО как
+        рекомендации (dry_run=1), в Ozon ничего не отправляется. Это касается и боевого режима.
         """
         rules = {r["product_id"]: r for r in db.q(
             "SELECT * FROM rules WHERE COALESCE(promo_mode,0) != 0")}
@@ -659,50 +660,32 @@ class Repricer:
                     continue
                 source = "акция: вход" if d["decision"] == "enter" else "акция: выход"
                 if self._promo_recent(p["product_id"], d["action_id"], source):
-                    continue  # действие с этой акцией уже делали недавно
+                    continue  # рекомендацию с этой акцией уже писали недавно
                 mark = f"[акция {d['action_id']}]"
                 price_after = (d["enter_price"] or p["price"]) if d["decision"] == "enter" else p["price"]
                 reason = f"{d['title']}: {d['reason']} {mark}"
-                min_after = _f(rule.get("min_price"))
-                base = (db.now(), p["product_id"], p["offer_id"],
-                        controlled_price(p, rule, s), p["price"], price_after,
-                        p.get("old_price") or 0, min_after)
-                if locked or dry:
-                    reason += " — товар под MPSpace, действие не выполнено" if locked \
-                        else " — режим тренировки, действие не выполнено"
-                    db.ex("""INSERT INTO changes(ts, product_id, offer_id, controlled_before, price_before,
-                             price_after, old_price_after, min_after, reason, source, dry_run, ok)
-                             VALUES(?,?,?,?,?,?,?,?,?,?,1,1)""", (*base, reason, source))
-                    done += 1
-                    continue
-                ok, err = self._promo_send(client, d, p)
+                if locked:
+                    reason += " — товар под MPSpace, действие не выполнено"
+                elif dry:
+                    reason += " — режим тренировки, действие не выполнено"
+                else:
+                    reason += " — запись в акцию Ozon пока недоступна (методы не подтверждены), только рекомендация"
                 db.ex("""INSERT INTO changes(ts, product_id, offer_id, controlled_before, price_before,
-                         price_after, old_price_after, min_after, reason, source, dry_run, ok, error)
-                         VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)""",
-                      (*base, reason, source, int(ok), err or (None if ok else "Ozon не подтвердил действие")))
-                if ok:
-                    done += 1
+                         price_after, old_price_after, min_after, reason, source, dry_run, ok)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,1,1)""",
+                      (db.now(), p["product_id"], p["offer_id"],
+                       controlled_price(p, rule, s), p["price"], price_after,
+                       p.get("old_price") or 0, _f(rule.get("min_price")), reason, source))
+                done += 1
         return done
 
-    def _promo_send(self, client, d, p):
-        """Выполнение входа/выхода товара в акцию. Возвращает (ok, error)."""
-        pid = p["product_id"]
-        try:
-            if d["decision"] == "enter":
-                ok_ids, rejected = client.activate_action(
-                    d["action_id"], [{"product_id": pid, "action_price": int(d["enter_price"] or p["price"])}])
-            else:
-                ok_ids, rejected = client.deactivate_action(d["action_id"], [pid])
-        except OzonError as e:
-            return False, str(e)[:300]
-        if pid in (ok_ids or []) and not rejected:
-            return True, None
-        rej = next((r for r in rejected or [] if str(r.get("product_id") or r.get("id") or "") == str(pid)),
-                   None) or (rejected or [{}])[0]
-        return False, str(rej.get("reason") or rej)[:300]
-
     def action_manual(self, pid, action_id, op, action_price=None):
-        """Ручной вход/выход товара в акцию (подтверждается в карточке товара). (ok, message)."""
+        """Ручной вход/выход товара в акцию (из карточки товара). (ok, message).
+
+        Методы входа/выхода товара в акцию после отключения v1 (19.10.2026) не подтверждены,
+        поэтому действие НЕ отправляется в Ozon: в «Журнал изменений» пишется только
+        рекомендация (dry_run=1), как и в автоматическом режиме.
+        """
         s = db.get_settings()
         p = db.q("SELECT * FROM products WHERE product_id=?", (pid,), one=True)
         if not p:
@@ -710,9 +693,8 @@ class Repricer:
         aid = int(action_id)
         op = "enter" if op in ("activate", "enter") else "exit"
         rule = db.get_rule(pid)
-        client = make_client(s["client_id"], s["api_key"])
+        price_after = p["price"] or 0
         if op == "enter":
-            source = "акция: вход (вручную)"
             ap = _f(action_price)
             if not ap or ap <= 0:
                 cand = db.q("SELECT * FROM product_actions WHERE product_id=? AND action_id=? "
@@ -723,30 +705,19 @@ class Repricer:
             mn = _f(rule.get("min_price"))
             if mn and ap < mn - 0.5:
                 raise OzonError(f"Цена акции {round(ap)} ₽ ниже минимума селлера {round(mn)} ₽ — вход запрещён")
-            ap = int(round(ap))
-            price_after = float(ap)
-            ok_ids, rejected = client.activate_action(aid, [{"product_id": pid, "action_price": ap}])
-        else:
-            source = "акция: выход (вручную)"
-            ok_ids, rejected = client.deactivate_action(aid, [pid])
-            price_after = p["price"] or 0
-        ok = pid in (ok_ids or []) and not rejected
-        rej = next((r for r in rejected or [] if str(r.get("product_id") or r.get("id") or "") == str(pid)),
-                   None) or (rejected or [{}])[0]
-        err = str(rej.get("reason") or rej)[:300] if not ok else None
+            price_after = float(round(ap))
+        source = "акция: вход (вручную)" if op == "enter" else "акция: выход (вручную)"
         title = db.q("SELECT title FROM product_actions WHERE product_id=? AND action_id=? LIMIT 1",
                      (pid, aid), one=True) or {}
-        reason = (f"{title.get('title') or f'акция {aid}'}: "
-                  f"{'вход' if op == 'enter' else 'выход'} вручную [акция {aid}]")
+        t = title.get("title") or f"акция {aid}"
+        reason = (f"{t}: {'вход' if op == 'enter' else 'выход'} вручную [акция {aid}] — "
+                  f"запись в Ozon пока недоступна (методы не подтверждены), только рекомендация")
         db.ex("""INSERT INTO changes(ts, product_id, offer_id, controlled_before, price_before, price_after,
-                 old_price_after, min_after, reason, source, dry_run, ok, error)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)""",
+                 old_price_after, min_after, reason, source, dry_run, ok)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,1,1)""",
               (db.now(), pid, p["offer_id"], controlled_price(p, rule, s), p["price"], price_after,
-               p.get("old_price") or 0, _f(rule.get("min_price")), reason, source, int(ok), err))
-        if ok:
-            verb = "добавлен в акцию" if op == "enter" else "выведен из акции"
-            return True, f"Готово: товар {verb}"
-        return False, f"Ozon отклонил: {err}"
+               p.get("old_price") or 0, _f(rule.get("min_price")), reason, source))
+        return True, f"Сохранена рекомендация: {t}, {'вход' if op == 'enter' else 'выход'} (запись в Ozon включим, когда подтвердим методы)"
 
     def manual_set(self, pid, price, old_price, min_price):
         s = db.get_settings()
