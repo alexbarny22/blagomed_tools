@@ -2,6 +2,7 @@
 import os
 import time
 import random
+from datetime import datetime, timedelta
 import requests
 
 BASE_URL = "https://api-seller.ozon.ru"
@@ -95,6 +96,85 @@ class OzonClient:
             result.extend(data.get("result") or [])
         return result
 
+    # --- акции ---
+    def _get(self, path: str) -> dict:
+        if not self.client_id or not self.api_key:
+            raise OzonError("Не заданы Client-Id и Api-Key (страница «Настройки»).")
+        headers = {
+            "Client-Id": self.client_id,
+            "Api-Key": self.api_key,
+            "Content-Type": "application/json",
+        }
+        last_err = None
+        for attempt in range(5):
+            try:
+                r = self.session.get(BASE_URL + path, headers=headers, timeout=self.timeout)
+            except requests.RequestException as e:
+                last_err = f"Нет связи с Ozon: {e}"
+                time.sleep(2 + attempt * 3)
+                continue
+            if r.status_code == 429 or r.status_code >= 500:
+                last_err = f"Ozon ответил {r.status_code}: {r.text[:300]}"
+                time.sleep(2 + attempt * 3)
+                continue
+            if r.status_code in (401, 403):
+                raise OzonError("Ozon отклонил ключи (проверьте Client-Id и Api-Key, у ключа должны быть права на цены).")
+            if r.status_code != 200:
+                raise OzonError(f"Ozon ответил {r.status_code}: {r.text[:500]}")
+            return r.json()
+        raise OzonError(last_err or "Ozon не отвечает")
+
+    def get_actions(self) -> list:
+        """Акции, к которым могут присоединиться продавцы (/v1/actions, GET)."""
+        data = self._get("/v1/actions")
+        return data.get("result") or []
+
+    def get_action_products(self, action_id) -> list:
+        """Товары, участвующие в акции (/v2/actions/products, постранично по last_id, limit ≤ 100)."""
+        return self._action_pages("/v2/actions/products", action_id)
+
+    def get_action_candidates(self, action_id) -> list:
+        """Товары-кандидаты для входа в акцию (/v2/actions/candidates, постранично по last_id)."""
+        return self._action_pages("/v2/actions/candidates", action_id)
+
+    def get_auto_add_products(self, action_id) -> list:
+        """Товары, которые Ozon добавит в акцию автоматически
+        (/v2/actions/auto-add/products/list, пагинация по offset; id товара — поле product_id)."""
+        return self._action_pages("/v2/actions/auto-add/products/list", action_id, offset=0)
+
+    def _action_pages(self, path: str, action_id, limit: int = 100, offset=None) -> list:
+        """Чтение товаров акции постранично (лимит Ozon: 1..100 за запрос).
+
+        products/candidates идут по last_id: первая страница last_id="", дальше last_id
+        из ответа; стоп, если страница короче limit, last_id пустой или повторился.
+        auto-add идёт по offset. Незнакомые поля в ответе игнорируются.
+        """
+        limit = max(1, min(100, int(limit)))
+        items, last_id, seen = [], "", set()
+        for _ in range(100):
+            body = {"action_id": int(action_id), "limit": limit}
+            if offset is None:
+                body["last_id"] = last_id
+            else:
+                body["offset"] = offset
+            data = self._post(path, body)
+            res = data.get("result") or {}
+            batch = res.get("products") or []
+            items.extend(batch)
+            total = res.get("total") or 0
+            if not batch:
+                break
+            if offset is not None:
+                if len(batch) < limit or offset + len(batch) >= total:
+                    break
+                offset += len(batch)
+            else:
+                last_id = res.get("last_id") or ""
+                if len(batch) < limit or not last_id or last_id in seen:
+                    break
+                seen.add(last_id)
+        return items
+
 
 class MockOzonClient:
     """Имитация Ozon для проверки без настоящих ключей (переменная OZON_MOCK=1)."""
@@ -120,6 +200,119 @@ class MockOzonClient:
                     "stock_fbs": rnd.choice([0, 1, 3, 6, 11]),
                 }
             MockOzonClient._state = st
+        if getattr(MockOzonClient, "_actions", None) is None:
+            MockOzonClient._actions = self._build_actions()
+
+    @staticmethod
+    def _build_actions(action_id=None):
+        """Детерминированная имитация акций Ozon (3 акции, завершившаяся — при «отключённой»)."""
+        rnd = random.Random(11)
+        st = MockOzonClient._state
+
+        def iso_dt(dt):
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def days(delta):
+            now = datetime.utcnow()
+            return iso_dt(now), iso_dt(now + timedelta(days=delta)), iso_dt(now - timedelta(days=abs(delta)))
+
+        _, end14, start5 = days(14)
+        _, end21, start7 = days(21)
+        _, end60, start90 = days(60)
+        acts = {
+            63301: {"id": 63301, "title": "Скидка продавца: медтехника",
+                    "date_start": start5, "date_end": end14, "status": "STARTED",
+                    "participants": {}, "candidates": {}},
+            63302: {"id": 63302, "title": "Умная скидка Лабиринта",
+                    "date_start": start7, "date_end": end21, "status": "NOT_STARTED",
+                    "participants": {}, "candidates": {}},
+            63303: {"id": 63303, "title": "Распродажа лета",
+                    "date_start": start90, "date_end": end60, "status": "ENDED",
+                    "participants": {}, "candidates": {}},
+        }
+        for pid, s in st.items():
+            promo = s.get("promo", 1.0)
+            price = float(s["price"])
+            if promo < 1:  # уже в «Скидке продавца»
+                acts[63301]["participants"][pid] = {"price": price, "action_price": round(price * 0.85),
+                                                    "max_action_price": round(price * 0.9)}
+            else:          # кандидаты для «Скидки продавца»
+                acts[63301]["candidates"][pid] = {"price": price, "action_price": round(price * 0.85),
+                                                  "max_action_price": round(price * 0.97)}
+            # «Умная скидка»: все — кандидаты
+            acts[63302]["candidates"][pid] = {"price": price, "action_price": round(price * 0.8),
+                                              "max_action_price": round(price * 0.95)}
+            # изредка «случайная» цена акции (проверка, что берём предложение Ozon)
+            if rnd.random() < 0.2:
+                crosses = round(price * rnd.choice([0.5, 0.6, 0.7]))
+                acts[63302]["candidates"][pid]["action_price"] = max(crosses, 1)
+        return acts
+
+    def _action_meta(self, a):
+        return {"id": a["id"], "title": a["title"], "date_start": a["date_start"],
+                "date_end": a["date_end"], "status": a["status"],
+                "is_participating": bool(a["participants"])}
+
+    def _get_action(self, action_id):
+        a = MockOzonClient._actions.get(action_id)
+        if a is None:
+            try:
+                a = MockOzonClient._actions.get(int(action_id or 0))
+            except (TypeError, ValueError):
+                a = None
+        return a
+
+    def _prod_rows(self, d):
+        st = MockOzonClient._state
+        out = []
+        for pid, rec in (d or {}).items():
+            s = st.get(pid, {})
+            out.append({"id": pid, "price": rec.get("price", s.get("price", 0)),
+                        "action_price": rec.get("action_price", 0),
+                        "max_action_price": rec.get("max_action_price", 0)})
+        return out
+
+    def get_actions(self):
+        return [self._action_meta(a) for a in MockOzonClient._actions.values()]
+
+    def get_action_products(self, action_id):
+        a = self._get_action(action_id)
+        return self._prod_rows(a["participants"]) if a else []
+
+    def get_action_candidates(self, action_id):
+        a = self._get_action(action_id)
+        return self._prod_rows(a["candidates"]) if a else []
+
+    def get_auto_add_products(self, action_id):
+        """Товары, которые Ozon добавит в акцию автоматически
+        (живой метод /v2/actions/auto-add/products/list, id — поле product_id;
+        в моке имитируем: Ozon «добавит» всех кандидатов)."""
+        a = self._get_action(action_id)
+        if not a:
+            return []
+        st = MockOzonClient._state
+        out = []
+        for pid, rec in (a.get("candidates") or {}).items():
+            s = st.get(pid, {})
+            out.append({"product_id": pid, "offer_id": s.get("offer_id"), "name": s.get("name"),
+                        "price": rec.get("price", s.get("price", 0)),
+                        "action_price_to_auto_add": rec.get("action_price", 0),
+                        "add_mode": "MANUAL"})
+        return out
+
+    def _page(self, d, limit, last_id):
+        """Имитация одной страницы /v2/actions/products|candidates (для проверки пагинации)."""
+        d = d or {}
+        rows = list(d.items())
+        start = 0
+        if last_id:
+            keys = list(d)
+            start = keys.index(last_id) + 1 if last_id in keys else len(keys)
+        page = rows[start:start + limit]
+        page_ids = [pid for pid, _ in page]
+        next_last = page_ids[-1] if (start + limit) < len(rows) else ""
+        return {"products": [self._prod_rows({pid: d[pid]})[0] for pid in page_ids],
+                "total": len(rows), "last_id": next_last}
 
     def _item(self, s):
         seller = round(s["price"] * s["promo"])

@@ -12,6 +12,12 @@ from .ozon import make_client, OzonError
 
 MODES = {"watch": "Только следить", "guard": "Держать в коридоре", "hold": "Держать цену"}
 
+# Поддержка акций Ozon (этап 2):
+#  promo_mode: 0 — акции не трогаем, 1 — только выходим, 3 — входим и выходим.
+#  promo_entry: RECOMMEND — вход только вручную (репрайсер рекомендует), AUTO — входим автоматически.
+PROMO_MODES = {0: "акции не трогать", 1: "выходить из акций", 3: "входить и выходить"}
+PROMO_ENTRY = {"RECOMMEND": "только рекомендации", "AUTO": "входить автоматически"}
+
 
 def _f(v):
     try:
@@ -261,13 +267,11 @@ def plan_change(p: dict, rule: dict, s: dict):
     if new_price < lo:
         new_price, limited = lo, f" (ограничено шагом {int(step * 100)}%)"
     if mn and new_price < mn:
-        # подъём до минимума разрешён сразу — защита от убытка, даже если шаг меньше
+        # подъём до минимума разрешён сразу — защита от убытка, даже если шаг меньше;
+        # ограничение шагом снимаем всегда, раз мы выставляем минимум целиком
         new_price = math.ceil(mn)
-        if new_price > hst:
-            limited = ""
-            limit_note = " (подъём до минимума без ограничения шага)"
-        else:
-            limit_note = ""
+        limited = ""
+        limit_note = " (подъём до минимума без ограничения шага)" if new_price > hst else ""
     else:
         limit_note = ""
     if abs(new_price - price) < 1:
@@ -309,6 +313,87 @@ def guard_against_loops(p, plan, s):
     return None
 
 
+# ---------- акции Ozon (этап 2) ----------
+def _action_price(rec: dict) -> float:
+    """Цена товара в акции: заданная цена акции, иначе обычная цена товара."""
+    v = _f(rec.get("action_price"))
+    if v:
+        return v
+    return _f(rec.get("price"))
+
+
+def _enter_price(rec: dict) -> float:
+    """Цена для входа в акцию: предложение акции, иначе максимальная цена акции, иначе цена товара."""
+    v = _f(rec.get("action_price"))
+    if v and v > 0:
+        return v
+    v = _f(rec.get("max_action_price"))
+    if v and v > 0:
+        return v
+    return _f(rec.get("price"))
+
+
+def promo_decisions(p: dict, rule: dict, s: dict) -> list:
+    """Решения репрайсера по каждой акции товара (данные из таблицы product_actions).
+
+    Возвращает список словарей с полями: action_id, title, date_from, date_to, kind,
+    price, action_price, max_action_price, enter_price, decision, reason.
+    decision: enter — войти, exit — выйти, keep — остаться в акции, hint — можно войти
+    (только рекомендация), skip — ничего не делаем, ban — вход запрещён (ниже минимума селлера).
+    """
+    pid = p["product_id"]
+    mn = _f(rule.get("min_price"))
+    tg = _f(rule.get("target"))
+    mode = int(rule.get("promo_mode") or 0)
+    entry = ((rule.get("promo_entry") or "RECOMMEND").strip().upper()) or "RECOMMEND"
+    dev = _f(rule.get("promo_deviation_pct")) or 0
+    out = []
+    for a in db.get_product_actions(pid):
+        kind = (a.get("kind") or "candidate").lower()
+        d = {"action_id": a["action_id"], "title": a.get("title") or f"акция {a['action_id']}",
+             "date_from": a.get("date_from") or "", "date_to": a.get("date_to") or "",
+             "kind": kind, "price": _f(a.get("price")), "action_price": _f(a.get("action_price")),
+             "max_action_price": _f(a.get("max_action_price")), "enter_price": None}
+        ep = _enter_price(a)
+        d["enter_price"] = round(ep) if ep else None
+        if kind == "participant":
+            ap = _action_price(a)
+            if not ap:
+                d.update(decision="skip", reason="в акции нет данных о цене")
+            # правило безопасности: если цена в акции ниже минимума селлера — выходим всегда
+            elif mn and ap and ap < mn - 0.5:
+                d.update(decision="exit", reason=f"цена в акции {round(ap)} ₽ ниже минимума "
+                                                 f"селлера {round(mn)} ₽")
+            elif mode == 0:
+                d.update(decision="keep", reason="акции не трогаем (выбрано в правиле)")
+            elif mode == 1:
+                d.update(decision="exit", reason="выбрано правило «выходить из акций»")
+            elif mode == 3 and entry == "AUTO" and tg and ap and ap < tg * (1 - dev / 100) - 0.5:
+                d.update(decision="exit", reason=f"цена в акции ниже допустимой: цель "
+                                                 f"{round(tg)} ₽ минус {dev:g}%")
+            else:
+                d.update(decision="keep", reason="цена в акции допустима, остаёмся")
+        else:
+            if not ep:
+                d.update(decision="skip", reason="нет данных о цене для входа")
+            elif mn and ep < mn - 0.5:
+                d.update(decision="ban", reason=f"вход запрещён: цена акции {round(ep)} ₽ "
+                                                f"ниже минимума селлера {round(mn)} ₽")
+            elif mode == 0:
+                d.update(decision="skip", reason="акции не трогаем (выбрано в правиле)")
+            elif mode == 1:
+                d.update(decision="skip", reason="правило только на выход из акций")
+            elif entry != "AUTO":
+                d.update(decision="hint", reason=f"можно войти по цене акции {round(ep)} ₽")
+            elif tg and ep < tg * (1 - dev / 100) - 0.5:
+                d.update(decision="skip", reason=f"не входим: цена акции ниже допустимой "
+                                                 f"(цель {round(tg)} ₽ минус {dev:g}%)")
+            else:
+                d.update(decision="enter", reason=f"входим: цена акции {round(ep)} ₽")
+        out.append(d)
+    return out
+
+
 class Repricer:
     def __init__(self):
         self.lock = threading.Lock()
@@ -316,9 +401,10 @@ class Repricer:
                        "last_ok": None, "next_run": None}
         self._wake = threading.Event()
         self._stop = False
+        self.force_actions = False  # «Проверить сейчас»: перечитать акции даже внутри интервала
 
     # ---------- синхронизация ----------
-    def sync(self, client, s):
+    def sync(self, client, s, force_actions=False):
         items = client.get_all_prices(s.get("visibility") or "ALL")
         # остатки FBO/FBS/FBP; ошибка получения остатков НЕ должна ломать проверку цен
         stocks = {}
@@ -408,11 +494,24 @@ class Repricer:
                           (inf.get("name"), sku, main_image(inf), int(inf.get("id"))))
             except Exception as e:
                 db.log("warn", f"Не удалось получить названия товаров: {e}")
+        if hasattr(client, "get_actions"):  # поддержка акций есть и у Ozon, и у мока
+            try:
+                self._sync_actions(client, force=force_actions)
+            except Exception as e:
+                # любая ошибка синхронизации акций не должна ронять проверку цен
+                db.log("warn", f"Синхронизация акций: {e}")
         return len(items)
 
     # ---------- применение правил ----------
     def apply_rules(self, client, s):
+        """Применение правил цен и акций. Возвращает (sent, errors, skipped, promo_done)."""
         dry = s.get("dry_run") == "1"
+        sent, errors, skipped = self._apply_prices(client, s, dry)
+        promo_done = self._apply_promo(client, s, dry)
+        return sent, errors, skipped, promo_done
+
+    def _apply_prices(self, client, s, dry):
+        """Изменение цен селлера по правилам min/max/цели."""
         rules = {r["product_id"]: r for r in db.q(
             "SELECT * FROM rules WHERE mode IN ('guard','hold') AND COALESCE(locked, 0)=0")}
         if not rules:
@@ -480,6 +579,200 @@ class Repricer:
                     errors += 1
         return sent, errors, skipped
 
+    # ---------- акции ----------
+    def _sync_actions(self, client, force=False):
+        """Актуализация участия товаров в акциях Ozon (product_actions) и автодобавлений (auto_add).
+
+        Акции перечитываются не чаще раза в actions_interval_min минут (по умолчанию 120)
+        и всегда при принудительном запуске («Проверить сейчас»). Решения по ценам работают
+        на каждом запуске независимо от этого интервала.
+
+        Любая ошибка здесь (OzonError, ValueError, KeyError, ошибка разбора JSON) НЕ должна
+        ронять проверку цен: пишем предупреждение в «События» и продолжаем. Для акции, которую
+        прочитать не удалось, прежние строки в базе сохраняются. Полностью удаляются только
+        акции, которых больше нет в /v1/actions или у которых истёк date_end.
+        """
+        s = db.get_settings()
+        interval = max(0, int(_f(s.get("actions_interval_min")) or 120))
+        last = s.get("actions_synced_at") or ""
+        if not force and interval and last:
+            try:
+                last_dt = datetime.strptime(last[:19], "%Y-%m-%d %H:%M:%S")
+                if datetime.now() - last_dt < timedelta(minutes=interval):
+                    return  # ещё не время перечитывать акции
+            except ValueError:
+                pass
+        try:
+            all_actions = client.get_actions()
+        except Exception as e:
+            db.log("warn", f"Акции не получены (проверьте права ключа): {e}")
+            return
+        if not all_actions:
+            # пустому списку не доверяем: ничего не стираем, чтобы не потерять данные акций
+            db.log("warn", "Акции не получены (сервер вернул пустой список) — прежние данные сохранены")
+            return
+        now = datetime.utcnow()
+        active, expired_aids, api_ids = [], set(), set()
+        for a in all_actions:
+            try:
+                aid = int(a.get("id") or 0)
+            except (TypeError, ValueError):
+                aid = 0
+            if aid:
+                api_ids.add(aid)
+            end = (a.get("date_end") or "").strip()
+            if end:
+                try:
+                    end_dt = datetime.strptime(end[:19], "%Y-%m-%dT%H:%M:%S")
+                except ValueError:
+                    end_dt = None
+                if end_dt is not None and end_dt < now:
+                    if aid:
+                        expired_aids.add(aid)
+                    continue
+            active.append(a)
+        if len(active) > 40:
+            db.log("warn", f"Активных акций больше 40 ({len(active)}) — перечитаны будут только "
+                           f"первые 40, остальные сохраняют прежние данные")
+        # удаляем полностью только акции, которых уже нет в /v1/actions, или у которых истёк date_end
+        db_ids = {r["action_id"] for r in db.q("SELECT DISTINCT action_id FROM product_actions")}
+        gone_aids = ((db_ids - api_ids) | expired_aids) & db_ids
+        rows, auto_rows = [], []
+        reset_pa, reset_aa = set(), set()
+        for a in active[:40]:
+            try:
+                aid = int(a.get("id") or 0)
+            except (TypeError, ValueError):
+                aid = 0
+            if not aid:
+                continue
+            title = a.get("title") or ""
+            date_from, date_to = a.get("date_start"), a.get("date_end")
+            act_rows = []
+            try:
+                for pr in client.get_action_products(aid) or []:
+                    pid = int(pr.get("id") or pr.get("product_id") or 0)
+                    if pid:
+                        act_rows.append((pid, aid, "participant", title, date_from, date_to, "STARTED",
+                                         _f(pr.get("price")), _f(pr.get("action_price")),
+                                         _f(pr.get("max_action_price"))))
+                for pr in client.get_action_candidates(aid) or []:
+                    pid = int(pr.get("id") or pr.get("product_id") or 0)
+                    if pid:
+                        act_rows.append((pid, aid, "candidate", title, date_from, date_to, "STARTED",
+                                         _f(pr.get("price")), _f(pr.get("action_price")),
+                                         _f(pr.get("max_action_price"))))
+            except Exception as e:
+                db.log("warn", f"Акция «{title}» ({aid}): {e}")
+                continue  # акция не прочитана — её прежние данные в базе сохраняются
+            rows.extend(act_rows)
+            reset_pa.add(aid)
+            # «Ozon добавит сам по цене X» — ошибка этого метода только предупреждение
+            try:
+                aa_rows = []
+                for pr in client.get_auto_add_products(aid) or []:
+                    pid = int(pr.get("product_id") or pr.get("id") or 0)
+                    ap = _f(pr.get("action_price_to_auto_add"))
+                    if pid and ap:
+                        aa_rows.append((pid, aid, ap, db.now()))
+                auto_rows.extend(aa_rows)
+                reset_aa.add(aid)
+            except Exception as e:
+                db.log("warn", f"Акция «{title}» ({aid}): автодобавление не получено: {e}")
+        try:
+            db.save_actions(rows, gone_aids, reset_pa, reset_aa, auto_rows)
+            db.set_setting("actions_synced_at", db.now())
+        except Exception as e:
+            db.log("warn", f"Не удалось сохранить данные акций: {e}")
+
+    def _promo_recent(self, pid, action_id, source) -> bool:
+        """Действие с этой акцией уже записывалось за последние 12 часов (реальное или тренировочное)."""
+        since = (datetime.now() - timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
+        r = db.q("SELECT COUNT(*) AS n FROM changes WHERE product_id=? AND source=? AND ts>=? "
+                 "AND reason LIKE ?", (pid, source, since, f"%[акция {action_id}]%"), one=True)
+        return bool(r and r["n"] > 0)
+
+    def _apply_promo(self, client, s, dry) -> int:
+        """Автовходы и автовыходы из акций по правилам. Возвращает число записанных действий.
+
+        С 19.10.2026 Ozon отключил методы товаров акций v1, новые методы входа/выхода
+        пока не подтверждены — поэтому enter/exit фиксируются в журнале ТОЛЬКО как
+        рекомендации (dry_run=1), в Ozon ничего не отправляется. Это касается и боевого режима.
+        """
+        rules = {r["product_id"]: r for r in db.q(
+            "SELECT * FROM rules WHERE COALESCE(promo_mode,0) != 0")}
+        if not rules:
+            return 0
+        products = db.q(f"SELECT * FROM products WHERE active=1 AND product_id IN "
+                        f"({','.join(map(str, rules))})")
+        done = 0
+        for p in products:
+            rule = rules[p["product_id"]]
+            locked = bool(rule.get("locked"))
+            for d in promo_decisions(p, rule, s):
+                if d["decision"] not in ("enter", "exit"):
+                    continue
+                source = "акция: вход" if d["decision"] == "enter" else "акция: выход"
+                if self._promo_recent(p["product_id"], d["action_id"], source):
+                    continue  # рекомендацию с этой акцией уже писали недавно
+                mark = f"[акция {d['action_id']}]"
+                price_after = (d["enter_price"] or p["price"]) if d["decision"] == "enter" else p["price"]
+                reason = f"{d['title']}: {d['reason']} {mark}"
+                if locked:
+                    reason += " — товар под MPSpace, действие не выполнено"
+                elif dry:
+                    reason += " — режим тренировки, действие не выполнено"
+                else:
+                    reason += " — запись в акцию Ozon пока недоступна (методы не подтверждены), только рекомендация"
+                db.ex("""INSERT INTO changes(ts, product_id, offer_id, controlled_before, price_before,
+                         price_after, old_price_after, min_after, reason, source, dry_run, ok)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,1,1)""",
+                      (db.now(), p["product_id"], p["offer_id"],
+                       controlled_price(p, rule, s), p["price"], price_after,
+                       p.get("old_price") or 0, _f(rule.get("min_price")), reason, source))
+                done += 1
+        return done
+
+    def action_manual(self, pid, action_id, op, action_price=None):
+        """Ручной вход/выход товара в акцию (из карточки товара). (ok, message).
+
+        Методы входа/выхода товара в акцию после отключения v1 (19.10.2026) не подтверждены,
+        поэтому действие НЕ отправляется в Ozon: в «Журнал изменений» пишется только
+        рекомендация (dry_run=1), как и в автоматическом режиме.
+        """
+        s = db.get_settings()
+        p = db.q("SELECT * FROM products WHERE product_id=?", (pid,), one=True)
+        if not p:
+            raise OzonError("Товар не найден")
+        aid = int(action_id)
+        op = "enter" if op in ("activate", "enter") else "exit"
+        rule = db.get_rule(pid)
+        price_after = p["price"] or 0
+        if op == "enter":
+            ap = _f(action_price)
+            if not ap or ap <= 0:
+                cand = db.q("SELECT * FROM product_actions WHERE product_id=? AND action_id=? "
+                            "AND kind='candidate' LIMIT 1", (pid, aid), one=True)
+                ap = _enter_price(cand or {})
+            if not ap or ap <= 0:
+                raise OzonError("Укажите цену в акции (или обновите данные акций)")
+            mn = _f(rule.get("min_price"))
+            if mn and ap < mn - 0.5:
+                raise OzonError(f"Цена акции {round(ap)} ₽ ниже минимума селлера {round(mn)} ₽ — вход запрещён")
+            price_after = float(round(ap))
+        source = "акция: вход (вручную)" if op == "enter" else "акция: выход (вручную)"
+        title = db.q("SELECT title FROM product_actions WHERE product_id=? AND action_id=? LIMIT 1",
+                     (pid, aid), one=True) or {}
+        t = title.get("title") or f"акция {aid}"
+        reason = (f"{t}: {'вход' if op == 'enter' else 'выход'} вручную [акция {aid}] — "
+                  f"запись в Ozon пока недоступна (методы не подтверждены), только рекомендация")
+        db.ex("""INSERT INTO changes(ts, product_id, offer_id, controlled_before, price_before, price_after,
+                 old_price_after, min_after, reason, source, dry_run, ok)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,1,1)""",
+              (db.now(), pid, p["offer_id"], controlled_price(p, rule, s), p["price"], price_after,
+               p.get("old_price") or 0, _f(rule.get("min_price")), reason, source))
+        return True, f"Сохранена рекомендация: {t}, {'вход' if op == 'enter' else 'выход'} (запись в Ozon включим, когда подтвердим методы)"
+
     def manual_set(self, pid, price, old_price, min_price):
         s = db.get_settings()
         p = db.q("SELECT * FROM products WHERE product_id=?", (pid,), one=True)
@@ -512,12 +805,14 @@ class Repricer:
         try:
             s = db.get_settings()
             client = make_client(s["client_id"], s["api_key"])
-            n = self.sync(client, s)
-            sent, errors, skipped = self.apply_rules(client, s)
+            force_actions = self.force_actions
+            self.force_actions = False
+            n = self.sync(client, s, force_actions=force_actions)
+            sent, errors, skipped, promo_done = self.apply_rules(client, s)
             db.cleanup(int(_f(s.get("history_days")) or 365))
             mode = "тренировка" if s.get("dry_run") == "1" else "боевой"
-            msg = (f"Проверено товаров: {n}. Изменено цен: {sent}, ошибок: {errors}, отложено: {skipped}. "
-                   f"Режим: {mode}. {time.time() - t0:.1f} с")
+            msg = (f"Проверено товаров: {n}. Изменено цен: {sent}, акций: {promo_done}, "
+                   f"ошибок: {errors}, отложено: {skipped}. Режим: {mode}. {time.time() - t0:.1f} с")
             db.log("error" if errors else "info", msg)
             self.status.update(last_result=msg, last_ok=errors == 0)
             return msg

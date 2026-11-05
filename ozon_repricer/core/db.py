@@ -23,6 +23,7 @@ DEFAULT_SETTINGS = {
     "strict_overshoot_pct": "100", # на сколько % можно превысить максимум при стратегии «строгое удержание»
     "banner_minmax_seen": "0",     # видел ли пользователь плашку о новом смысле мин/макс («Понятно»)
     "migration_dryrun": "0",       # 1 = при обновлении базы принудительно включена тренировка (проверьте мин/макс)
+    "actions_interval_min": "120", # как часто перечитывать список акций Ozon (мин); «Проверить сейчас» — всегда
 }
 
 # Ключи Ozon НЕ вписываются в код: они вводятся в интерфейсе (вкладка «Настройки»)
@@ -64,6 +65,22 @@ CREATE TABLE IF NOT EXISTS changes (
 CREATE INDEX IF NOT EXISTS ix_changes ON changes(product_id, ts);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, level TEXT, message TEXT
+);
+CREATE TABLE IF NOT EXISTS product_actions (
+    product_id INTEGER NOT NULL,
+    action_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,             -- participant | candidate
+    title TEXT, date_from TEXT, date_to TEXT, status TEXT,
+    price REAL, action_price REAL, max_action_price REAL,
+    PRIMARY KEY (product_id, action_id, kind)
+);
+CREATE INDEX IF NOT EXISTS ix_pa ON product_actions(product_id);
+CREATE TABLE IF NOT EXISTS auto_add (
+    product_id INTEGER NOT NULL,
+    action_id INTEGER NOT NULL,
+    price_to_auto_add REAL,        -- «Ozon добавит сам по цене X» (/v2/actions/auto-add/products/list)
+    updated_at TEXT,
+    PRIMARY KEY (product_id, action_id)
 );
 """
 
@@ -128,6 +145,11 @@ def init():
         pcols = [r[1] for r in con.execute("PRAGMA table_info(products)")]
         if "image" not in pcols:  # фото товара
             con.execute("ALTER TABLE products ADD COLUMN image TEXT")
+        # этап 2 (2026.11.17): работа с акциями Ozon
+        if "promo_mode" not in cols:
+            con.execute("ALTER TABLE rules ADD COLUMN promo_mode INTEGER DEFAULT 0")
+            con.execute("ALTER TABLE rules ADD COLUMN promo_entry TEXT DEFAULT 'RECOMMEND'")
+            con.execute("ALTER TABLE rules ADD COLUMN promo_deviation_pct REAL DEFAULT 0")
 
 
 def q(sql, args=(), one=False):
@@ -163,19 +185,77 @@ def get_rule(pid):
     r = q("SELECT * FROM rules WHERE product_id=?", (pid,), one=True)
     return r or {"product_id": pid, "mode": "watch", "min_price": None, "max_price": None,
                  "target": None, "tolerance": 2, "note": None, "locked": 0, "hidden": 0,
-                 "max_strategy": 0, "control_basis": "", "tags": ""}
+                 "max_strategy": 0, "control_basis": "", "tags": "",
+                 "promo_mode": 0, "promo_entry": "RECOMMEND", "promo_deviation_pct": 0}
 
 
 def save_rule(pid, mode="watch", min_price=None, max_price=None, target=None, tolerance=2, note=None,
-              max_strategy=0, control_basis="", tags=""):
+              max_strategy=0, control_basis="", tags="",
+              promo_mode=0, promo_entry="RECOMMEND", promo_deviation_pct=0):
     ex("""INSERT INTO rules(product_id, mode, min_price, max_price, target, tolerance, note,
-             max_strategy, control_basis, tags)
-          VALUES(?,?,?,?,?,?,?,?,?,?)
+             max_strategy, control_basis, tags, promo_mode, promo_entry, promo_deviation_pct)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(product_id) DO UPDATE SET mode=excluded.mode, min_price=excluded.min_price,
           max_price=excluded.max_price, target=excluded.target, tolerance=excluded.tolerance,
           note=excluded.note, max_strategy=excluded.max_strategy,
-          control_basis=excluded.control_basis, tags=excluded.tags""",
-       (pid, mode, min_price, max_price, target, tolerance, note, max_strategy, control_basis, tags))
+          control_basis=excluded.control_basis, tags=excluded.tags,
+          promo_mode=excluded.promo_mode, promo_entry=excluded.promo_entry,
+          promo_deviation_pct=excluded.promo_deviation_pct""",
+       (pid, mode, min_price, max_price, target, tolerance, note, max_strategy, control_basis, tags,
+        promo_mode, promo_entry, promo_deviation_pct))
+
+
+def save_actions(rows, gone_aids=(), reset_pa=(), reset_aa=(), auto_add_rows=()):
+    """Обновление данных акций Ozon (вызывается из sync).
+
+    rows            — новые строки product_actions только УСПЕШНО прочитанных акций;
+    gone_aids       — акции, которых больше нет в /v1/actions или у которых истёк date_end:
+                      их строки удаляются полностью;
+    reset_pa        — акции, прочитанные целиком: их старые product_actions удаляются
+                      перед вставкой (товары, вышедшие из акции, исчезают);
+    reset_aa        — акции, у которых автодобавление прочитано целиком: то же для auto_add;
+    auto_add_rows   — (product_id, action_id, price_to_auto_add, updated_at).
+
+    Данные акций, которые прочитать не удалось, НЕ трогаются: прежние строки сохраняются.
+    """
+    with _lock, connect() as con:
+        if gone_aids:
+            marks = ",".join("?" * len(gone_aids))
+            con.execute(f"DELETE FROM product_actions WHERE action_id IN ({marks})", tuple(gone_aids))
+            con.execute(f"DELETE FROM auto_add WHERE action_id IN ({marks})", tuple(gone_aids))
+        if reset_pa:
+            marks = ",".join("?" * len(reset_pa))
+            con.execute(f"DELETE FROM product_actions WHERE action_id IN ({marks})", tuple(reset_pa))
+        if reset_aa:
+            marks = ",".join("?" * len(reset_aa))
+            con.execute(f"DELETE FROM auto_add WHERE action_id IN ({marks})", tuple(reset_aa))
+        con.executemany("""INSERT INTO product_actions(product_id, action_id, kind, title, date_from,
+                          date_to, status, price, action_price, max_action_price)
+                          VALUES(?,?,?,?,?,?,?,?,?,?)
+                          ON CONFLICT(product_id, action_id, kind) DO UPDATE SET title=excluded.title,
+                          date_from=excluded.date_from, date_to=excluded.date_to, status=excluded.status,
+                          price=excluded.price, action_price=excluded.action_price,
+                          max_action_price=excluded.max_action_price""", rows)
+        if auto_add_rows:
+            con.executemany("""INSERT INTO auto_add(product_id, action_id, price_to_auto_add, updated_at)
+                               VALUES(?,?,?,?)
+                               ON CONFLICT(product_id, action_id) DO UPDATE SET
+                               price_to_auto_add=excluded.price_to_auto_add, updated_at=excluded.updated_at""",
+                            auto_add_rows)
+
+
+def get_product_actions(pid):
+    return q("SELECT * FROM product_actions WHERE product_id=? ORDER BY date_from, action_id", (pid,))
+
+
+def get_auto_add(pid):
+    """Что Ozon добавит в акции автоматически для товара (с названием акции из product_actions)."""
+    return q("""SELECT a.action_id, a.price_to_auto_add, a.updated_at,
+                       COALESCE(p.title, '') AS title, p.kind
+                FROM auto_add a
+                LEFT JOIN product_actions p ON p.product_id=a.product_id
+                    AND p.action_id=a.action_id AND p.kind='candidate'
+                WHERE a.product_id=? ORDER BY a.action_id""", (pid,))
 
 
 def set_locked(pid, locked: bool):

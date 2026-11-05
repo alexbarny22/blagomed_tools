@@ -106,8 +106,11 @@ def product(pid):
     st, st_text = status_of(p, rule, s)
     changes = db.q("SELECT * FROM changes WHERE product_id=? ORDER BY id DESC LIMIT 100", (pid,))
     actions = json.loads(p.get("actions") or "[]")
+    promo_actions = db.q("SELECT * FROM product_actions WHERE product_id=? ORDER BY action_id", (pid,))
+    auto_add = db.get_auto_add(pid)
     return render_template("product.html", p=p, rule=rule, st=st, st_text=st_text, changes=changes,
-                           actions=actions, controlled=controlled_price(p, rule, s),
+                           actions=actions, promo_actions=promo_actions, auto_add=auto_add,
+                           controlled=controlled_price(p, rule, s),
                            attention=attention_for(p, rule, s), basis=control_basis(rule, s))
 
 
@@ -136,7 +139,8 @@ def settings():
     if request.method == "POST":
         f = request.form
         for key in ("client_id", "interval_min", "cooldown_min", "max_step_pct", "max_changes_day",
-                    "control_basis", "visibility", "history_days", "strict_overshoot_pct"):
+                    "control_basis", "visibility", "history_days", "strict_overshoot_pct",
+                    "actions_interval_min"):
             if key in f:
                 db.set_setting(key, f.get(key, "").strip())
         if f.get("api_key", "").strip() and "•" not in f.get("api_key"):
@@ -170,6 +174,8 @@ def api_products():
             "max_strategy": int(rule.get("max_strategy") or 0),
             "control_basis": rule.get("control_basis") or "",
             "tags": rule.get("tags") or "",
+            "promo_mode": int(rule.get("promo_mode") or 0), "promo_entry": rule.get("promo_entry") or "RECOMMEND",
+            "promo_deviation": _f(rule.get("promo_deviation_pct")) or 0,
             "stock_fbo": p.get("stock_fbo"), "stock_fbs": p.get("stock_fbs"),
             "stock_fbp": p.get("stock_fbp"), "stock_total": p.get("stock_total"),
             "attention": attention_for(p, rule, s),
@@ -193,6 +199,7 @@ def api_status():
 def api_run():
     if rp.status["running"]:
         return jsonify({"ok": False, "message": "Проверка уже идёт"})
+    rp.force_actions = True  # «Проверить сейчас» перечитывает акции даже внутри интервала
     rp.trigger()
     return jsonify({"ok": True, "message": "Проверка запущена"})
 
@@ -232,17 +239,103 @@ def _hold_defaults(r: dict, price):
     return r
 
 
+@app.route("/api/actions")
+def api_actions():
+    """Список акций с количеством участников/кандидатов (для интерфейса)."""
+    s = db.get_settings()
+    out = {}
+    for r in db.q("SELECT action_id, title, kind, COUNT(*) AS n FROM product_actions GROUP BY action_id, kind"):
+        a = out.setdefault(r["action_id"], {"action_id": r["action_id"], "title": r["title"] or f"Акция {r['action_id']}",
+                                            "participants": 0, "candidates": 0})
+        if r["kind"] == "participant":
+            a["participants"] = r["n"]
+        else:
+            a["candidates"] = r["n"]
+    return jsonify({"actions": list(out.values())[:40],
+                    "synced": s.get("actions_synced_at", "")})
+
+
+@app.route("/api/action/<int:pid>", methods=["POST"])
+def api_action(pid):
+    """Ручной вход/выход одного товара в акцию (из карточки товара)."""
+    d = request.get_json(force=True)
+    try:
+        ok, msg = rp.action_manual(pid, int(d.get("action_id") or 0), d.get("op") or "enter",
+                                   _f(d.get("action_price")))
+    except OzonError as e:
+        return jsonify({"ok": False, "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/action/batch", methods=["POST"])
+def api_action_batch():
+    """Массовый вход/выход выбранных товаров в акцию (в таблице товаров)."""
+    d = request.get_json(force=True)
+    ids = [int(x) for x in d.get("ids") or []]
+    try:
+        aid = int(d.get("action_id") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "Укажите акцию"}), 400
+    op = "enter" if d.get("op") in ("enter", "activate", "2", "1") else "exit"
+    if not ids or not aid:
+        return jsonify({"ok": False, "message": "Выберите товары и акцию"}), 400
+    done, errors, skipped = 0, [], 0
+    for pid in ids:
+        if db.is_locked(pid):
+            skipped += 1  # под MPSpace массово не трогаем
+            continue
+        try:
+            ok, msg = rp.action_manual(pid, aid, op, _f(d.get("action_price")))
+        except Exception as e:
+            ok, msg = False, str(e)
+        if ok:
+            done += 1
+        else:
+            errors.append(msg)
+    db.log("info", f"Акция {aid}: {'вход' if op == 'enter' else 'выход'} — рекомендаций сохранено {done}, "
+                   f"пропущено (MPSpace) {skipped}, ошибок {len(errors)}")
+    return jsonify({"ok": True, "done": done, "skipped": skipped, "errors": errors[:10]})
+
+
 @app.route("/api/rule", methods=["POST"])
 def api_rule():
     d = request.get_json(force=True)
     pid = int(d["product_id"])
+    old = db.get_rule(pid)
     try:
         r = _rule_from(d)
         p0 = db.q("SELECT price FROM products WHERE product_id=?", (pid,), one=True)
         r = _hold_defaults(r, p0["price"] if p0 else None)
+        # параметры акций: поле не передано — сохраняем текущее значение товара
+        if d.get("promo_mode") is not None:
+            pm = int(str(d["promo_mode"]).strip())
+            if pm not in (0, 1, 3):
+                raise ValueError("Код режима акций должен быть 0, 1 или 3")
+        else:
+            pm = int(old.get("promo_mode") or 0)
+        pe_raw = str(d.get("promo_entry") or "").strip().upper()
+        if d.get("promo_entry") in (None, ""):
+            pe = old.get("promo_entry") or "RECOMMEND"
+        elif pe_raw in ("0", "RECOMMEND"):
+            pe = "RECOMMEND"
+        elif pe_raw in ("1", "AUTO"):
+            pe = "AUTO"
+        else:
+            raise ValueError("Тип входа в акцию: 0 — рекомендации, 1 — автоматически")
+        dev = d.get("promo_deviation_pct")
+        if dev not in (None, ""):
+            dv = _f(dev)
+            if dv is None or dv < 0 or dv > 200:
+                raise ValueError("Отклонение от целевой должно быть 0..200 %")
+        else:
+            dv = _f(old.get("promo_deviation_pct")) or 0
+        r["promo_mode"] = pm
+        r["promo_entry"] = pe
+        r["promo_deviation_pct"] = dv
     except ValueError as e:
         return jsonify({"ok": False, "message": str(e)}), 400
-    old = db.get_rule(pid)
     if old.get("locked") and r["mode"] != "watch":
         return jsonify({"ok": False, "message": "Товар отмечен «Под MPSpace» — сначала снимите отметку"}), 400
     db.save_rule(pid, note=old.get("note"), **r)
@@ -298,6 +391,21 @@ def api_rules_bulk():
         if d.get("control_basis") is not None:
             cb = (d.get("control_basis") or "").strip()
             rule["control_basis"] = cb if cb in ("", "seller", "buyer") else rule.get("control_basis", "")
+        if d.get("promo_mode") is not None:
+            pm = int(str(d["promo_mode"]).strip())
+            if pm in (0, 1, 3):
+                rule["promo_mode"] = pm
+        if d.get("promo_entry") in ("0", 0, "RECOMMEND"):
+            rule["promo_entry"] = "RECOMMEND"
+        elif d.get("promo_entry") in ("1", 1, "AUTO"):
+            rule["promo_entry"] = "AUTO"
+        if d.get("promo_deviation_pct") not in (None, ""):
+            dv = _f(d["promo_deviation_pct"])
+            if dv is not None and 0 <= dv <= 200:
+                rule["promo_deviation_pct"] = dv
+        promo_kw = {"promo_mode": int(rule.get("promo_mode") or 0),
+                    "promo_entry": rule.get("promo_entry") or "RECOMMEND",
+                    "promo_deviation_pct": _f(rule.get("promo_deviation_pct")) or 0}
         try:
             r = _rule_from({"mode": rule["mode"], "min": rule["min_price"], "max": rule["max_price"],
                             "target": rule["target"], "tolerance": rule["tolerance"],
@@ -305,7 +413,7 @@ def api_rules_bulk():
                             "control_basis": rule.get("control_basis") or "",
                             "tags": rule.get("tags") or ""})
             r = _hold_defaults(r, cur_base)
-            db.save_rule(pid, note=rule.get("note"), **r)
+            db.save_rule(pid, note=rule.get("note"), **r, **promo_kw)
             done += 1
         except ValueError as e:
             errors.append(f"{p['offer_id']}: {e}")
@@ -513,7 +621,8 @@ def api_test():
 # ---------------- CSV правил (открывается в Excel) ----------------
 CSV_HEAD = ["product_id", "Артикул", "Название", "Цена", "Контролируемая цена", "Режим (watch/guard/hold)",
             "Минимум", "Максимум", "Цена удержания", "Допуск %", "Под MPSpace (1 = да)",
-            "Тип контроля (seller/buyer)", "Стратегия при максимуме (0/1)", "Теги", "Остаток (шт.)"]
+            "Тип контроля (seller/buyer)", "Стратегия при максимуме (0/1)", "Теги", "Остаток (шт.)",
+            "Акции (0/1/3)", "Вход в акции (RECOMMEND/AUTO)", "Отклонение от целевой %"]
 
 
 @app.route("/rules.csv")
@@ -530,7 +639,9 @@ def rules_csv():
                     num(r["min_price"]), num(r["max_price"]), num(r["target"]), num(r["tolerance"] or 2),
                     "1" if r.get("locked") else "",
                     (r.get("control_basis") or ""), int(r.get("max_strategy") or 0), r.get("tags") or "",
-                    num(p.get("stock_total")) if p.get("stock_total") is not None else ""])
+                    num(p.get("stock_total")) if p.get("stock_total") is not None else "",
+                    int(r.get("promo_mode") or 0), r.get("promo_entry") or "RECOMMEND",
+                    num(_f(r.get("promo_deviation_pct")) or 0)])
     return Response("﻿" + buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": "attachment; filename=rules_ozon.csv"})
 
@@ -576,8 +687,18 @@ def rules_import():
             cb = (row[11] if len(row) > 11 else (cur.get("control_basis") or "")).strip().lower()
             ms = (row[12] if len(row) > 12 else str(int(cur.get("max_strategy") or 0))).strip()
             tags = (row[13] if len(row) > 13 else (cur.get("tags") or "")).strip()[:500]
+            pm = (str(row[15]) if len(row) > 15 else str(cur.get("promo_mode") or 0)).strip()
+            pe = (row[16] if len(row) > 16 else (cur.get("promo_entry") or "RECOMMEND")).strip()
+            dv = row[17] if len(row) > 17 else cur.get("promo_deviation_pct")
+            dv = _f(dv) if dv not in (None, "") else None
             r = _rule_from({"mode": mode, "min": num(row[6]), "max": num(row[7]), "target": num(row[8]),
                             "tolerance": num(row[9]), "control_basis": cb, "max_strategy": ms, "tags": tags})
+            if pm in ("0", "1", "3"):
+                r["promo_mode"] = int(pm)
+            if pe.upper() in ("RECOMMEND", "AUTO", "0", "1"):
+                r["promo_entry"] = {"0": "RECOMMEND", "1": "AUTO"}.get(pe.upper(), pe.upper())
+            if dv is not None:
+                r["promo_deviation_pct"] = dv
             if is_locked:
                 # «Под MPSpace»: режим остаётся «только следить», но мин/макс/теги/тип/стратегия
                 # из файла применяются — для подсветки нарушений (как было раньше)

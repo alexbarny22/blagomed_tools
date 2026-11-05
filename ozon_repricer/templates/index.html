@@ -54,6 +54,7 @@
   <label data-col-toggle="color"><input type="checkbox"> Индекс</label>
   <label data-col-toggle="cb"><input type="checkbox"> Контроль</label>
   <label data-col-toggle="ms"><input type="checkbox"> Стратегия</label>
+  <label data-col-toggle="promo"><input type="checkbox"> Акции</label>
   <label data-col-toggle="tags"><input type="checkbox"> Теги</label>
 </div>
 
@@ -68,6 +69,19 @@
   <button class="btn primary" onclick="bulkApply()">Применить</button>
   <button class="btn" onclick="bulkClear()">Сбросить правила</button>
   <span class="sep"></span>
+  <label title="Работа с акциями Ozon: 0 — выключить, 1 — только выходить, 3 — входить и выходить">Акции</label>
+  <select id="b-promo-mode">
+    <option value="">не менять</option>
+    <option value="3">вход и выход</option>
+    <option value="1">только выход</option>
+    <option value="0">выключить</option>
+  </select>
+  <select id="b-entry" title="Как входить в акции: автоматически или только рекомендации">
+    <option value="">вход — как было</option>
+    <option value="1">вход автом.</option>
+    <option value="0">только рекомендации</option>
+  </select>
+  <span class="sep"></span>
   <button class="btn" onclick="bulkLock(true)">Отметить «Под MPSpace»</button>
   <button class="btn" onclick="bulkLock(false)">Снять отметку</button>
   <span class="sep"></span>
@@ -77,6 +91,11 @@
   <label>Тег</label><input type="text" id="b-tag" placeholder="тег" style="width:120px">
   <button class="btn" onclick="bulkTag('add')">+ тег</button>
   <button class="btn" onclick="bulkTag('remove')">− тег</button>
+  <span class="sep"></span>
+  <label>Акция Ozon</label>
+  <select id="b-action"><option value="">— акции загружаются… —</option></select>
+  <button class="btn" onclick="bulkPromo('enter')" title="Сейчас только рекомендация: методы записи в акцию Ozon не подтверждены">+ в акцию</button>
+  <button class="btn" onclick="bulkPromo('exit')" title="Сейчас только рекомендация: методы записи в акцию Ozon не подтверждены">− из акции</button>
   <span class="spacer" style="flex:1"></span>
   <button class="btn" onclick="selectNone()">Снять выбор</button>
 </div>
@@ -98,13 +117,14 @@
     <th class="nosort num">Мин</th>
     <th class="nosort num">Макс</th>
     <th class="nosort num">Цель</th>
+    <th class="nosort col" data-col="promo" title="Акции Ozon для товара: 0 — не трогать, 1 — только выходить, 3 — входить и выходить">Акции</th>
     <th class="nosort num" title="Остатки: наведите, чтобы увидеть FBO/FBS/FBP">Остатки</th>
     <th class="nosort" title="Требует внимания — наведите на метку">Внимание</th>
     <th class="nosort col" data-col="tags" title="Теги через запятую">Теги</th>
     <th data-k="status">Статус</th>
     <th data-k="last_change">Изменено</th>
   </tr></thead>
-  <tbody id="rows"><tr><td colspan="19" class="empty">Загрузка…</td></tr></tbody>
+  <tbody id="rows"><tr><td colspan="20" class="empty">Загрузка…</td></tr></tbody>
 </table>
 </div>
 {% endblock %}
@@ -121,7 +141,7 @@ const val = v => (v === null || v === undefined) ? '' : Math.round(v);
 const tagsOf = p => (p.tags || '').split(',').map(t => t.trim()).filter(Boolean);
 
 // видимость колонок (запоминается в localStorage, со страховкой от ошибок)
-const COL_DEFAULT = {old_price: false, buyer_est: false, color: false, cb: true, ms: true, tags: false};
+const COL_DEFAULT = {old_price: false, buyer_est: false, color: false, cb: true, ms: true, promo: true, tags: false};
 let colVis = Object.assign({}, COL_DEFAULT);
 try {
   const saved = JSON.parse(localStorage.getItem('rp-cols') || 'null');
@@ -198,8 +218,8 @@ function render() {
     return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), 'ru')) * sortDir;
   });
   const tb = document.getElementById('rows');
-  if (!DATA.length) { tb.innerHTML = '<tr><td colspan="19" class="empty">Товаров пока нет. Укажите ключи в Настройках и нажмите «Проверить сейчас».</td></tr>'; applyCols(); return; }
-  if (!rows.length) { tb.innerHTML = '<tr><td colspan="19" class="empty">Ничего не найдено</td></tr>'; applyCols(); return; }
+  if (!DATA.length) { tb.innerHTML = '<tr><td colspan="20" class="empty">Товаров пока нет. Укажите ключи в Настройках и нажмите «Проверить сейчас».</td></tr>'; applyCols(); return; }
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="20" class="empty">Ничего не найдено</td></tr>'; applyCols(); return; }
   const lockAttr = p => p.locked ? ' disabled' : '';
   tb.innerHTML = rows.map(p => `
     <tr data-id="${p.product_id}" class="${rowClass(p)}">
@@ -228,6 +248,11 @@ function render() {
       <td class="edit num"><input type="number" data-f="min" value="${val(p.min)}"></td>
       <td class="edit num"><input type="number" data-f="max" value="${val(p.max)}"></td>
       <td class="edit num"><input type="number" data-f="target" value="${val(p.target)}" ${p.mode === 'hold' ? '' : 'placeholder="—"'} ${p.locked ? 'disabled' : ''}></td>
+      <td class="edit" data-col="promo"><select data-f="promo" title="Акции Ozon: 0 — не трогать, 1 — только выходить, 3 — входить и выходить"${lockAttr(p)}>
+        <option value="0" ${p.promo_mode === 0 ? 'selected' : ''}>не трогать</option>
+        <option value="1" ${p.promo_mode === 1 ? 'selected' : ''}>только выход</option>
+        <option value="3" ${p.promo_mode === 3 ? 'selected' : ''}>вход и выход</option>
+      </select></td>
       <td class="num" title="FBO: ${p.stock_fbo ?? '—'} · FBS: ${p.stock_fbs ?? '—'} · FBP: ${p.stock_fbp ?? '—'}">${stk(p.stock_total)}</td>
       <td>${p.attention.length ? `<span class="pill atn" title="${esc(p.attention.join('; '))}">внимание</span>` : ''}</td>
       <td class="edit" data-col="tags"><input type="text" data-f="tags" value="${esc(p.tags)}" placeholder="тег, тег" title="Теги через запятую"${lockAttr(p)}></td>
@@ -240,14 +265,14 @@ async function saveRow(tr, el) {
   const id = +tr.dataset.id, p = DATA.find(x => x.product_id === id);
   const g = f => tr.querySelector(`[data-f="${f}"]`).value;
   const body = {product_id: id, mode: g('mode'), min: g('min'), max: g('max'), target: g('target'), tolerance: p.tolerance,
-    max_strategy: g('ms'), control_basis: g('cb'), tags: g('tags')};
+    max_strategy: g('ms'), control_basis: g('cb'), tags: g('tags'), promo_mode: g('promo')};
   if (body.mode === 'hold' && !body.target) { body.target = Math.round(p.controlled || p.price); tr.querySelector('[data-f="target"]').value = body.target; }
   const r = await api('/api/rule', body);
   if (!r.ok) { el.classList.add('err'); toast(r.message); if (el.tagName === 'SELECT') el.value = p.mode; return; }
   el.classList.remove('err'); el.classList.add('saved'); setTimeout(() => el.classList.remove('saved'), 900);
   Object.assign(p, {mode: body.mode, min: body.min === '' ? null : +body.min, max: body.max === '' ? null : +body.max,
     target: body.target === '' ? null : +body.target, max_strategy: +body.max_strategy,
-    control_basis: body.control_basis, tags: body.tags, status: r.status, status_text: r.status_text});
+    control_basis: body.control_basis, tags: body.tags, promo_mode: +body.promo_mode, status: r.status, status_text: r.status_text});
   refreshTags();
   render();
 }
@@ -265,6 +290,10 @@ async function bulkApply() {
   const body = {ids: [...sel], mode: document.getElementById('b-mode').value, min_pct: document.getElementById('b-min').value,
     max_pct: document.getElementById('b-max').value, target_current: document.getElementById('b-target').checked};
   if (body.min_pct === '') delete body.min_pct; if (body.max_pct === '') delete body.max_pct;
+  const pm = document.getElementById('b-promo-mode').value;
+  if (pm !== '') body.promo_mode = pm;
+  const pe = document.getElementById('b-entry').value;
+  if (pe !== '') body.promo_entry = pe;
   const r = await api('/api/rules/bulk', body);
   toast(`Обновлено правил: ${r.done}` + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')
     + (r.errors.length ? '. Ошибки: ' + r.errors.join('; ') : ''), 6000);
@@ -300,6 +329,38 @@ async function bulkTag(op) {
   document.getElementById('b-tag').value = '';
   load();
 }
+let ACTIONS = [];
+async function loadActions() {
+  try {
+    const r = await (await fetch('/api/actions')).json();
+    ACTIONS = r.actions || [];
+    const selEl = document.getElementById('b-action');
+    selEl.innerHTML = (ACTIONS.length ? '<option value="">— выберите акцию —</option>' : '<option value="">— акций нет —</option>')
+      + ACTIONS.map(a => `<option value="${a.action_id}">${esc(a.title)} (в: ${a.participants}, к: ${a.candidates})</option>`).join('');
+  } catch (e) { /* таблица акций пуста, например до первого sync */ }
+}
+function selectedActionTitle() {
+  const a = ACTIONS.find(x => x.action_id === +document.getElementById('b-action').value);
+  return a ? a.title : 'акцию';
+}
+async function bulkPromo(op) {
+  const aid = document.getElementById('b-action').value;
+  if (!aid) { toast('Выберите акцию в списке справа'); return; }
+  if (op === 'enter') {
+    const price = prompt(`Цена в акции «${selectedActionTitle()}» для ${sel.size} товаров (₽). Оставьте пустым — возьмём рекомендуемую цену из кандидатов:`, '');
+    if (price === null) return;
+    if (!confirm(`Сохранить рекомендацию: ${sel.size} товаров → акция «${selectedActionTitle()}»${price.trim() ? ' по цене ' + price.trim() + ' ₽' : ' (рекомендуемая цена)'}? В Ozon пока не отправится: методы записи в акцию не подтверждены.`)) return;
+    const r = await api('/api/action/batch', {ids: [...sel], action_id: aid, op: 'enter', action_price: price.trim()});
+    toast(`Рекомендаций «вход» сохранено: ${r.done}` + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')
+      + (r.errors.length ? '. Ошибки: ' + r.errors.join('; ') : ''), 6000);
+  } else {
+    if (!confirm(`Сохранить рекомендацию: ${sel.size} товаров из акции «${selectedActionTitle()}»? Из акции пока ничего не выведется — методы записи Ozon не подтверждены.`)) return;
+    const r = await api('/api/action/batch', {ids: [...sel], action_id: aid, op: 'exit'});
+    toast(`Рекомендаций «выход» сохранено: ${r.done}` + (r.skipped ? `. Пропущено «Под MPSpace»: ${r.skipped}` : '')
+      + (r.errors.length ? '. Ошибки: ' + r.errors.join('; ') : ''), 6000);
+  }
+  load(); loadActions();
+}
 function dismissBanner() {
   const b = document.getElementById('minmax-banner');
   api('/api/dismiss_banner');
@@ -316,6 +377,7 @@ document.querySelectorAll('th[data-k]').forEach(th => th.onclick = () => {
 });
 window.onRunFinished = load;
 applyCols();
+loadActions();
 load();
 </script>
 {% endblock %}
