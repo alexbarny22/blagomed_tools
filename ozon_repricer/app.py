@@ -107,8 +107,9 @@ def product(pid):
     changes = db.q("SELECT * FROM changes WHERE product_id=? ORDER BY id DESC LIMIT 100", (pid,))
     actions = json.loads(p.get("actions") or "[]")
     promo_actions = db.q("SELECT * FROM product_actions WHERE product_id=? ORDER BY action_id", (pid,))
+    auto_add = db.get_auto_add(pid)
     return render_template("product.html", p=p, rule=rule, st=st, st_text=st_text, changes=changes,
-                           actions=actions, promo_actions=promo_actions,
+                           actions=actions, promo_actions=promo_actions, auto_add=auto_add,
                            controlled=controlled_price(p, rule, s),
                            attention=attention_for(p, rule, s), basis=control_basis(rule, s))
 
@@ -138,7 +139,8 @@ def settings():
     if request.method == "POST":
         f = request.form
         for key in ("client_id", "interval_min", "cooldown_min", "max_step_pct", "max_changes_day",
-                    "control_basis", "visibility", "history_days", "strict_overshoot_pct"):
+                    "control_basis", "visibility", "history_days", "strict_overshoot_pct",
+                    "actions_interval_min"):
             if key in f:
                 db.set_setting(key, f.get(key, "").strip())
         if f.get("api_key", "").strip() and "•" not in f.get("api_key"):
@@ -197,6 +199,7 @@ def api_status():
 def api_run():
     if rp.status["running"]:
         return jsonify({"ok": False, "message": "Проверка уже идёт"})
+    rp.force_actions = True  # «Проверить сейчас» перечитывает акции даже внутри интервала
     rp.trigger()
     return jsonify({"ok": True, "message": "Проверка запущена"})
 

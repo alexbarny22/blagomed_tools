@@ -8,6 +8,7 @@
 
 Без внешних зависимостей: простые функции, запуск:  python _tests_stage2.py
 """
+from datetime import datetime
 import io
 import os
 import shutil
@@ -20,7 +21,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core import db, engine  # noqa: E402
-from core.ozon import MockOzonClient, OzonClient  # noqa: E402
+from core.ozon import MockOzonClient, OzonClient, OzonError  # noqa: E402
 
 MOCK_TITLE = "Скидка продавца: медтехника"
 
@@ -414,6 +415,202 @@ def test_training_price_dryrun():
         assert rows, "в тренировке не записано ни одного изменения"
         assert all(r["dry_run"] == 1 for r in rows), rows
         assert any(r["source"].startswith("акция") for r in rows), "рекомендации по акциям не попали в журнал"
+
+
+def test_sync_actions_error_does_not_break_run():
+    """Общая проверка 1: ValueError при чтении одной акции НЕ роняет run_once,
+    правила цен применяются, в «События» пишется предупреждение."""
+    with Ctx() as c:
+        for pid, s in MockOzonClient._state.items():
+            put_product(pid, s["price"])
+        cand = sorted({p["id"] for p in c.mock.get_action_candidates(63302)})
+        p_a = cand[0]
+        price_a = MockOzonClient._state[p_a]["price"]
+        db.save_rule(p_a, mode="guard", min_price=round(price_a * 1.2), max_price=round(price_a * 1.2))
+        db.set_setting("dry_run", "1")
+
+        class Fragile(MockOzonClient):
+            def get_action_candidates(self, action_id):
+                if action_id == 63302:
+                    raise ValueError("сломанные кандидаты")
+                return super().get_action_candidates(action_id)
+
+        old_make = engine.make_client
+        engine.make_client = lambda *a, **k: Fragile(*a, **k)
+        try:
+            res = c.rep.run_once()
+        finally:
+            engine.make_client = old_make
+        assert "Ошибка" not in res, res
+        # правила цен применились (тренировка: в журнал попали записи dry_run=1)
+        rows = db.q("SELECT source, dry_run, ok FROM changes WHERE ok=1 ORDER BY ts")
+        assert rows, "после ошибки акций цены не проверялись"
+        assert all(r["dry_run"] == 1 for r in rows), rows
+        warns = " ".join(r["message"] for r in db.q("SELECT message FROM events WHERE level='warn'"))
+        assert "63302" in warns, warns
+
+
+def test_sync_actions_keeps_rows_for_failed_and_gone():
+    """Общая проверка 2: OzonError по одной акции — её прежние строки в product_actions
+    сохраняются; удаляются только акции, которых нет в /v1/actions или с истёкшим date_end."""
+    with Ctx() as c:
+        for pid, s in MockOzonClient._state.items():
+            put_product(pid, s["price"])
+        c.rep._sync_actions(c.mock, force=True)
+        def key(aid, kind):
+            return {(r["product_id"], r["action_id"], r["kind"]) for r in db.q(
+                "SELECT product_id, action_id, kind FROM product_actions WHERE action_id=? AND kind=?", (aid, kind))}
+        before_63301 = key(63301, "participant")
+        before_63302 = key(63302, "candidate")
+        assert before_63301 and before_63302
+
+        class Fragile(MockOzonClient):
+            def get_action_candidates(self, action_id):
+                if action_id == 63302:
+                    raise OzonError("510: временный сбой чтения кандидатов")
+                return super().get_action_candidates(action_id)
+
+        c.rep._sync_actions(Fragile("1", "test-key"), force=True)
+        # прежние строки упавшей акции целы
+        assert key(63302, "candidate") == before_63302, "строки упавшей акции стёрты"
+        # 63301 перечитана нормально
+        assert key(63301, "participant") == before_63301
+        warns = " ".join(r["message"] for r in db.q("SELECT message FROM events WHERE level='warn'"))
+        assert "63302" in warns and "временный сбой" in warns, warns
+
+        # акция 63301 исчезла из /v1/actions — её строки удаляются полностью
+        saved = MockOzonClient._actions
+        MockOzonClient._actions = {aid: a for aid, a in saved.items() if aid != 63301}
+        try:
+            c.rep._sync_actions(c.mock, force=True)
+            rest = {r["action_id"] for r in db.q("SELECT DISTINCT action_id FROM product_actions")}
+            assert rest == {63302}, rest
+            assert not db.q("SELECT 1 FROM auto_add WHERE action_id=63301"), "auto_add 63301 не удалён"
+        finally:
+            MockOzonClient._actions = saved
+
+
+def test_many_active_actions_warn():
+    """Общая проверка 3: если активных акций больше 40 — предупреждение в «События»."""
+    with Ctx() as c:
+        for pid, s in MockOzonClient._state.items():
+            put_product(pid, s["price"])
+        saved = MockOzonClient._actions
+        base = dict(saved)
+        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        for i in range(45):  # 45 дополнительных активных акций
+            base[70100 + i] = {"id": 70100 + i, "title": f"акция {i}", "date_start": now,
+                               "date_end": "", "status": "STARTED", "participants": {}, "candidates": {}}
+        MockOzonClient._actions = base
+        try:
+            c.rep._sync_actions(c.mock, force=True)
+            warns = " ".join(r["message"] for r in db.q("SELECT message FROM events WHERE level='warn'"))
+            assert "больше 40" in warns, warns
+        finally:
+            MockOzonClient._actions = saved
+
+
+def test_actions_interval_and_prices_every_run():
+    """Общая проверка 4: акции перечитываются не чаще actions_interval_min (по умолчанию 120)
+    и при force; решения по ценам считаются на каждом запуске."""
+    with Ctx() as c:
+        for pid, s in MockOzonClient._state.items():
+            put_product(pid, s["price"])
+        db.set_setting("actions_interval_min", "120")
+        c.rep._sync_actions(c.mock, force=True)
+        stamped1 = db.get_settings()["actions_synced_at"]
+        assert stamped1, "actions_synced_at не установлена"
+        cand34 = MockOzonClient._actions[63302]["candidates"]
+        p_a = next(iter(cand34))
+        removed = cand34.pop(p_a)
+        try:
+            # без force — перечитывать ещё рано, таблица и метка не меняются
+            c.rep._sync_actions(c.mock)
+            rows_a = db.q("SELECT 1 FROM product_actions WHERE action_id=63302 AND kind='candidate' "
+                          "AND product_id=?", (p_a,))
+            assert rows_a, "акции перечитаны раньше интервала"
+            assert db.get_settings()["actions_synced_at"] == stamped1
+            # с force — перечитываются сразу
+            c.rep._sync_actions(c.mock, force=True)
+            rows_b = db.q("SELECT 1 FROM product_actions WHERE action_id=63302 AND kind='candidate' "
+                          "AND product_id=?", (p_a,))
+            assert not rows_b, "force-синхронизация не перечитала акции"
+        finally:
+            cand34[p_a] = removed
+        # цены решаются на каждом запуске независимо от интервала акций
+        db.save_rule(p_a, mode="guard", min_price=round(MockOzonClient._state[p_a]["price"] * 1.2),
+                     max_price=round(MockOzonClient._state[p_a]["price"] * 1.2))
+        db.set_setting("dry_run", "1")
+        before = len(db.q("SELECT 1 FROM changes"))
+        sent, errors, skipped, promo_done = c.rep.apply_rules(c.mock, db.get_settings())
+        assert len(db.q("SELECT 1 FROM changes")) > before, "правила цен не сработали на пустом запуске"
+
+
+def test_run_now_button_forces_actions():
+    """Общая проверка: кнопка «Проверить сейчас» (base.html → POST /api/run) заставляет
+    перечитать акции даже внутри actions_interval_min; флаг force_actions потребляется run_once."""
+    with Ctx() as c:
+        import app as A
+        for pid, s in MockOzonClient._state.items():
+            put_product(pid, s["price"])
+        db.set_setting("actions_interval_min", "120")
+        A.rp._sync_actions(c.mock, force=True)  # «сейчас» — полная синхронизация со штампом
+        assert db.get_settings()["actions_synced_at"], "actions_synced_at не установлена"
+        cand34 = MockOzonClient._actions[63302]["candidates"]
+        p_a = next(iter(cand34))
+        removed = cand34.pop(p_a)
+        try:
+            # внутри интервала обычный запуск акции НЕ перечитывает
+            A.rp._sync_actions(c.mock)
+            assert db.q("SELECT 1 FROM product_actions WHERE action_id=63302 AND kind='candidate' "
+                        "AND product_id=?", (p_a,)), "обычный запуск перечитал акции раньше интервала"
+            # кнопка «Проверить сейчас» → /api/run взводит force_actions
+            A.rp.force_actions = False
+            r = A.app.test_client().post("/api/run")
+            assert r.status_code == 200 and r.json.get("ok") is True, r
+            assert A.rp.force_actions is True, "/api/run не взвёл force_actions"
+            # run_once потребляет флаг и перечитывает акции
+            res = A.rp.run_once()
+            assert "Ошибка" not in res, res
+            assert A.rp.force_actions is False, "force_actions не сброшен после run_once"
+            assert not db.q("SELECT 1 FROM product_actions WHERE action_id=63302 AND kind='candidate' "
+                            "AND product_id=?", (p_a,)), "«Проверить сейчас» не перечитало акции"
+        finally:
+            cand34[p_a] = removed
+
+
+def test_auto_add_in_product_card():
+    """Общая проверка 5: в карточке товара — «Ozon добавит сам по цене X», метка при цене
+    ниже минимума; ошибка метода автодобавления — только предупреждение."""
+    with Ctx() as c:
+        import app as A
+        for pid, s in MockOzonClient._state.items():
+            put_product(pid, s["price"])
+        c.rep._sync_actions(c.mock, force=True)
+        aa = db.q("SELECT product_id, action_id, price_to_auto_add FROM auto_add")
+        assert aa, "автодобавления не загружены в auto_add"
+        row = aa[0]
+        pid, price = row["product_id"], row["price_to_auto_add"]
+        cl = A.app.test_client()
+        html = cl.get(f"/product/{pid}").get_data(as_text=True)
+        assert "Ozon добавит сам по цене" in html, "блок автодобавления не показан"
+        assert f"по цене <b>{A.fmt(price)} ₽</b>" in html, html
+        # цена автодобавления ниже минимума селлера — метка
+        db.save_rule(pid, mode="guard", min_price=price + 1)
+        html2 = cl.get(f"/product/{pid}").get_data(as_text=True)
+        assert "Требует внимания: Ozon добавит в акцию ниже минимума" in html2
+        # ошибка метода автодобавления — только предупреждение, карточка живёт
+        class FragileAA(MockOzonClient):
+            def get_auto_add_products(self, action_id):
+                if action_id == 63302:
+                    raise KeyError("no 'result' in response")
+                return super().get_auto_add_products(action_id)
+
+        c.rep._sync_actions(FragileAA("1", "test-key"), force=True)
+        warns = " ".join(r["message"] for r in db.q("SELECT message FROM events WHERE level='warn'"))
+        assert "автодобавление не получено" in warns, warns
+        assert db.q("SELECT 1 FROM auto_add WHERE product_id=?", (pid,)), "старые auto_add стёрты"
+        assert "Ozon добавит сам по цене" in cl.get(f"/product/{pid}").get_data(as_text=True)
 
 
 def main():

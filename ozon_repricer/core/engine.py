@@ -401,9 +401,10 @@ class Repricer:
                        "last_ok": None, "next_run": None}
         self._wake = threading.Event()
         self._stop = False
+        self.force_actions = False  # «Проверить сейчас»: перечитать акции даже внутри интервала
 
     # ---------- синхронизация ----------
-    def sync(self, client, s):
+    def sync(self, client, s, force_actions=False):
         items = client.get_all_prices(s.get("visibility") or "ALL")
         # остатки FBO/FBS/FBP; ошибка получения остатков НЕ должна ломать проверку цен
         stocks = {}
@@ -494,7 +495,11 @@ class Repricer:
             except Exception as e:
                 db.log("warn", f"Не удалось получить названия товаров: {e}")
         if hasattr(client, "get_actions"):  # поддержка акций есть и у Ozon, и у мока
-            self._sync_actions(client)
+            try:
+                self._sync_actions(client, force=force_actions)
+            except Exception as e:
+                # любая ошибка синхронизации акций не должна ронять проверку цен
+                db.log("warn", f"Синхронизация акций: {e}")
         return len(items)
 
     # ---------- применение правил ----------
@@ -575,49 +580,46 @@ class Repricer:
         return sent, errors, skipped
 
     # ---------- акции ----------
-    def _sync_actions(self, client):
-        """Актуализация участия товаров в акциях Ozon (таблица product_actions)."""
+    def _sync_actions(self, client, force=False):
+        """Актуализация участия товаров в акциях Ozon (product_actions) и автодобавлений (auto_add).
+
+        Акции перечитываются не чаще раза в actions_interval_min минут (по умолчанию 120)
+        и всегда при принудительном запуске («Проверить сейчас»). Решения по ценам работают
+        на каждом запуске независимо от этого интервала.
+
+        Любая ошибка здесь (OzonError, ValueError, KeyError, ошибка разбора JSON) НЕ должна
+        ронять проверку цен: пишем предупреждение в «События» и продолжаем. Для акции, которую
+        прочитать не удалось, прежние строки в базе сохраняются. Полностью удаляются только
+        акции, которых больше нет в /v1/actions или у которых истёк date_end.
+        """
+        s = db.get_settings()
+        interval = max(0, int(_f(s.get("actions_interval_min")) or 120))
+        last = s.get("actions_synced_at") or ""
+        if not force and interval and last:
+            try:
+                last_dt = datetime.strptime(last[:19], "%Y-%m-%d %H:%M:%S")
+                if datetime.now() - last_dt < timedelta(minutes=interval):
+                    return  # ещё не время перечитывать акции
+            except ValueError:
+                pass
         try:
-            actions = self._active_actions(client.get_actions())
+            all_actions = client.get_actions()
         except Exception as e:
             db.log("warn", f"Акции не получены (проверьте права ключа): {e}")
             return
-        rows = []
-        for a in actions:
+        if not all_actions:
+            # пустому списку не доверяем: ничего не стираем, чтобы не потерять данные акций
+            db.log("warn", "Акции не получены (сервер вернул пустой список) — прежние данные сохранены")
+            return
+        now = datetime.utcnow()
+        active, expired_aids, api_ids = [], set(), set()
+        for a in all_actions:
             try:
                 aid = int(a.get("id") or 0)
             except (TypeError, ValueError):
-                continue
-            if not aid:
-                continue
-            title = a.get("title") or ""
-            date_from, date_to = a.get("date_start"), a.get("date_end")
-            try:
-                for pr in client.get_action_products(aid) or []:
-                    pid = int(pr.get("id") or pr.get("product_id") or 0)
-                    if pid:
-                        rows.append((pid, aid, "participant", title, date_from, date_to, "STARTED",
-                                     _f(pr.get("price")), _f(pr.get("action_price")),
-                                     _f(pr.get("max_action_price"))))
-                for pr in client.get_action_candidates(aid) or []:
-                    pid = int(pr.get("id") or pr.get("product_id") or 0)
-                    if pid:
-                        rows.append((pid, aid, "candidate", title, date_from, date_to, "STARTED",
-                                     _f(pr.get("price")), _f(pr.get("action_price")),
-                                     _f(pr.get("max_action_price"))))
-            except OzonError as e:
-                db.log("warn", f"Акция «{title}» ({aid}): {e}")
-                continue
-        if rows or not actions:
-            db.save_actions(rows)
-            db.set_setting("actions_synced_at", db.now())
-
-    @staticmethod
-    def _active_actions(actions):
-        """Акции, которые ещё не закончились (или без даты окончания), до 40 штук."""
-        now = datetime.utcnow()
-        out = []
-        for a in actions or []:
+                aid = 0
+            if aid:
+                api_ids.add(aid)
             end = (a.get("date_end") or "").strip()
             if end:
                 try:
@@ -625,11 +627,63 @@ class Repricer:
                 except ValueError:
                     end_dt = None
                 if end_dt is not None and end_dt < now:
+                    if aid:
+                        expired_aids.add(aid)
                     continue
-            out.append(a)
-            if len(out) >= 40:
-                break
-        return out
+            active.append(a)
+        if len(active) > 40:
+            db.log("warn", f"Активных акций больше 40 ({len(active)}) — перечитаны будут только "
+                           f"первые 40, остальные сохраняют прежние данные")
+        # удаляем полностью только акции, которых уже нет в /v1/actions, или у которых истёк date_end
+        db_ids = {r["action_id"] for r in db.q("SELECT DISTINCT action_id FROM product_actions")}
+        gone_aids = ((db_ids - api_ids) | expired_aids) & db_ids
+        rows, auto_rows = [], []
+        reset_pa, reset_aa = set(), set()
+        for a in active[:40]:
+            try:
+                aid = int(a.get("id") or 0)
+            except (TypeError, ValueError):
+                aid = 0
+            if not aid:
+                continue
+            title = a.get("title") or ""
+            date_from, date_to = a.get("date_start"), a.get("date_end")
+            act_rows = []
+            try:
+                for pr in client.get_action_products(aid) or []:
+                    pid = int(pr.get("id") or pr.get("product_id") or 0)
+                    if pid:
+                        act_rows.append((pid, aid, "participant", title, date_from, date_to, "STARTED",
+                                         _f(pr.get("price")), _f(pr.get("action_price")),
+                                         _f(pr.get("max_action_price"))))
+                for pr in client.get_action_candidates(aid) or []:
+                    pid = int(pr.get("id") or pr.get("product_id") or 0)
+                    if pid:
+                        act_rows.append((pid, aid, "candidate", title, date_from, date_to, "STARTED",
+                                         _f(pr.get("price")), _f(pr.get("action_price")),
+                                         _f(pr.get("max_action_price"))))
+            except Exception as e:
+                db.log("warn", f"Акция «{title}» ({aid}): {e}")
+                continue  # акция не прочитана — её прежние данные в базе сохраняются
+            rows.extend(act_rows)
+            reset_pa.add(aid)
+            # «Ozon добавит сам по цене X» — ошибка этого метода только предупреждение
+            try:
+                aa_rows = []
+                for pr in client.get_auto_add_products(aid) or []:
+                    pid = int(pr.get("product_id") or pr.get("id") or 0)
+                    ap = _f(pr.get("action_price_to_auto_add"))
+                    if pid and ap:
+                        aa_rows.append((pid, aid, ap, db.now()))
+                auto_rows.extend(aa_rows)
+                reset_aa.add(aid)
+            except Exception as e:
+                db.log("warn", f"Акция «{title}» ({aid}): автодобавление не получено: {e}")
+        try:
+            db.save_actions(rows, gone_aids, reset_pa, reset_aa, auto_rows)
+            db.set_setting("actions_synced_at", db.now())
+        except Exception as e:
+            db.log("warn", f"Не удалось сохранить данные акций: {e}")
 
     def _promo_recent(self, pid, action_id, source) -> bool:
         """Действие с этой акцией уже записывалось за последние 12 часов (реальное или тренировочное)."""
@@ -751,7 +805,9 @@ class Repricer:
         try:
             s = db.get_settings()
             client = make_client(s["client_id"], s["api_key"])
-            n = self.sync(client, s)
+            force_actions = self.force_actions
+            self.force_actions = False
+            n = self.sync(client, s, force_actions=force_actions)
             sent, errors, skipped, promo_done = self.apply_rules(client, s)
             db.cleanup(int(_f(s.get("history_days")) or 365))
             mode = "тренировка" if s.get("dry_run") == "1" else "боевой"

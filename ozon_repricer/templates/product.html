@@ -69,6 +69,12 @@
       {% if actions %}<h2 style="margin-top:16px">Акции</h2>
         {% for a in actions %}<div style="margin-bottom:6px">{{ a.title }}<br><span class="muted">{{ (a['from'] or '')[:10] }} — {{ (a['to'] or '')[:10] }}</span></div>{% endfor %}
       {% endif %}
+      {% if auto_add %}<h2 style="margin-top:16px">Автодобавление (Ozon добавит сам)</h2>
+        {% for a in auto_add %}<div style="margin-bottom:6px">«{{ a.title }}» — Ozon добавит сам по цене <b>{{ a.price_to_auto_add|rub }} ₽</b>
+          {% if rule.min_price and a.price_to_auto_add and a.price_to_auto_add < rule.min_price - 0.5 %}<span class="pill atn">Требует внимания: Ozon добавит в акцию ниже минимума</span>{% endif %}
+        </div>{% endfor %}
+        <p class="muted" style="font-size:12px">Данные /v2/actions/auto-add/products/list, обновляются вместе со списком акций.</p>
+      {% endif %}
     </div>
 
     <div class="panel">
@@ -139,7 +145,7 @@
         {% endfor %}
         </tbody>
       </table>
-      <p class="muted" style="font-size:12px">Список акций обновляется при каждой проверке вместе с синхронизацией товаров.</p>
+      <p class="muted" style="font-size:12px">Список акций и цены автодобавления обновляются не чаще раза в {{ S.actions_interval_min|int }} мин (по кнопке «Проверить сейчас» — всегда).</p>
       {% else %}
       <p class="muted">Товар пока не участвует в акциях Ozon и не числится кандидатом. Список обновится при следующей проверке.</p>
       {% endif %}

@@ -22,6 +22,8 @@
   <div class="form-row"><label>Автопроверка</label>
     <label class="switch"><input type="checkbox" name="auto_enabled" {{ 'checked' if S.auto_enabled=='1' }}> проверять цены по расписанию, пока программа открыта</label></div>
   <div class="form-row"><label>Проверять каждые, мин</label><input type="number" name="interval_min" min="5" value="{{ S.interval_min }}"></div>
+  <div class="form-row"><label>Акции: перечитывать, мин</label><input type="number" name="actions_interval_min" min="5" value="{{ S.actions_interval_min }}"></div>
+  <div class="form-row"><span></span><div class="hint">Список акций Ozon перечитываем не чаще этого интервала (по умолчанию 120 мин). Кнопка «Проверить сейчас» перечитывает акции всегда. Цены проверяются каждый запуск.</div></div>
   <div class="form-row"><label>Контролировать цену</label>
     <select name="control_basis">
       <option value="seller" {{ 'selected' if S.control_basis=='seller' }}>Со скидками продавца — точная, из API</option>
