@@ -82,6 +82,8 @@ def load_config():
         "DAYS_HISTORY": 90, "ANALYSIS_DAYS": 30, "WASTE_MIN_COST": 300, "ALERT_COST_JUMP": 50,
         "BID_STEP": 20, "MOBILE_MIN": 50,
         "OUTPUT_DIR": "report", "REPORT_USER": "", "REPORT_PASSWORD": "", "KEEP_EXCEL_DAYS": 30,
+        "AI_ENABLED": False, "AI_BASE_URL": "", "AI_API_KEY": "", "AI_MODEL": "",
+        "AI_AUTH_SCHEME": "Bearer", "AI_MAX_TOKENS": 2000, "AI_TIMEOUT": 120, "AI_CONTEXT_NOTE": "",
     }
     for k in d:
         if hasattr(c, k):
@@ -771,6 +773,15 @@ def write_excel(model, path):
                         ("Расход", "money"), ("Конверсии", "int"), ("Цена конверсии", "money")],
          [[cn(r[0])] + r[1:6] + [r[6] or None] for r in T["devices"]]),
     ]
+    ai = model.get("ai") or {}
+    if ai.get("recommendations"):
+        prio = {"high": "Высокий", "medium": "Средний", "low": "Низкий"}
+        sheets.append((
+            "ИИ-рекомендации",
+            [("Приоритет", None), ("Категория", None), ("Рекомендация", None), ("Подробно", None),
+             ("Ожидаемый эффект", None)],
+            [[prio.get(r.get("priority"), r.get("priority")), r.get("category"), r.get("title"),
+              r.get("details"), r.get("expected_effect")] for r in ai["recommendations"]]))
     write_xlsx(path, sheets)
 
 
@@ -857,6 +868,22 @@ def main():
             raise
         raw.setdefault("errors", []).insert(0, "Свежие данные не получены (%s). Показаны данные прошлого запуска." % e)
     model = analyze(raw)
+    # ИИ-советник: ошибки не должны ронять отчёт
+    model["ai"] = None
+    try:
+        import ai_advisor
+        if DEMO:
+            model["ai"] = ai_advisor.demo_block(model)
+        elif CFG.get("AI_ENABLED"):
+            model["ai"] = ai_advisor.ask(model, CFG)
+            if model["ai"].get("error"):
+                log("ИИ-советник: %s" % model["ai"]["error"])
+            else:
+                log("ИИ-советник: %d рекомендаций (%s)" % (
+                    len(model["ai"].get("recommendations", [])), model["ai"].get("provider", "")))
+    except Exception as e:
+        log("ИИ-советник пропущен: %s" % e)
+        model["ai"] = {"error": str(e)} if CFG.get("AI_ENABLED") else None
     publish(model)
 
 
