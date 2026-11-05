@@ -64,3 +64,38 @@ REPORT_USER = ""
 REPORT_PASSWORD = ""
 
 KEEP_EXCEL_DAYS = 30   # Excel-файлы старше стольких дней удаляются
+
+# --- 7. ИИ-советник (необязательно) -----------------------------------
+# Нейросеть анализирует сводку статистики как эксперт-медиабаер и добавляет
+# в дашборд блок «Экспертный анализ». Только советует — ничего не применяет.
+# Включается заполнением ключа. Без ключа бот работает как раньше (правила).
+AI_ENABLED = False     # True — включить ИИ-анализ
+
+# Выберите провайдера и заполните три строки под него:
+#
+#  YandexGPT (оплата в рублях, console.cloud.yandex.ru → API-ключ сервисного аккаунта):
+#    AI_BASE_URL    = "https://llm.api.cloud.yandex.net/v1"
+#    AI_AUTH_SCHEME = "Api-Key"
+#    AI_MODEL       = "gpt://<ID каталога>/yandexgpt-lite/latest"   # экономно
+#    AI_MODEL       = "gpt://<ID каталога>/yandexgpt/latest"        # глубже, дороже
+#
+#  Kimi (platform.moonshot.ai → API Keys):
+#    AI_BASE_URL    = "https://api.moonshot.ai/v1"
+#    AI_AUTH_SCHEME = "Bearer"
+#    AI_MODEL       = "kimi-k2-0905-preview"   # актуальное имя — в консоли Moonshot
+#
+#  DeepSeek (platform.deepseek.com):
+#    AI_BASE_URL    = "https://api.deepseek.com/v1"
+#    AI_AUTH_SCHEME = "Bearer"
+#    AI_MODEL       = "deepseek-chat"
+AI_BASE_URL = ""
+AI_API_KEY = ""        # секретный ключ — как пароль, никому не показывайте
+AI_MODEL = ""
+AI_AUTH_SCHEME = "Bearer"
+
+# Тонкости (обычно менять не нужно):
+AI_MAX_TOKENS = 2000   # максимум токенов в ответе (влияет на стоимость)
+AI_TIMEOUT = 120       # секунд ожидания ответа нейросети
+
+# Свободный комментарий для нейросети (контекст бизнеса: маржа, сезонность и т.п.)
+AI_CONTEXT_NOTE = ""
