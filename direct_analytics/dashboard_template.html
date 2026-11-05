@@ -58,6 +58,24 @@ button:disabled{opacity:.5;cursor:default}
 .st-warning{background:var(--warn-bg);color:var(--warn)}
 .st-good{background:var(--good-bg);color:var(--good)}
 .st-info{background:var(--surface-2);color:var(--text-2)}
+/* ИИ-советник */
+.aicard{border:1px solid transparent;background:
+  linear-gradient(var(--surface),var(--surface)) padding-box,
+  linear-gradient(120deg,#7c5cff,#2a78d6 55%,#18a999) border-box}
+.ai-badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;letter-spacing:.04em;
+  text-transform:uppercase;background:linear-gradient(90deg,#7c5cff,#2a78d6 60%,#18a999);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.ai-summary{margin:10px 0 14px;line-height:1.55}
+.ai-rec{border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:8px}
+.ai-rec h3{font-size:14px;margin:0 0 4px}
+.ai-meta{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.chip{display:inline-block;font-size:12px;padding:2px 8px;border-radius:99px;background:var(--surface-2);color:var(--text-2)}
+.chip.prio-high{background:var(--crit-bg);color:var(--crit);font-weight:600}
+.chip.prio-medium{background:var(--warn-bg);color:var(--warn)}
+.chip.prio-low{background:var(--good-bg);color:var(--good)}
+.ai-eff{color:var(--good);font-size:13px;margin-top:6px}
+.ai-watch{margin-top:10px}
+.ai-foot{margin-top:10px;font-size:12px;color:var(--text-3)}
 .banner span{color:var(--text)}
 .kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:10px;margin-bottom:16px}
 .kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px}
@@ -140,6 +158,11 @@ footer{color:var(--text-3);font-size:12px;margin-top:20px}
     <button class="btn primary" id="applyBtn" disabled>Применить выбранные</button>
     <span class="sub" id="selinfo">Ничего не выбрано</span>
   </div>
+</div>
+
+<div class="card aicard" id="aicard" style="display:none">
+  <h2><span class="ai-badge">✦ Экспертный анализ — нейросеть</span></h2>
+  <div id="aibody"></div>
 </div>
 
 <div class="card">
@@ -384,10 +407,34 @@ function detail(){
     '</tbody>'+(D.tables[dtab].length>300?'':'');
 }
 
+function aiBlock(){
+  const A=D.ai, card=$('#aicard');
+  if(!A){card.style.display='none';return}
+  card.style.display='';
+  const prio={high:['Высокий приоритет','prio-high'],medium:['Средний','prio-medium'],low:['Низкий','prio-low']};
+  if(A.error){
+    $('#aibody').innerHTML=`<div class="banner st-warning"><b>!</b><span>ИИ-анализ не выполнен: ${esc(A.error)}</span></div>`;
+    return
+  }
+  let h='';
+  if(A.summary) h+=`<div class="ai-summary">${esc(A.summary)}</div>`;
+  for(const r of A.recommendations||[]){
+    const p=prio[r.priority]||prio.medium;
+    h+=`<div class="ai-rec"><div class="ai-meta"><span class="chip ${p[1]}">${p[0]}</span><span class="chip">${esc(r.category)}</span></div>`+
+       `<h3>${esc(r.title)}</h3><div>${esc(r.details)}</div>`+
+       (r.expected_effect?`<div class="ai-eff">Ожидаемый эффект: ${esc(r.expected_effect)}</div>`:'')+`</div>`;
+  }
+  if((A.watchlist||[]).length)
+    h+=`<div class="ai-watch"><b>За чем следить:</b> ${A.watchlist.map(w=>`<span class="chip">${esc(w)}</span>`).join(' ')}</div>`;
+  h+=`<div class="ai-foot">Сформировано нейросетью${A.provider?' ('+esc(A.provider)+')':''}${A.demo?' · ДЕМО-пример':''}. `+
+     `Это рекомендации, а не действия — ничего не применяется автоматически, проверяйте перед внедрением.</div>`;
+  $('#aibody').innerHTML=h;
+}
+
 function renderAll(){header();kpis();charts();camps()}
 if(!D){document.body.innerHTML='<p style="padding:20px">Нет данных. Запустите direct_report.py.</p>'}
 else{
-  renderAll();banners();props();logTable();detail();
+  renderAll();banners();props();aiBlock();logTable();detail();
   $('#foot').textContent=`Версия ${D.version} · Целевая цена конверсии ${D.target_cpa?rub(D.target_cpa):'—'} · полные таблицы в Excel`;
   if(!local&&!D.demo) call({action:'log'}).then(j=>{LOG=j.log;props();logTable()}).catch(()=>{});
 }
