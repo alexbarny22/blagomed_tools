@@ -132,6 +132,7 @@ footer{color:var(--text-3);font-size:12px;margin-top:20px}
     <div class="seg" id="period"></div>
     <div class="seg" id="net"></div>
     <a class="btn" id="xls" href="#">⬇ Excel</a>
+    <a class="btn" id="exitL" href="?exit=1" style="display:none">Выйти</a>
   </div>
 </header>
 
@@ -219,6 +220,7 @@ function header(){
   for(const [k,t] of [['all','Всё'],['S','Поиск'],['N','Сети']]){const b=document.createElement('button');b.textContent=t;b.className=k===net?'on':'';
     b.onclick=()=>{net=k;ss.set('net',k);renderAll()};N.appendChild(b)}
   const x=$('#xls'); if(D.excel){x.href=D.excel}else{x.style.display='none'}
+  if(location.protocol!=='file:'&&!D.demo)$('#exitL').style.display='';
   $('#adays').textContent=D.analysis_days;
 }
 
