@@ -4,8 +4,9 @@ xlsx_writer.py
 dashboard_template.html
 apply_template.php
 ai_template.php
-update.py
 ai_advisor.py
+gate_template.php
+update.py
 config.example.py
 run.sh
 demo.bat
