@@ -799,7 +799,8 @@ def publish(model):
     xname = "direct_%s.xlsx" % stamp
     try:
         write_excel(model, os.path.join(out, xname))
-        model["excel"] = xname
+        # при включённом входе Excel отдаёт гейт index.php (прямой доступ к .xlsx закрыт)
+        model["excel"] = ("?xls=" + xname) if (CFG["REPORT_USER"] and CFG["REPORT_PASSWORD"]) else xname
     except Exception as e:
         model["errors"].append("Excel не записан: %s" % e)
         log(traceback.format_exc())
@@ -815,7 +816,10 @@ def publish(model):
     if not st.get("key"):
         st["key"] = secrets.token_hex(16)
     st.update({"token": CFG["DIRECT_TOKEN"], "client_login": CFG["CLIENT_LOGIN"], "api": api_base(),
-               "proposals": PROPOSALS, "log": ACTIONS_LOG, "max_age_days": 4, "demo": DEMO})
+               "proposals": PROPOSALS, "log": ACTIONS_LOG, "max_age_days": 4, "demo": DEMO,
+               "report_user": CFG["REPORT_USER"],
+               "report_pass_hash": hashlib.sha256(CFG["REPORT_PASSWORD"].encode("utf-8")).hexdigest()
+               if CFG["REPORT_PASSWORD"] else ""})
     write_json(APPLY_SETTINGS, st)
     try:
         os.chmod(APPLY_SETTINGS, 0o600)
@@ -849,20 +853,28 @@ def publish(model):
     model["actions"] = read_json(ACTIONS_LOG, [])[-200:]
     html = open(os.path.join(HERE, "dashboard_template.html"), encoding="utf-8").read()
     data = json.dumps(model, ensure_ascii=False).replace("</", "<\\/")
-    with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as f:
-        f.write(html.replace("/*__DATA__*/null", data))
+    page = html.replace("/*__DATA__*/null", data)
 
-    # пароль на папку отчёта
     hta = os.path.join(out, ".htaccess")
     if CFG["REPORT_USER"] and CFG["REPORT_PASSWORD"]:
-        pw = os.path.join(HERE, ".htpasswd_direct")
-        with open(pw, "w", encoding="utf-8") as f:
-            f.write(htpasswd_line(CFG["REPORT_USER"], CFG["REPORT_PASSWORD"]))
+        # вход через форму на странице (index.php + подписанная cookie на 30 дней)
+        gate = open(os.path.join(HERE, "gate_template.php"), encoding="utf-8").read().replace(
+            "__SETTINGS_PATH__", APPLY_SETTINGS.replace("\\", "/"))
+        with open(os.path.join(out, "index.php"), "w", encoding="utf-8") as f:
+            f.write(gate + page)
+        with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as f:
+            f.write('<!doctype html><meta http-equiv="refresh" content="0; url=index.php">'
+                    '<a href="index.php">Перейти к отчёту</a>\n')
         with open(hta, "w", encoding="utf-8") as f:
-            f.write('AuthType Basic\nAuthName "Direct report"\nAuthUserFile %s\nRequire valid-user\n'
-                    'Options -Indexes\n<FilesMatch "\\.(html|php)$">\nHeader set Cache-Control "no-store"\n</FilesMatch>\n'
-                    % pw.replace("\\", "/"))
+            f.write('DirectoryIndex index.php index.html\nOptions -Indexes\n'
+                    '<FilesMatch "\\.xlsx$">\nRequire all denied\n</FilesMatch>\n'
+                    '<FilesMatch "\\.(html|php)$">\nHeader set Cache-Control "no-store"\n</FilesMatch>\n')
     else:
+        with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as f:
+            f.write(page)
+        old_gate = os.path.join(out, "index.php")
+        if os.path.exists(old_gate):
+            os.remove(old_gate)
         with open(hta, "w", encoding="utf-8") as f:
             f.write("Options -Indexes\n")
     log("Готово: %s (%d предложений)" % (os.path.join(out, "index.html"), len(model["proposals"])))
