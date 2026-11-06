@@ -354,8 +354,9 @@ function selInfo(){
   $('#applyBtn').disabled=!n;
 }
 const local = location.protocol==='file:';
+const BASE = location.origin + location.pathname.replace(/[^/]*$/, '');   // абсолютный путь: fetch не принимает URL с логином:паролем
 async function call(body){
-  const r=await fetch('apply.php',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:D.apply_key,...body})});
+  const r=await fetch(BASE+'apply.php',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:D.apply_key,...body})});
   const j=await r.json().catch(()=>({ok:false,error:'Сервер ответил ошибкой '+r.status}));
   if(!j.ok) throw new Error(j.error||'ошибка'); return j;
 }
@@ -451,7 +452,7 @@ function aiBlock(){
   $('#aiBtn').onclick=async()=>{
     const btn=$('#aiBtn'); btn.disabled=true; btn.textContent='Анализирую… (до минуты)';
     try{
-      const r=await fetch('ai.php',{method:'POST',headers:{'Content-Type':'application/json'},
+      const r=await fetch(BASE+'ai.php',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({key:D.apply_key,action:'ask',days:aiDays})});
       const j=await r.json().catch(()=>({ok:false,error:'Сервер ответил ошибкой '+r.status}));
       if(!j.ok) throw new Error(j.error||'ошибка');
@@ -463,7 +464,7 @@ function aiBlock(){
   };
   showCached();
   if(!local)   // что уже посчитано сегодня — показать сразу, нейросеть не вызывается
-    fetch('ai.php',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:D.apply_key,action:'last'})})
+    fetch(BASE+'ai.php',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:D.apply_key,action:'last'})})
       .then(r=>r.json()).then(j=>{if(j.ok&&j.results){cache=j.results;showCached()}}).catch(()=>{});
 }
 
