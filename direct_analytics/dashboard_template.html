@@ -407,15 +407,9 @@ function detail(){
     '</tbody>'+(D.tables[dtab].length>300?'':'');
 }
 
-function aiBlock(){
-  const A=D.ai, card=$('#aicard');
-  if(!A){card.style.display='none';return}
-  card.style.display='';
+/* ---------- ИИ-советник (по кнопке) ---------- */
+function renderAiResult(A){
   const prio={high:['Высокий приоритет','prio-high'],medium:['Средний','prio-medium'],low:['Низкий','prio-low']};
-  if(A.error){
-    $('#aibody').innerHTML=`<div class="banner st-warning"><b>!</b><span>ИИ-анализ не выполнен: ${esc(A.error)}</span></div>`;
-    return
-  }
   let h='';
   if(A.summary) h+=`<div class="ai-summary">${esc(A.summary)}</div>`;
   for(const r of A.recommendations||[]){
@@ -426,9 +420,51 @@ function aiBlock(){
   }
   if((A.watchlist||[]).length)
     h+=`<div class="ai-watch"><b>За чем следить:</b> ${A.watchlist.map(w=>`<span class="chip">${esc(w)}</span>`).join(' ')}</div>`;
-  h+=`<div class="ai-foot">Сформировано нейросетью${A.provider?' ('+esc(A.provider)+')':''}${A.demo?' · ДЕМО-пример':''}. `+
+  h+=`<div class="ai-foot">Сформировано нейросетью${A.provider?' ('+esc(A.provider)+')':''}${A.date?' по данным на '+esc(A.date):''}${A.days?' · период '+A.days+' дн':''}${A.demo?' · ДЕМО-пример':''}. `+
      `Это рекомендации, а не действия — ничего не применяется автоматически, проверяйте перед внедрением.</div>`;
-  $('#aibody').innerHTML=h;
+  return h;
+}
+
+function aiBlock(){
+  const A=D.ai, card=$('#aicard');
+  if(!A){card.style.display='none';return}
+  card.style.display='';
+  if(A.demo){$('#aibody').innerHTML=renderAiResult(A);return}
+  if(A.error){$('#aibody').innerHTML=`<div class="banner st-warning"><b>!</b><span>ИИ-анализ не выполнен: ${esc(A.error)}</span></div>`;return}
+  if(!A.available){card.style.display='none';return}
+  const periods=A.periods&&A.periods.length?A.periods:[30];
+  let aiDays=periods[periods.length-1], cache={};
+  const body=$('#aibody');
+  body.innerHTML=`<div class="sub" style="margin:6px 0 10px">Нейросеть-эксперт по Директу разберёт статистику и даст рекомендации по эффективности. `+
+    `Вызывается только по этой кнопке — ночной отчёт её не запускает и токены впустую не тратит. Повторный просмотр за тот же день бесплатный.</div>`+
+    `<div class="row"><div class="seg" id="aiperiod"></div>`+
+    `<button class="btn primary" id="aiBtn">✦ Сделать экспертный анализ</button>`+
+    `<span class="sub" id="aiinfo"></span></div><div id="airesult" style="margin-top:10px"></div>`;
+  const P=$('#aiperiod');
+  for(const n of periods){const b=document.createElement('button');b.textContent=n+' дн';b.className=n===aiDays?'on':'';
+    b.onclick=()=>{aiDays=n;P.querySelectorAll('button').forEach(x=>x.className=parseInt(x.textContent)===n?'on':'');showCached()};P.appendChild(b)}
+  function showCached(){
+    const r=cache[aiDays];
+    $('#airesult').innerHTML=r?renderAiResult(r):'';
+    $('#aiinfo').textContent=r?'Посчитано сегодня по этому периоду — показано из кэша':'';
+  }
+  $('#aiBtn').onclick=async()=>{
+    const btn=$('#aiBtn'); btn.disabled=true; btn.textContent='Анализирую… (до минуты)';
+    try{
+      const r=await fetch('ai.php',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key:D.apply_key,action:'ask',days:aiDays})});
+      const j=await r.json().catch(()=>({ok:false,error:'Сервер ответил ошибкой '+r.status}));
+      if(!j.ok) throw new Error(j.error||'ошибка');
+      cache[aiDays]=j.ai; showCached();
+    }catch(e){
+      $('#airesult').innerHTML=`<div class="banner st-warning"><b>!</b><span>ИИ-анализ не выполнен: ${esc(e.message)}</span></div>`;
+    }
+    btn.disabled=false; btn.textContent='✦ Сделать экспертный анализ';
+  };
+  showCached();
+  if(!local)   // что уже посчитано сегодня — показать сразу, нейросеть не вызывается
+    fetch('ai.php',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:D.apply_key,action:'last'})})
+      .then(r=>r.json()).then(j=>{if(j.ok&&j.results){cache=j.results;showCached()}}).catch(()=>{});
 }
 
 function renderAll(){header();kpis();charts();camps()}
