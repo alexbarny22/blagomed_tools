@@ -3,6 +3,7 @@ direct_report.py
 xlsx_writer.py
 dashboard_template.html
 apply_template.php
+ai_template.php
 update.py
 ai_advisor.py
 config.example.py
