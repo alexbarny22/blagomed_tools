@@ -92,6 +92,7 @@
     <div class="card">
       <div class="row">
         <span>Версия: <b id="ver">—</b></span>
+        <button class="btn" onclick="logout()">Выйти</button>
         <button class="btn" onclick="admin('/api/restart','Перезапустить бота? Он проверит обновления на GitHub и запустится снова (около минуты).')">Обновить и перезапустить</button>
         <button class="btn" onclick="admin('/api/reinstall','Переустановить бота? Все файлы будут заново скачаны с GitHub. Настройки, сопоставление и кэш сохранятся.')">Переустановить</button>
         <button class="btn" onclick="if(confirm('Загрузить номенклатуру из 1С заново? Займёт пару минут.'))post('/api/reload_noms',{})">Обновить номенклатуру</button>
@@ -121,18 +122,23 @@ function tab(n){ curTab=n; $("p1").classList.toggle("hidden",n!==1); $("p2").cla
 
 async function post(url, body){
   const r = await fetch(B+url.replace(/^\//,""),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
+  if (r.status===401){ location.href = B; return {ok:false}; }
   const j = await r.json().catch(()=>({}));
   if (j.started===false) alert("Бот сейчас занят — дождитесь окончания операции.");
   if (j.ok===false && j.msg) alert(j.msg);
   poll(); return j;
 }
 async function setDst(){ await post("/api/dst",{dst:val("dst")}); }
+async function logout(){ await post("/api/logout",{}); location.href = B; }
 async function admin(url, q){
   if(!confirm(q)) return;
   const j = await post(url,{});
   if (j.ok) { $("status").textContent = "Перезапуск… страница обновится сама"; setTimeout(()=>location.reload(), 20000); }
 }
-async function loadLog(){ const r = await fetch(B+"api/log"); $("log").textContent = await r.text(); $("log").scrollTop = 1e9; }
+async function loadLog(){
+  const r = await fetch(B+"api/log");
+  if (r.status===401){ location.href = B; return; }
+  $("log").textContent = await r.text(); $("log").scrollTop = 1e9; }
 
 function render(){
   const q = val("q").toLowerCase().replace(/ё/g,"е"), only = $("onlySel").checked;
@@ -173,7 +179,9 @@ async function doMove(){
 
 async function poll(){
   try{
-    const r = await fetch(B+"api/state"); S = await r.json();
+    const r = await fetch(B+"api/state");
+    if (r.status===401){ location.href = B; return; }
+    S = await r.json();
   }catch(e){ $("status").textContent = "Нет связи с ботом (перезапускается?)"; return; }
   $("status").textContent = S.status; $("status").classList.toggle("busy", S.busy);
   $("go").disabled = S.busy || !S.ready;

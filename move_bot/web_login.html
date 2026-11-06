@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вход — Передача в магазин (МГ)</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1d2330; --mute:#6b7280; --line:#e3e6ea;
+          --acc:#2563eb; --bad:#fde8e8; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 "Segoe UI", Arial, sans-serif; background:var(--bg); color:var(--ink);
+         display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .login { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:26px 28px;
+           width:360px; max-width:calc(100vw - 32px); box-shadow:0 8px 30px rgba(0,0,0,.06); }
+  h1 { font-size:16px; margin:0 0 4px; }
+  p.sub { margin:0 0 16px; color:var(--mute); }
+  label.lbl { display:block; font-size:13px; margin:12px 0 4px; }
+  input[type=text], input[type=password] { width:100%; font:inherit; padding:9px 10px;
+    border:1px solid var(--line); border-radius:7px; background:#fff; }
+  input[type=text]:focus, input[type=password]:focus { border-color:var(--acc); outline:none; }
+  .remember { display:flex; align-items:flex-start; gap:8px; margin:14px 0 16px; font-size:13px;
+              cursor:pointer; line-height:1.35; }
+  .remember input { margin-top:2px; }
+  button { width:100%; font:inherit; font-weight:600; padding:10px; border:0; border-radius:7px;
+           background:var(--acc); color:#fff; cursor:pointer; }
+  button:hover { background:#1d4ed8; }
+  button:disabled { opacity:.6; cursor:default; }
+  #err { display:none; background:var(--bad); color:#9f1239; padding:9px 11px; border-radius:7px;
+         margin-top:14px; font-size:13px; }
+</style>
+</head>
+<body>
+<div class="login">
+  <h1>Передача в магазин (МГ)</h1>
+  <p class="sub">Вход в панель управления ботом</p>
+
+  <form id="f" method="post" autocomplete="on">
+    <label class="lbl" for="login">Логин</label>
+    <input type="text" id="login" name="login" autocomplete="username" required autofocus>
+    <label class="lbl" for="password">Пароль</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <label class="remember"><input type="checkbox" name="remember" id="remember" checked>
+      <span>Запомнить логин и пароль на этом компьютере</span></label>
+    <button type="submit" id="go">Войти</button>
+    <div id="err"></div>
+  </form>
+</div>
+
+<script>
+const B = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
+const $ = id => document.getElementById(id);
+$("f").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const err = $("err"), go = $("go");
+  err.style.display = "none"; go.disabled = true;
+  try {
+    const fd = new FormData($("f"));
+    const r = await fetch(B + "api/login", {method: "POST", body: fd});
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j.ok){ location.href = B; return; }
+    err.textContent = j.msg || "Не удалось войти. Проверьте логин и пароль.";
+    err.style.display = "block";
+  } catch (e) {
+    err.textContent = "Нет связи с ботом. Попробуйте ещё раз.";
+    err.style.display = "block";
+  } finally { go.disabled = false; }
+});
+</script>
+</body>
+</html>

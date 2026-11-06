@@ -14,6 +14,7 @@ import urllib.parse
 import functools
 import json
 import os
+import secrets
 import threading
 import time
 import traceback
@@ -27,6 +28,72 @@ HERE = mb.HERE
 VERSION_FILE = os.path.join(HERE, "version.txt")
 PORT = int(getattr(config, "WEB_PORT", 8090))
 PASSWORD = str(getattr(config, "WEB_PASSWORD", "") or "")
+WEB_USER = str(getattr(config, "WEB_USER", "") or "").strip()
+
+# --- сессии входа -------------------------------------------------------
+# Показываем свою форму входа (web_login.html). «Запомнить логин и пароль»
+# — постоянная cookie на REMEMBER_DAYS дней; без галочки сессия живёт
+# SESSION_HOURS часов и до закрытия браузера. Сессии хранятся в файле,
+# чтобы переживать перезапуски сервера после обновлений.
+SESSION_FILE = os.path.join(HERE, "web_sessions.json")
+SESSION_COOKIE = "movebot_session"
+REMEMBER_DAYS = 30
+SESSION_HOURS = 12
+
+_sessions = {}              # токен -> срок действия (unix-время)
+_sess_lock = threading.Lock()
+
+
+def _load_sessions():
+    try:
+        with open(SESSION_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        now = time.time()
+        with _sess_lock:
+            for tok, exp in data.items():
+                if exp and exp > now:
+                    _sessions[tok] = float(exp)
+                elif exp:
+                    _sessions[tok] = float(exp)   # протухшие вычистит _new_session
+    except Exception:
+        pass
+
+
+def _save_sessions():
+    try:
+        tmp = SESSION_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_sessions, f)
+        os.replace(tmp, SESSION_FILE)
+    except Exception:
+        pass
+
+
+def _new_session(remember):
+    token = secrets.token_urlsafe(32)
+    exp = time.time() + (REMEMBER_DAYS * 86400 if remember else SESSION_HOURS * 3600)
+    now = time.time()
+    with _sess_lock:
+        for t in [t for t, e in _sessions.items() if e <= now]:
+            del _sessions[t]
+        _sessions[token] = exp
+        _save_sessions()
+    return token
+
+
+def _drop_session(token):
+    if not token:
+        return
+    with _sess_lock:
+        if _sessions.pop(token, None) is not None:
+            _save_sessions()
+
+
+def _session_ok(token):
+    if not token:
+        return False
+    with _sess_lock:
+        return _sessions.get(token, 0) > time.time()
 
 
 def version():
@@ -258,29 +325,82 @@ core = Core()
 app = Flask(__name__)
 
 
+def check_auth():
+    """Принимает сессию из cookie или Basic-авторизацию (совместимость со старыми
+    закладками и проверками install_server.ps1 / setup_iis_proxy.ps1)."""
+    if _session_ok(request.cookies.get(SESSION_COOKIE)):
+        return True
+    h = request.headers.get("Authorization", "")
+    if h.startswith("Basic "):
+        try:
+            raw = base64.b64decode(h[6:]).decode("utf-8")
+        except Exception:
+            return False
+        user, _, pwd = raw.partition(":")
+        if pwd != PASSWORD:
+            return False
+        return not WEB_USER or user == WEB_USER
+    return False
+
+
 def auth(fn):
     @functools.wraps(fn)
     def wrap(*a, **kw):
         if not PASSWORD:
             return Response("В config.py не задан WEB_PASSWORD — страница закрыта.", 503)
-        h = request.headers.get("Authorization", "")
-        ok = False
-        if h.startswith("Basic "):
-            try:
-                ok = base64.b64decode(h[6:]).decode("utf-8").split(":", 1)[1] == PASSWORD
-            except Exception:
-                ok = False
-        if not ok:
-            return Response("Нужен пароль", 401, {"WWW-Authenticate": 'Basic realm="move_bot"'})
+        if not check_auth():
+            # без WWW-Authenticate, чтобы браузер не показывал своё окно,
+            # а открыл нашу форму входа (web_login.html)
+            return Response("Нужен пароль", 401)
         return fn(*a, **kw)
     return wrap
 
 
+def login_page():
+    try:
+        with open(os.path.join(HERE, "web_login.html"), encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ("<!doctype html><meta charset='utf-8'><title>Вход</title>"
+                "<p>Нет файла web_login.html</p>")
+
+
 @app.get("/")
-@auth
 def index():
+    if not PASSWORD:
+        return Response("В config.py не задан WEB_PASSWORD — страница закрыта.", 503)
+    if not check_auth():
+        return Response(login_page(), 401, {"Content-Type": "text/html; charset=utf-8"})
     with open(os.path.join(HERE, "web_page.html"), encoding="utf-8") as f:
         return Response(f.read(), mimetype="text/html")
+
+
+@app.post("/api/login")
+def api_login():
+    """Вход по форме. Тело — JSON или form-urlencoded:
+    {'login': …, 'password': …, 'remember': true}."""
+    if not PASSWORD:
+        return jsonify({"ok": False, "msg": "В config.py не задан WEB_PASSWORD — вход закрыт."}), 503
+    d = dict(request.form)
+    d.update(request.get_json(silent=True) or {})
+    user = str(d.get("login") or "").strip()
+    pwd = str(d.get("password") or "")
+    if pwd != PASSWORD or (WEB_USER and user != WEB_USER):
+        return jsonify({"ok": False, "msg": "Неверный логин или пароль"}), 401
+    remember = bool(d.get("remember"))
+    resp = jsonify({"ok": True, "remember": remember})
+    resp.set_cookie(SESSION_COOKIE, _new_session(remember),
+                    max_age=(REMEMBER_DAYS * 86400 if remember else None),
+                    httponly=True, samesite="Lax")
+    return resp
+
+
+@app.post("/api/logout")
+def api_logout():
+    _drop_session(request.cookies.get(SESSION_COOKIE))
+    resp = jsonify({"ok": True})
+    resp.delete_cookie(SESSION_COOKIE)
+    return resp
 
 
 @app.get("/api/state")
@@ -452,6 +572,7 @@ def self_update():
 
 
 if __name__ == "__main__":
+    _load_sessions()
     self_update()
     mb.log(f"Веб-бот запущен, версия {version()}, порт {PORT}")
     threading.Thread(target=fix_task, daemon=True).start()

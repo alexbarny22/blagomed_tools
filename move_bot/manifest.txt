@@ -7,6 +7,7 @@ config.example.py
 mapping.csv
 web.py
 web_page.html
+web_login.html
 server_run.bat
 install_server.bat
 install_server.ps1
