@@ -43,6 +43,9 @@ CACHE = os.path.join(HERE, "data_cache.json")
 PROPOSALS = os.path.join(HERE, "proposals.json")
 ACTIONS_LOG = os.path.join(HERE, "actions_log.json")
 APPLY_SETTINGS = os.path.join(HERE, "apply_settings.json")
+AI_PAYLOAD = os.path.join(HERE, "ai_payload.json")
+AI_SETTINGS = os.path.join(HERE, "ai_settings.json")
+AI_CACHE = os.path.join(HERE, "ai_cache.json")
 TZ_SHIFT = dt.timedelta(hours=7)          # Барнаул
 DEMO = "--demo" in sys.argv
 
@@ -824,6 +827,24 @@ def publish(model):
     with open(os.path.join(out, "apply.php"), "w", encoding="utf-8") as f:
         f.write(tpl.replace("__SETTINGS_PATH__", APPLY_SETTINGS.replace("\\", "/")))
 
+    # ИИ-советник: настройки для ai.php — рядом со скриптом, НЕ в публичной папке
+    ai_tpl = os.path.join(HERE, "ai_template.php")
+    if os.path.exists(ai_tpl):
+        if CFG.get("AI_ENABLED"):
+            ai_st = {"key": st["key"], "base_url": CFG.get("AI_BASE_URL", ""),
+                     "api_key": CFG.get("AI_API_KEY", ""), "model": CFG.get("AI_MODEL", ""),
+                     "scheme": CFG.get("AI_AUTH_SCHEME") or "Bearer",
+                     "max_tokens": int(CFG.get("AI_MAX_TOKENS") or 2000),
+                     "timeout": int(CFG.get("AI_TIMEOUT") or 120),
+                     "payload": AI_PAYLOAD.replace("\\", "/"), "cache": AI_CACHE.replace("\\", "/")}
+            write_json(AI_SETTINGS, ai_st)
+            try:
+                os.chmod(AI_SETTINGS, 0o600)
+            except Exception:
+                pass
+        with open(os.path.join(out, "ai.php"), "w", encoding="utf-8") as f:
+            f.write(open(ai_tpl, encoding="utf-8").read().replace("__SETTINGS_PATH__", AI_SETTINGS.replace("\\", "/")))
+
     model["apply_key"] = st["key"]
     model["actions"] = read_json(ACTIONS_LOG, [])[-200:]
     html = open(os.path.join(HERE, "dashboard_template.html"), encoding="utf-8").read()
@@ -868,22 +889,21 @@ def main():
             raise
         raw.setdefault("errors", []).insert(0, "Свежие данные не получены (%s). Показаны данные прошлого запуска." % e)
     model = analyze(raw)
-    # ИИ-советник: ошибки не должны ронять отчёт
+    # ИИ-советник: ночью только готовим тексты сводок (ai_payload.json) —
+    # нейросеть вызывается по кнопке в дашборде (ai.php), токены впустую не тратятся
     model["ai"] = None
     try:
         import ai_advisor
         if DEMO:
             model["ai"] = ai_advisor.demo_block(model)
-        elif CFG.get("AI_ENABLED"):
-            model["ai"] = ai_advisor.ask(model, CFG)
-            if model["ai"].get("error"):
-                log("ИИ-советник: %s" % model["ai"]["error"])
-            else:
-                log("ИИ-советник: %d рекомендаций (%s)" % (
-                    len(model["ai"].get("recommendations", [])), model["ai"].get("provider", "")))
+        elif CFG.get("AI_ENABLED") and CFG.get("AI_API_KEY"):
+            payload = ai_advisor.build_payload(model, CFG)
+            write_json(AI_PAYLOAD, payload)
+            model["ai"] = {"available": True, "periods": payload["periods"], "date": payload["date"]}
+            log("ИИ-советник: сводки готовы (периоды %s дн), анализ — по кнопке в дашборде"
+                % ", ".join(str(p) for p in payload["periods"]))
     except Exception as e:
         log("ИИ-советник пропущен: %s" % e)
-        model["ai"] = {"error": str(e)} if CFG.get("AI_ENABLED") else None
     publish(model)
 
 
