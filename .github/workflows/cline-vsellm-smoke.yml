@@ -45,8 +45,7 @@ jobs:
           if [ -z "${VSELLM_API_KEY:-}" ]; then echo "VSELLM_API_KEY not configured"; exit 1; fi
           git switch -c test/cline-vsellm-issue-12
           cline auth -p openai -b https://api.vsellm.ru/v1 -k "$VSELLM_API_KEY" -m deepseek/deepseek-v4-flash-0731
-          mkdir -p automation/reports
-          timeout 900 cline --yolo --json "You are completing a tightly scoped SMOKE TEST only. Create automation/smoke_test/README.md with exact marker AI_ORCHESTRATOR_SMOKE_TEST_OK and automation/smoke_test/test_marker.py containing a pytest test for that marker. Do not read secrets or modify other paths. Do not use external services. Do not modify .github or existing projects. Do not push or create a PR. End after writing the two files." > automation/reports/cline.jsonl
+          timeout 900 cline --yolo --json "You are completing a tightly scoped SMOKE TEST only. Create automation/smoke_test/README.md with exact marker AI_ORCHESTRATOR_SMOKE_TEST_OK and automation/smoke_test/test_marker.py containing a pytest test for that marker. Do not read secrets or modify other paths. Do not use external services. Do not modify .github or existing projects. Do not push or create a PR. End after writing the two files." > "$RUNNER_TEMP/cline.jsonl"
           python -m pip install pytest
           python -m pytest -q automation/smoke_test/test_marker.py
           python - <<'PY'
@@ -66,5 +65,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" push origin HEAD:refs/heads/test/cline-vsellm-issue-12
+          gh auth setup-git
+          git push origin HEAD:refs/heads/test/cline-vsellm-issue-12
           gh pr create --draft --base main --head test/cline-vsellm-issue-12 --title "test: Cline + VseLLM automated smoke (#12)" --body "Related to #12. Created by GitHub Actions with Cline CLI and VseLLM. Only two smoke-test files allowed. Do not merge. ChatGPT controller reviews this PR in scheduled task."
