@@ -51,23 +51,30 @@
 - OZON: в отчёте артикулы из каталога, но OZON-мэппинг не хранился — подтвердить
   порядок заполнения OZON-шаблона (все строки отчёта по артикулу продавца).
 - COM или OData для 1С на сервере.
-- GitHub: отдельный репозиторий или папка в alexbarny22/blagomed_tools.
 - Доступ к веб-интерфейсу: один логин или несколько.
+- Переход к этапу 4 — только после принятия PR №10.
+
+## Репозиторий и PR
+- `alexbarny22/blagomed_tools`, путь `blagomed_cost/`. PR №10 (ветка
+  `feature/blagomed-cost`) пока НЕ принят.
+- Аудит: (1) фикстуры tests/fixtures/; (2) бэкап sqlite3.Connection.backup()
+  (WAL-safe); (3) тесты tests/test_db.py; (4) blagomed_cost.py/weights.json
+  восстановлены по исходным путям; (5) README+CONTEXT обновлены. Файлы-память
+  не в git (см. README).
 
 ## Этап 2+3 (сделано)
 - `migrations/001_init.sql` — стартовая схема (PRAGMA user_version = 1):
   products + mp_listings (карточки МП отдельно, UNIQUE(marketplace, art)) +
   ppu_weights, extra_kinds, extras, settings, manual_prices, runs,
   cost_snapshots (price_source '1c'|'manual'|'legacy'), audit_log.
-- `app/core/db.py` — apply_migrations: каждая миграция в своей транзакции
-  (BEGIN/COMMIT/ROLLBACK), бэкап в backup/cost_YYYYmmdd_HHMMSS.db перед сменой схемы,
-  `_split_statements` учитывает комментарии и строки (не режет ';' внутри них).
+- `app/core/db.py` — apply_migrations: транзакция на миграцию (BEGIN/COMMIT/ROLLBACK),
+  бэкап `sqlite3.Connection.backup()` в backup/ ДО смены схемы; `_split_statements`
+  не режет ';' внутри строк/комментариев.
 - `app/core/migrate.py` — перенос legacy: wb_catalog.json → products+mp_listings,
   ППУ (13 позиций, без 232900/232917), «Поролон» (5, без 232899/232914),
   FIXED_COSTS (20) → manual_prices, settings (405/15/10 на 2026-07-01),
   cost_history.json (81 запись) → 2 legacy-run (2026-06-01, 2026-08-01)
   + cost_snapshots с extras_json {legacy_key, period} (ключ идемпотентности).
 - Сироты истории → products c active=1, счётчик orphans. Идемпотентно.
-- `tests/test_migration.py` — 6 тестов, проходят (pytest 9.2.0, Python 3.14).
-- Товаров в products 77: wb_catalog (76 артикулов) ∪ 232894 (только-ППУ, вне каталога).
-  История: 55 артикулов, все уже в каталоге — новых карточек не добавляет (orphans=0).
+- Тесты: фикстуры tests/fixtures/ (чистый клон); реальный перенос — test_migration_real.py (skip без локальных файлов).
+- Товаров в products 77: wb_catalog (76 артикулов) ∪ 232894 (только-ППУ, вне каталога); история: 55 артикулов, все в каталоге (orphans=0, новых карточек нет).

@@ -29,6 +29,26 @@ from app.core.db import init_db
 BASE = Path(__file__).resolve().parents[2]
 LEGACY = BASE / 'legacy'
 
+
+class LegacyDataNotFound(FileNotFoundError):
+    """Файлы-память старого бота (wb_catalog.json, cost_history.json) не найдены."""
+
+
+def _require_legacy_files(legacy_dir: Path) -> None:
+    """Проверяет файлы-память ДО создания/изменения БД: при отсутствии данных
+    миграция безопасно останавливается — БД не создаётся, а существующая
+    не изменяется (нет риска потери данных и «фиктивного» каталога)."""
+    missing = [str(p) for p in (legacy_dir / 'wb_catalog.json',
+                                legacy_dir / 'cost_history.json')
+               if not p.exists()]
+    if missing:
+        raise LegacyDataNotFound(
+            'Файлы-память старого бота не найдены: ' + ', '.join(missing) + '. '
+            'Миграция остановлена до создания/изменения БД. Скопируйте '
+            'wb_catalog.json и cost_history.json в папку legacy/ из папки '
+            'работающего старого бота (см. README, раздел «Локальные файлы»).')
+
+
 # Вес ППУ, г. Переносим ТОЛЬКО эти (232900 и 232917 — не ППУ-группа).
 PPU_WEIGHTS = {
     '232946': 270, '232898': 270, '232918': 270, '232987': 385, '232995': 365,
@@ -75,15 +95,23 @@ def _get_or_create_product(con, by_sku: dict, sup: str) -> tuple[int, bool]:
     return pid, False
 
 
-def migrate(db_path: Path) -> dict:
-    """Применяет схему и наполняет базу стартовыми данными. Возвращает счётчики."""
+def migrate(db_path: Path, legacy_dir: Path | None = None) -> dict:
+    """Применяет схему и наполняет базу стартовыми данными. Возвращает счётчики.
+
+    legacy_dir — папка файлов-памяти старого бота (по умолчанию BASE/legacy).
+    Если wb_catalog.json / cost_history.json отсутствуют, выбрасывается
+    LegacyDataNotFound, а база данных не создаётся и не изменяется.
+    """
+    legacy_dir = Path(legacy_dir) if legacy_dir is not None else LEGACY
+    _require_legacy_files(legacy_dir)
+
     ns = {'products_new': 0, 'listings': 0, 'ppu_weights': 0, 'extras': 0,
           'manual_prices': 0, 'settings': 0, 'runs': 0, 'snapshots': 0,
           'orphans': 0}
     con = init_db(db_path)
     try:
-        items = json.loads((LEGACY / 'wb_catalog.json').read_text(encoding='utf-8'))['items']
-        history = json.loads((LEGACY / 'cost_history.json').read_text(encoding='utf-8'))
+        items = json.loads((legacy_dir / 'wb_catalog.json').read_text(encoding='utf-8'))['items']
+        history = json.loads((legacy_dir / 'cost_history.json').read_text(encoding='utf-8'))
 
         by_sku = {str(r['sku_1c']).strip(): r['id']
                   for r in con.execute('SELECT id, sku_1c FROM products')

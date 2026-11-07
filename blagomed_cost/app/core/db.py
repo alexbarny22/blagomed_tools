@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """Слой доступа к SQLite: миграции по PRAGMA user_version, бэкап перед изменением схемы.
 
-Перед любой миграцией делает копию файла БД в backup/ с датой (правило CLINE_PROMPT).
+Перед изменением схемы делает согласованную копию БД (sqlite3.Connection.backup())
+в backup/ с датой (правило CLINE_PROMPT). Работает при активном WAL.
 """
 from __future__ import annotations
 
-import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -15,28 +15,29 @@ BACKUP_DIR = Path(__file__).resolve().parents[2] / 'backup'
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / 'migrations'
 
 
-def apply_migrations(db_path: Path) -> int:
+def apply_migrations(db_path: Path, migrations_dir: Path | None = None) -> int:
     """Применяет не применённые миграции migrations/NNN_*.sql.
 
     - Каждый NNN_*.sql выполняется в отдельной транзакции: BEGIN/COMMIT,
       при ошибке ROLLBACK и повторный выброс исключения.
     - Версия схемы = PRAGMA user_version, берётся из номера файла.
-    - Перед изменением существующей базы делается копия в backup/ с датой.
+    - Перед изменением существующей базы делается согласованная копия
+      (sqlite3.Connection.backup()) в backup/ с датой.
+    - migrations_dir — каталог миграций (для тестов; по умолчанию migrations/).
     Возвращает число применённых миграций.
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    migrations_dir = Path(migrations_dir) if migrations_dir is not None else MIGRATIONS_DIR
 
     applied = get_schema_version(db_path) if db_path.exists() else 0
-    pending = sorted(p for p in MIGRATIONS_DIR.glob('[0-9][0-9][0-9]_*.sql')
+    pending = sorted(p for p in migrations_dir.glob('[0-9][0-9][0-9]_*.sql')
                      if int(p.name[:3]) > applied)
     if not pending:
         return 0
 
     if db_path.exists():
-        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        shutil.copy2(db_path, BACKUP_DIR / f'{db_path.stem}_{stamp}.db')
+        backup_db(db_path)
 
     con = connect(db_path)
     con.isolation_level = None  # ручное управление транзакциями в этом потоке
@@ -55,6 +56,42 @@ def apply_migrations(db_path: Path) -> int:
     finally:
         con.close()
     return len(pending)
+
+
+def backup_db(db_path: Path) -> Path:
+    """Согласованная резервная копия SQLite-БД через sqlite3.Connection.backup().
+
+    - Корректна при активном WAL (учитываются и невнесённые в чекпойнт фреймы).
+    - Создаётся до изменения схемы (вызывается из apply_migrations).
+    - Проходит PRAGMA integrity_check (источник и копия).
+    - Основная БД не изменяется; копия пригодна для восстановления.
+    Возвращает путь к файлу бэкапа.
+    """
+    db_path = Path(db_path)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    backup_path = BACKUP_DIR / f'{db_path.stem}_{stamp}.db'
+
+    src = sqlite3.connect(str(db_path))
+    try:
+        if src.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            raise RuntimeError(f'integrity_check исходной БД не пройден: {db_path}')
+        dst = sqlite3.connect(str(backup_path))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+    chk = sqlite3.connect(str(backup_path))
+    try:
+        if chk.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            backup_path.unlink(missing_ok=True)
+            raise RuntimeError(f'integrity_check бэкапа не пройден: {backup_path}')
+    finally:
+        chk.close()
+    return backup_path
 
 
 def _split_statements(sql: str) -> list[str]:
