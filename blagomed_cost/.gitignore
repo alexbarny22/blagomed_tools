@@ -6,6 +6,10 @@ config.ini
 legacy/wb_catalog.json
 legacy/cost_history.json
 
+# Фикстура тестов перекрывает общее правило «cost_history.json» корневого
+# .gitignore: папка tests/fixtures — ЭТО фикстура, а не файл-память бота.
+!tests/fixtures/cost_history.json
+
 # Зависимости и сборочные артефакты
 __pycache__/
 *.py[cod]
