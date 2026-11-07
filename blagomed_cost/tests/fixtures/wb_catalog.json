@@ -1,0 +1,12 @@
+{
+  "updated": "2026-01-01",
+  "count": 6,
+  "items": [
+    {"wb": 900000001, "sup": "2000001", "size": "0", "brand": "Синтетика", "added": null, "source": "фикстура"},
+    {"wb": 900000002, "sup": "2000002", "size": "L", "brand": "Синтетика", "added": null, "source": "фикстура"},
+    {"wb": 900000003, "sup": "2000003", "size": "0", "brand": "Фикстура", "added": null, "source": "фикстура"},
+    {"wb": 900000004, "sup": "2000004", "size": "0", "brand": "", "added": null, "source": "фикстура"},
+    {"wb": 900000005, "sup": "2000005", "size": "0", "brand": "", "added": null, "source": "фикстура"},
+    {"wb": 900000006, "sup": "2000006", "size": "0", "brand": "", "added": null, "source": "фикстура"}
+  ]
+}

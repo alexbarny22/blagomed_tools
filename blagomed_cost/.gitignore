@@ -1,0 +1,41 @@
+# Секреты и локальная конфигурация
+config.ini
+.env
+
+# Файлы-память старого бота (в git не попадают, см. README legacy)
+legacy/wb_catalog.json
+legacy/cost_history.json
+
+# Зависимости и сборочные артефакты
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Логи
+*.log
+
+# Кэши тестов
+.pytest_cache/
+
+# База данных и бэкапы
+*.db
+*.db-*
+backup/
+
+# Входные отчёты MPSPACE и результаты расчёта
+input/*.xlsx
+output/*.xlsx
+
+# Временные результаты анализа xlsx (tools/inspect_xlsx.py, tools/peek_xlsx.py)
+*.inspect.txt
+*.peek.txt
+
+# Файлы открытые/системные
+~$*.xlsx
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
