@@ -52,17 +52,17 @@
   порядок заполнения OZON-шаблона (все строки отчёта по артикулу продавца).
 - COM или OData для 1С на сервере.
 - Доступ к веб-интерфейсу: один логин или несколько.
-- Переход к этапу 4 — только после принятия PR №10.
+- Этап 4 начинается по отдельному поручению (merge PR №10 завершён).
 
 ## Репозиторий и PR
 - `alexbarny22/blagomed_tools`, путь `blagomed_cost/`. PR №10 (ветка
-  `feature/blagomed-cost`) пока НЕ принят.
+  `feature/blagomed-cost`) ПРИНЯТ в `main`: merge-коммит `3b61d35`.
 - Аудит: (1) фикстуры tests/fixtures/; (2) бэкап sqlite3.Connection.backup()
   (WAL-safe); (3) тесты tests/test_db.py; (4) blagomed_cost.py/weights.json
   восстановлены по исходным путям; (5) README+CONTEXT обновлены. Файлы-память
   не в git (см. README).
 
-## Этап 2+3 (сделано)
+## Этап 2+3 (принято) — merge-коммит `3b61d35`
 - `migrations/001_init.sql` — стартовая схема (PRAGMA user_version = 1):
   products + mp_listings (карточки МП отдельно, UNIQUE(marketplace, art)) +
   ppu_weights, extra_kinds, extras, settings, manual_prices, runs,
