@@ -12,9 +12,10 @@
 сохранение исторических снимков реализуется на этапе 6.
 
 Все значения выбираются «на дату расчёта»: для ppu_weights, settings и
-manual_prices берётся последняя запись с valid_from <= date; для extras —
-valid_from <= date и (valid_to IS NULL OR valid_to > date) — полуоткрытый
-интервал не меняется.
+manual_prices берётся последняя запись с valid_from <= date. Для extras
+действует правило владельца (07.11.2026): новая запись той же статьи
+заменяет предыдущую с даты valid_from, разные статьи суммируются, закрытая
+статья не возобновляется (алгоритм — в get_extras).
 
     Входные значения валидируются: денежные величины — конечные числа
     (NaN/Infinity/булевы отклоняются), вес — целое число граммов.
@@ -282,18 +283,51 @@ def get_manual_price(con: sqlite3.Connection, product_id: int,
 
 def get_extras(con: sqlite3.Connection, product_id: int,
                calc_date) -> tuple[CostDetail, ...]:
-    """Доп. расходы действуют, пока valid_from <= date < valid_to."""
+    """Доп. расходы на дату — правило владельца от 07.11.2026.
+
+    Новая запись той же статьи заменяет предыдущую с даты valid_from;
+    разные статьи суммируются. Схема extras не изменялась, исторические
+    записи не редактируются и не закрываются автоматически.
+
+    Алгоритм для product_id на дату d = _as_date(calc_date):
+    1. берутся ВСЕ записи статьи с valid_from <= d;
+    2. среди них для каждой статьи (kind_id) выбирается самая поздняя по
+       valid_from (при совпадении дат — больший id, детерминированный
+       порядок);
+    3. статья учитывается, только если у выбранной записи valid_to IS NULL
+       или valid_to > d; более ранняя запись НЕ возвращается, даже с
+       valid_to = NULL (закрытая статья не возобновляется);
+    4. записи с valid_to <= valid_from некорректны: понятная ошибка
+       InvalidInput, а не «тихий» неправильный расход.
+    """
     d = _as_date(calc_date)
     rows = con.execute(
-        'SELECT k.name AS kind, e.rub FROM extras e'
-        ' JOIN extra_kinds k ON k.id = e.kind_id'
+        'SELECT e.kind_id, k.name AS kind, e.rub, e.valid_from, e.valid_to'
+        ' FROM extras e JOIN extra_kinds k ON k.id = e.kind_id'
         ' WHERE e.product_id = ? AND e.valid_from <= ?'
-        '   AND (e.valid_to IS NULL OR e.valid_to > ?)'
-        ' ORDER BY k.name, e.valid_from DESC', (product_id, d, d)).fetchall()
-    return tuple(CostDetail(
-        kind=r['kind'],
-        rub=_require_dec(r['rub'], f'extras[{product_id}].{r["kind"]}'),
-    ) for r in rows)
+        ' ORDER BY e.kind_id, e.valid_from DESC, e.id DESC',
+        (product_id, d)).fetchall()
+
+    for r in rows:
+        if r['valid_to'] is not None and r['valid_to'] <= r['valid_from']:
+            raise InvalidInput(
+                f'Доп. расход «{r["kind"]}» товара {product_id}: некорректный '
+                f'период действия valid_to ({r["valid_to"]}) <= valid_from '
+                f'({r["valid_from"]}). Исправьте данные extras периодов.')
+
+    result: list[CostDetail] = []
+    last_kind: object = None
+    for r in rows:
+        if r['kind_id'] == last_kind:
+            continue          # у статьи уже учтена более поздняя запись
+        last_kind = r['kind_id']
+        if r['valid_to'] is None or r['valid_to'] > d:
+            result.append(CostDetail(
+                kind=r['kind'],
+                rub=_require_dec(r['rub'],
+                                 f'extras[{product_id}].{r["kind"]}'),
+            ))
+    return tuple(result)
 
 
 # ── C. Расчёт позиции на дату ─────────────────────────────────────────────

@@ -53,9 +53,10 @@ def _add_extra(con, pid, kind, rub, valid_from, valid_to=None):
     con.execute("INSERT OR IGNORE INTO extra_kinds (name) VALUES (?)", (kind,))
     kid = con.execute('SELECT id FROM extra_kinds WHERE name = ?',
                       (kind,)).fetchone()['id']
-    con.execute('INSERT INTO extras (product_id, kind_id, rub, valid_from,'
-                ' valid_to) VALUES (?,?,?,?,?)',
-                (pid, kid, float(rub), valid_from, valid_to))
+    cur = con.execute('INSERT INTO extras (product_id, kind_id, rub, valid_from,'
+                      ' valid_to) VALUES (?,?,?,?,?)',
+                      (pid, kid, float(rub), valid_from, valid_to))
+    return cur.lastrowid
 
 
 def _add_manual(con, pid, price, valid_from):
@@ -184,31 +185,193 @@ def test_f_ending_article_does_not_affect_past_calculation(tmp_path):
         con.close()
 
 
-def test_f_overlapping_same_kind_periods_known_question(tmp_path):
-    """Пересекающиеся периоды ОДНОЙ статьи «Поролон» (этап 4, вопрос).
+# ── F2. Правило замены доп. расходов (владелец, 07.11.2026) ────────────────
+#
+# Новая запись той же статьи у товара заменяет предыдущую с даты valid_from;
+# разные статьи суммируются; закрытая статья не возобновляется.
+# (Пример владельца: «Поролон» 100 ₽ с 01.07, «Поролон» 120 ₽ с 01.11,
+# «Упаковка» 25 ₽ с 01.07 → октябрь 125, ноябрь 145.)
 
-    «Поролон» = 100 ₽ с 01.07 (valid_to NULL), затем новая запись «Поролон» =
-    120 ₽ с 01.11 (valid_to NULL); старая НЕ закрыта. Текущая бизнес-логика
-    СУММИРУЕТ обе записи (0..N расходов), т.е. в ноябре 100 + 120 = 220.
-    Однозначного решения о пересекающихся периодах одной статьи нет — вопрос
-    зафиксирован для владельца (замена vs суммирование vs валидация).
-    Тест фиксирует текущее поведение и будет изменён после решения владельца.
-    """
+def test_f2_replacement_from_new_date(tmp_path):
+    """«Поролон» 100 ₽ с 01.07 → «Поролон» 120 ₽ с 01.11: замена по дате."""
     con = _new_con(tmp_path)
     try:
         pid = _add_product(con, '232958')
         _add_settings(con)
-        _add_extra(con, pid, 'Поролон', 100, '2026-07-01')   # valid_to=NULL
-        _add_extra(con, pid, 'Поролон', 120, '2026-11-01')   # valid_to=NULL
+        _add_extra(con, pid, 'Поролон', 100, '2026-07-01')
+        _add_extra(con, pid, 'Поролон', 120, '2026-11-01')
         con.commit()
+        oct_r = calc_product(con, product_id=pid, price=1000,
+                             calc_date='2026-10-15')
+        assert oct_r.extras_rub == Decimal('100')     # до 01.11 — старая
+        nov_r = calc_product(con, product_id=pid, price=1000,
+                             calc_date='2026-11-15')
+        assert nov_r.extras_rub == Decimal('120')     # с 01.11 — замена
+    finally:
+        con.close()
 
-        july = calc_product(con, product_id=pid, price=1000,
-                            calc_date='2026-07-15')
-        assert july.extras_rub == Decimal('100')     # до 01.11 активна первая
 
-        nov = calc_product(con, product_id=pid, price=1000,
-                           calc_date='2026-11-15')
-        assert nov.extras_rub == Decimal('220')      # 100 + 120 (обе активны)
+def test_f2_different_kinds_sum(tmp_path):
+    """Разные статьи суммируются: 120 (Поролон) + 25 (Упаковка) = 145 ₽."""
+    con = _new_con(tmp_path)
+    try:
+        pid = _add_product(con, '232958')
+        _add_settings(con)
+        _add_extra(con, pid, 'Поролон', 120, '2026-11-01')
+        _add_extra(con, pid, 'Упаковка', 25, '2026-07-01')
+        con.commit()
+        r = calc_product(con, product_id=pid, price=1000,
+                         calc_date='2026-11-15')
+        assert r.extras_rub == Decimal('145')
+        assert r.extras == (
+            CostDetail(kind='Поролон', rub=Decimal('120')),
+            CostDetail(kind='Упаковка', rub=Decimal('25')),
+        )
+    finally:
+        con.close()
+
+
+def test_f2_historical_october_unchanged(tmp_path):
+    """Исторический расчёт за октябрь остаётся 125 ₽, ноябрь 145 ₽."""
+    con = _new_con(tmp_path)
+    try:
+        pid = _add_product(con, '232958')
+        _add_settings(con)
+        _add_extra(con, pid, 'Поролон', 100, '2026-07-01')
+        _add_extra(con, pid, 'Упаковка', 25, '2026-07-01')
+        _add_extra(con, pid, 'Поролон', 120, '2026-11-01')
+        con.commit()
+        oc = calc_product(con, product_id=pid, price=1000,
+                          calc_date='2026-10-15')
+        assert oc.extras_rub == Decimal('125')        # 100 + 25
+        no = calc_product(con, product_id=pid, price=1000,
+                          calc_date='2026-11-15')
+        assert no.extras_rub == Decimal('145')        # 120 + 25
+    finally:
+        con.close()
+
+
+def test_f2_same_valid_from_takes_higher_id(tmp_path):
+    """При одинаковой дате начала действует запись с большим id."""
+    con = _new_con(tmp_path)
+    try:
+        pid = _add_product(con, '232958')
+        _add_settings(con)
+        k1 = _add_extra(con, pid, 'Поролон', 100, '2026-07-01')
+        k2 = _add_extra(con, pid, 'Поролон', 120, '2026-07-01')
+        assert k2 > k1
+        con.commit()
+        r = calc_product(con, product_id=pid, price=1000,
+                         calc_date='2026-07-15')
+        assert r.extras_rub == Decimal('120')
+    finally:
+        con.close()
+
+
+def test_f2_closed_article_not_revived(tmp_path):
+    """Закрытая последняя запись не «возрождает» старую с valid_to=NULL."""
+    con = _new_con(tmp_path)
+    try:
+        pid = _add_product(con, '232958')
+        _add_settings(con)
+        _add_extra(con, pid, 'Поролон', 100, '2026-07-01')
+        _add_extra(con, pid, 'Поролон', 120, '2026-11-01',
+                   valid_to='2026-12-01')
+        con.commit()
+        nov_r = calc_product(con, product_id=pid, price=1000,
+                             calc_date='2026-11-15')
+        assert nov_r.extras_rub == Decimal('120')
+        dec_r = calc_product(con, product_id=pid, price=1000,
+                             calc_date='2026-12-15')
+        assert dec_r.extras_rub == Decimal('0')       # старая 100 НЕ вернулась
+        assert dec_r.extras == ()
+    finally:
+        con.close()
+
+
+def test_f2_future_record_does_not_affect(tmp_path):
+    """Запись с будущей датой начала не влияет на текущий расчёт."""
+    con = _new_con(tmp_path)
+    try:
+        pid = _add_product(con, '232958')
+        _add_settings(con)
+        _add_extra(con, pid, 'Поролон', 100, '2026-07-01')
+        _add_extra(con, pid, 'Поролон', 999, '2027-01-01')
+        con.commit()
+        r = calc_product(con, product_id=pid, price=1000,
+                         calc_date='2026-10-15')
+        assert r.extras_rub == Decimal('100')
+    finally:
+        con.close()
+
+
+def test_f2_invalid_period_raises(tmp_path):
+    """valid_to <= valid_from — некорректные данные: понятная ошибка."""
+    con = _new_con(tmp_path)
+    try:
+        pid = _add_product(con, '232958')
+        _add_settings(con)
+        _add_extra(con, pid, 'Поролон', 100, '2026-11-01',
+                   valid_to='2026-10-01')
+        con.commit()
+        with pytest.raises(InvalidInput, match='период действия'):
+            get_extras(con, pid, '2026-12-15')
+    finally:
+        con.close()
+
+
+def test_f2_zero_replacement_not_sum(tmp_path):
+    """Нулевая новая запись заменяет старую: 100 → 0, а не 100 + 0 = 100."""
+    con = _new_con(tmp_path)
+    try:
+        pid = _add_product(con, '232958')
+        _add_settings(con)
+        _add_extra(con, pid, 'Поролон', 100, '2026-07-01')
+        _add_extra(con, pid, 'Поролон', 0, '2026-11-01')
+        con.commit()
+        r = calc_product(con, product_id=pid, price=1000,
+                         calc_date='2026-11-15')
+        assert r.extras_rub == Decimal('0')
+    finally:
+        con.close()
+
+
+def test_f2_repeated_calc_identical(tmp_path):
+    """Повторные расчёты на одну дату возвращают идентичный результат."""
+    con = _new_con(tmp_path)
+    try:
+        pid = _add_product(con, '232958')
+        _add_settings(con)
+        _add_extra(con, pid, 'Поролон', 100, '2026-07-01')
+        _add_extra(con, pid, 'Поролон', 120, '2026-11-01')
+        _add_extra(con, pid, 'Упаковка', 25, '2026-07-01')
+        con.commit()
+        r1 = calc_product(con, product_id=pid, price=1000,
+                          calc_date='2026-11-15')
+        r2 = calc_product(con, product_id=pid, price=1000,
+                          calc_date='2026-11-15')
+        assert r1 == r2
+    finally:
+        con.close()
+
+
+def test_f2_core_does_not_modify_extras_rows(tmp_path):
+    """Расчётное ядро (calc/get_extras) не изменяет строки extras."""
+    con = _new_con(tmp_path)
+    try:
+        pid = _add_product(con, '232958')
+        _add_settings(con)
+        _add_extra(con, pid, 'Поролон', 100, '2026-07-01')
+        _add_extra(con, pid, 'Поролон', 120, '2026-11-01')
+        _add_extra(con, pid, 'Упаковка', 25, '2026-07-01')
+        con.commit()
+        q = ('SELECT product_id, kind_id, rub, valid_from, valid_to'
+             ' FROM extras ORDER BY id')
+        before = [dict(row) for row in con.execute(q)]
+        calc_product(con, product_id=pid, price=1000, calc_date='2026-11-15')
+        get_extras(con, pid, '2026-11-15')
+        after = [dict(row) for row in con.execute(q)]
+        assert after == before                       # строки не изменены
     finally:
         con.close()
 
