@@ -32,7 +32,8 @@
 ## Открытые вопросы
 - 232886: вес ППУ/доп. расходы; OZON-мэппинг не хранился — порядок заполнения подтвердить.
 - COM или OData для 1С; доступ к веб-интерфейсу (один логин или несколько).
-- Этап 4 (ядро расчёта) — ветка `feature/blagomed-cost-calc`, PR открыт после коммита.
+- Этап 4 (ядро расчёта) — ветка `feature/blagomed-cost-calc`, PR №11:
+  https://github.com/alexbarny22/blagomed_tools/pull/11.
 
 ## Репозиторий и PR
 - `alexbarny22/blagomed_tools`, путь `blagomed_cost/`. PR №10 (ветка `feature/blagomed-cost`)
