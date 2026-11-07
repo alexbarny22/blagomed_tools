@@ -184,6 +184,35 @@ def test_f_ending_article_does_not_affect_past_calculation(tmp_path):
         con.close()
 
 
+def test_f_overlapping_same_kind_periods_known_question(tmp_path):
+    """Пересекающиеся периоды ОДНОЙ статьи «Поролон» (этап 4, вопрос).
+
+    «Поролон» = 100 ₽ с 01.07 (valid_to NULL), затем новая запись «Поролон» =
+    120 ₽ с 01.11 (valid_to NULL); старая НЕ закрыта. Текущая бизнес-логика
+    СУММИРУЕТ обе записи (0..N расходов), т.е. в ноябре 100 + 120 = 220.
+    Однозначного решения о пересекающихся периодах одной статьи нет — вопрос
+    зафиксирован для владельца (замена vs суммирование vs валидация).
+    Тест фиксирует текущее поведение и будет изменён после решения владельца.
+    """
+    con = _new_con(tmp_path)
+    try:
+        pid = _add_product(con, '232958')
+        _add_settings(con)
+        _add_extra(con, pid, 'Поролон', 100, '2026-07-01')   # valid_to=NULL
+        _add_extra(con, pid, 'Поролон', 120, '2026-11-01')   # valid_to=NULL
+        con.commit()
+
+        july = calc_product(con, product_id=pid, price=1000,
+                            calc_date='2026-07-15')
+        assert july.extras_rub == Decimal('100')     # до 01.11 активна первая
+
+        nov = calc_product(con, product_id=pid, price=1000,
+                           calc_date='2026-11-15')
+        assert nov.extras_rub == Decimal('220')      # 100 + 120 (обе активны)
+    finally:
+        con.close()
+
+
 # ── G. Исторические ставки ППУ ────────────────────────────────────────────
 
 def test_g_ppu_rate_historical(tmp_path):
@@ -359,3 +388,74 @@ def test_j_unknown_product(tmp_path):
 def test_j_invalid_date(bad_date):
     with pytest.raises(InvalidDate):
         calc_product(con=None, product_id=1, price=100, calc_date=bad_date)
+
+
+# ── K. Валидация значений (этап 4, аудит) ──────────────────────────────────
+
+@pytest.mark.parametrize('field, value', [
+    ('price', float('nan')), ('price', float('inf')),
+    ('price', float('-inf')), ('price', True), ('price', False),
+    ('ppu_rate', float('nan')), ('ppu_rate', float('inf')),
+    ('ppu_rate', float('-inf')),
+    ('margin_pct', float('nan')), ('margin_pct', float('inf')),
+    ('margin_pct', float('-inf')), ('margin_pct', True),
+])
+def test_k_non_finite_and_bool_rejected(field, value):
+    kw = {'price': 100, 'ppu_rate': 405, 'margin_pct': 15}
+    kw[field] = value
+    with pytest.raises(InvalidInput):
+        compute_cost(**kw)
+
+
+@pytest.mark.parametrize('weight', [270.9, -0.5, '270.9', '-0.5', True, False,
+                                    10001, -12])
+def test_k_bad_weight_rejected(weight):
+    with pytest.raises(InvalidInput):
+        compute_cost(price=100, weight_g=weight, margin_pct=15)
+
+
+@pytest.mark.parametrize('weight', [270, '270', 270.0, 0])
+def test_k_weight_must_be_whole_ok(weight):
+    r = compute_cost(price=100, weight_g=weight, margin_pct=15)
+    assert r.cost == 115
+
+
+@pytest.mark.parametrize('rub', [float('nan'), float('inf'), True, None, -5,
+                                 'abc', object()])
+def test_k_bad_extra_rub_rejected(rub):
+    with pytest.raises(InvalidInput):
+        compute_cost(price=100, margin_pct=15,
+                     extra_items=[('Поролон', rub)])
+
+
+@pytest.mark.parametrize('item', [5, ('Поролон',), {'kind': 'X'},
+                                  {'rub': 1}, object()])
+def test_k_bad_extra_item_shape_rejected(item):
+    with pytest.raises(InvalidInput):
+        compute_cost(price=100, margin_pct=15, extra_items=[item])
+
+
+def test_k_missing_price_is_explicit():
+    with pytest.raises(InvalidInput, match='(?i)закупочная цена'):
+        compute_cost(price=None, margin_pct=15)
+
+
+def test_k_intermediate_sums_not_rounded():
+    """Промежуточные суммы (ППУ, база) без округления; округляется итог."""
+    r = compute_cost(price=1000, weight_g=333, ppu_rate=405, margin_pct=15)
+    assert r.ppu_rub == Decimal('134.865')          # 0.333 × 405 — точно
+    assert r.basis == Decimal('1134.865')
+    assert r.cost == 1305                           # floor(1134.865 × 1.15)
+
+
+def test_k_control_articles_old_and_new_logic():
+    """232899/232914: старая логика (с доп. 75) повторяет эталон, новая даёт
+    550/556 без переноса доп. расхода."""
+    for price, new_expected, old_expected in ((290, 550, 636),
+                                              (296, 556, 643)):
+        old = compute_cost(price=price, weight_g=465, ppu_rate=405,
+                           margin_pct=15, extra_items=[('доп', 75)])
+        assert old.cost == old_expected
+        new = compute_cost(price=price, weight_g=465, ppu_rate=405,
+                           margin_pct=15)
+        assert new.cost == new_expected

@@ -10,7 +10,7 @@ bot.log
 cache_1c.json
 config.ini
 config.py
-blagomed_cost/legacy/cost_history.json
+cost_history.json
 direct_analytics/.htpasswd_direct
 direct_analytics/actions_log.json
 direct_analytics/apply_settings.json

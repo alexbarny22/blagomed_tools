@@ -15,6 +15,9 @@
 manual_prices берётся последняя запись с valid_from <= date; для extras —
 valid_from <= date и (valid_to IS NULL OR valid_to > date) — полуоткрытый
 интервал не меняется.
+
+    Входные значения валидируются: денежные величины — конечные числа
+    (NaN/Infinity/булевы отклоняются), вес — целое число граммов.
 """
 from __future__ import annotations
 
@@ -91,13 +94,18 @@ def _as_date(calc_date) -> str:
 
 
 def _dec(value, what: str) -> Decimal:
-    """Точное преобразование в Decimal (входящие БД — через str())."""
+    """Точное преобразование в Decimal; NaN/Infinity/булевы отклоняются."""
     if value is None:
         raise InvalidInput(f'{what}: пустое значение (None)')
+    if isinstance(value, bool):
+        raise InvalidInput(f'{what}: булево значение недопустимо: {value!r}')
     try:
-        return Decimal(str(value))
+        d = Decimal(str(value))
     except (ValueError, TypeError, ArithmeticError):
         raise InvalidInput(f'{what}: некорректное число: {value!r}') from None
+    if not d.is_finite():
+        raise InvalidInput(f'{what}: недопустимое не-конечное значение: {value!r}')
+    return d
 
 
 def _require_dec(value, what: str, *, min_value: Decimal = Decimal('0')) -> Decimal:
@@ -148,7 +156,8 @@ def compute_cost(*, price, weight_g=0, ppu_rate=0,
     """Считает себестоимость по основной формуле без обращения к БД.
 
     - price — обязательная закупочная цена (None/пустое не равно нулю);
-    - weight_g — вес ППУ в граммах (пустое = 0; диапазон 0..10000);
+    - weight_g — вес ППУ в граммах, целое неотрицательное (пустое = 0;
+      дробные граммы и булевы отклоняются; диапазон 0..10000);
     - ppu_rate — цена ППУ за кг (>= 0);
     - extra_items — статьи доп. расходов: последовательность (kind, rub)
       или {'kind': ..., 'rub': ...};
@@ -157,30 +166,43 @@ def compute_cost(*, price, weight_g=0, ppu_rate=0,
     Промежуточные составляющие не округляются; округляется только итог
     (ROUND_FLOOR). Возвращает полную раскладку (CostResult).
     """
+    if price is None:
+        raise InvalidInput('Закупочная цена не передана (None). Ноль вместо цены '
+                           'не подставляется — проверьте данные 1С/ручной цены.')
     price = _require_dec(price, 'Закупочная цена')
     ppu_rate = _require_dec(ppu_rate, 'Цена ППУ за кг')
     margin_pct = _require_dec(margin_pct, 'Наценка, %')
 
     if weight_g is None or str(weight_g).strip() == '':
         weight_g = 0
-    try:
-        weight_g = int(weight_g)
-    except (TypeError, ValueError):
-        raise InvalidInput(f'Вес ППУ: некорректное значение: {weight_g!r}') from None
-    if weight_g < 0 or weight_g > WEIGHT_MAX_G:
+    if isinstance(weight_g, bool):
+        raise InvalidInput(f'Вес ППУ: булево значение недопустимо: {weight_g!r}')
+    w = _dec(weight_g, 'Вес ППУ')
+    if w != w.to_integral_value():
         raise InvalidInput(
-            f'Вес ППУ вне диапазона 0..{WEIGHT_MAX_G} г: {weight_g}')
+            f'Вес ППУ должен быть целым числом граммов: {weight_g!r}')
+    if w < 0 or w > WEIGHT_MAX_G:
+        raise InvalidInput(
+            f'Вес ППУ вне диапазона 0..{WEIGHT_MAX_G} г: {w}')
+    weight_g = int(w)
 
     extras: list[CostDetail] = []
     extra_sum = Decimal('0')
     for el in (extra_items or ()):
-        if isinstance(el, CostDetail):
-            kind, rub = el.kind, el.rub
-        elif isinstance(el, dict):
-            kind = el.get('kind', el.get('name'))
-            rub = el.get('rub', el.get('value'))
-        else:
-            kind, rub = el[0], el[1]
+        try:
+            if isinstance(el, CostDetail):
+                kind, rub = el.kind, el.rub
+            elif isinstance(el, dict):
+                kind = el.get('kind', el.get('name'))
+                rub = el.get('rub', el.get('value'))
+            else:
+                kind, rub = el[0], el[1]
+        except (TypeError, IndexError, KeyError, AttributeError):
+            raise InvalidInput(
+                f'Доп. расход: некорректная запись: {el!r}') from None
+        if kind is None or str(kind).strip() == '':
+            raise InvalidInput(
+                f'Доп. расход: пустое наименование статьи: {el!r}')
         rub = _require_dec(rub, f'Доп. расход «{kind}»')
         extras.append(CostDetail(kind=str(kind), rub=rub))
         extra_sum += rub
