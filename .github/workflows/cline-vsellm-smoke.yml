@@ -2,8 +2,6 @@ name: Cline VseLLM smoke pilot
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 * * * *"
 
 permissions:
   contents: write
@@ -45,7 +43,7 @@ jobs:
           if [ -z "${VSELLM_API_KEY:-}" ]; then echo "VSELLM_API_KEY not configured"; exit 1; fi
           git switch -c test/cline-vsellm-issue-12
           cline auth -p openai -b https://api.vsellm.ru/v1 -k "$VSELLM_API_KEY" -m deepseek/deepseek-v4-flash-0731
-          timeout 900 cline --yolo --json "You are completing a tightly scoped SMOKE TEST only. Create automation/smoke_test/README.md with exact marker AI_ORCHESTRATOR_SMOKE_TEST_OK and automation/smoke_test/test_marker.py containing a pytest test for that marker. Do not read secrets or modify other paths. Do not use external services. Do not modify .github or existing projects. Do not push or create a PR. End after writing the two files." > "$RUNNER_TEMP/cline.jsonl"
+          timeout 900 cline --auto-approve true --json --timeout 840 "You are completing a tightly scoped SMOKE TEST only. Create automation/smoke_test/README.md with exact marker AI_ORCHESTRATOR_SMOKE_TEST_OK and automation/smoke_test/test_marker.py containing a pytest test for that marker. Do not read secrets or modify other paths. Do not use external services. Do not modify .github or existing projects. Do not push or create a PR. End after writing the two files." > "$RUNNER_TEMP/cline.jsonl"
           python -m pip install pytest
           python -m pytest -q automation/smoke_test/test_marker.py
           python - <<'PY'
