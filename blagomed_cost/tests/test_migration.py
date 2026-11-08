@@ -153,7 +153,7 @@ def test_missing_legacy_files_do_not_touch_existing_db(tmp_path):
     con.execute("INSERT INTO products (sku_1c, active) VALUES ('2000001', 1)")
     con.commit()
     con.close()
-    assert get_schema_version(db) == 1
+    assert get_schema_version(db) == 2
 
     empty = tmp_path / 'legacy'
     empty.mkdir()
@@ -161,7 +161,7 @@ def test_missing_legacy_files_do_not_touch_existing_db(tmp_path):
         migrate(db, legacy_dir=empty)
 
     # Данные и версия схемы не изменились
-    assert get_schema_version(db) == 1
+    assert get_schema_version(db) == 2
     con = connect(db)
     try:
         assert con.execute('SELECT COUNT(*) FROM products').fetchone()[0] == 1

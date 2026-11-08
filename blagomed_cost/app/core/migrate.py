@@ -95,12 +95,15 @@ def _get_or_create_product(con, by_sku: dict, sup: str) -> tuple[int, bool]:
     return pid, False
 
 
-def migrate(db_path: Path, legacy_dir: Path | None = None) -> dict:
+def migrate(db_path: Path, legacy_dir: Path | None = None, *,
+            confirm: bool = False) -> dict:
     """Применяет схему и наполняет базу стартовыми данными. Возвращает счётчики.
 
     legacy_dir — папка файлов-памяти старого бота (по умолчанию BASE/legacy).
     Если wb_catalog.json / cost_history.json отсутствуют, выбрасывается
     LegacyDataNotFound, а база данных не создаётся и не изменяется.
+    confirm=True — как в db.init_db: требуется, если схема применяется к уже
+    существующей БД (иначе db.MigrationConfirmationRequired).
     """
     legacy_dir = Path(legacy_dir) if legacy_dir is not None else LEGACY
     _require_legacy_files(legacy_dir)
@@ -108,7 +111,7 @@ def migrate(db_path: Path, legacy_dir: Path | None = None) -> dict:
     ns = {'products_new': 0, 'listings': 0, 'ppu_weights': 0, 'extras': 0,
           'manual_prices': 0, 'settings': 0, 'runs': 0, 'snapshots': 0,
           'orphans': 0}
-    con = init_db(db_path)
+    con = init_db(db_path, confirm=confirm)
     try:
         items = json.loads((legacy_dir / 'wb_catalog.json').read_text(encoding='utf-8'))['items']
         history = json.loads((legacy_dir / 'cost_history.json').read_text(encoding='utf-8'))

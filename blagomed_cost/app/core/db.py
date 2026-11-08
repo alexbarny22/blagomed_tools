@@ -15,7 +15,17 @@ BACKUP_DIR = Path(__file__).resolve().parents[2] / 'backup'
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / 'migrations'
 
 
-def apply_migrations(db_path: Path, migrations_dir: Path | None = None) -> int:
+class MigrationConfirmationRequired(RuntimeError):
+    """Для применения миграций к существующей БД требуется подтверждение владельца.
+
+    Правило (docs/CONTEXT.md): к уже существующей базе apply_migrations /
+    init_db применяет миграции только при явном confirm=True (CLI: --yes-migrate).
+    К новой (только что созданной) базе миграции применяются автоматически.
+    """
+
+
+def apply_migrations(db_path: Path, migrations_dir: Path | None = None, *,
+                     confirm: bool = False) -> int:
     """Применяет не применённые миграции migrations/NNN_*.sql.
 
     - Каждый NNN_*.sql выполняется в отдельной транзакции: BEGIN/COMMIT,
@@ -23,6 +33,9 @@ def apply_migrations(db_path: Path, migrations_dir: Path | None = None) -> int:
     - Версия схемы = PRAGMA user_version, берётся из номера файла.
     - Перед изменением существующей базы делается согласованная копия
       (sqlite3.Connection.backup()) в backup/ с датой.
+    - К существующей БД (user_version >= 1) миграции применяются ТОЛЬКО при
+      confirm=True, иначе — MigrationConfirmationRequired (ничего не изменяется
+      и бэкап не снимается). Новая БД инициализируется автоматически.
     - migrations_dir — каталог миграций (для тестов; по умолчанию migrations/).
     Возвращает число применённых миграций.
     """
@@ -35,6 +48,13 @@ def apply_migrations(db_path: Path, migrations_dir: Path | None = None) -> int:
                      if int(p.name[:3]) > applied)
     if not pending:
         return 0
+
+    if db_path.exists() and applied >= 1 and not confirm:
+        raise MigrationConfirmationRequired(
+            f'Миграция {", ".join(p.name for p in pending)} изменяет существующую '
+            f'БД {db_path} (schema user_version={applied}). Требуется подтверждение '
+            f'владельца: повторный запуск с confirm=True / флагом --yes-migrate '
+            f'(или инициализация новой базы). Файл БД не изменён.')
 
     if db_path.exists():
         backup_db(db_path)
@@ -162,7 +182,11 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     return con
 
 
-def init_db(db_path: Path | str) -> sqlite3.Connection:
-    """Инициализирует/приводит схему к последней версии и возвращает открытое соединение."""
-    apply_migrations(Path(db_path))
+def init_db(db_path: Path | str, *, confirm: bool = False) -> sqlite3.Connection:
+    """Инициализирует/приводит схему к последней версии и возвращает открытое соединение.
+
+    confirm=True требуется для применения миграций к уже существующей БД
+    (иначе MigrationConfirmationRequired; см. apply_migrations).
+    """
+    apply_migrations(Path(db_path), confirm=confirm)
     return connect(db_path)
