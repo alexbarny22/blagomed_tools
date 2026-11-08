@@ -35,7 +35,8 @@ AUTH_ERROR / CONNECT_ERROR / TIMEOUT / NOT_AVAILABLE / ERROR. Ошибка
 Для каждого результата сохраняются фактические: регистр, вид цены, поставщик,
 дата цены, цена и статус достоверности источника (source_status). GUID,
 полученный из OData, привязывается к цене COM только после проверки, что оба
-источника указывают на один и тот же объект номенклатуры (merge_odata_guid).
+источника указывают на один объект (merge_odata_guid); РАЗНЫЕ GUID даже при
+совпавших наименованиях — конфликт идентичности, цена не допускается к расчёту.
 """
 from __future__ import annotations
 
@@ -292,13 +293,21 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
 
 
 def merge_odata_guid(com: OnecItem, oda: OnecItem) -> OnecItem:
-    """Связывает цену из COM с GUID (Ref_Key) из OData.
+    """Связывает цену COM с GUID (Ref_Key) из OData.
 
-    GUID из OData привязывается к цене COM ТОЛЬКО после проверки, что оба
-    источника указывают на один и тот же объект номенклатуры: совпадают либо
-    GUID, либо нормализованное наименование, либо артикул И наименование.
-    Если объекты разные — GUID НЕ привязывается и цена НЕ переносится
-    (результат NOT_FOUND с price=None), чтобы не присвоить цену чужого товара.
+    Правила (ФИНАЛЬНАЯ ПРАВКА этапа 5):
+    1. GUID есть с обеих сторон и совпадают → объединение разрешено (GUID —
+       главный идентификатор, расхождение артикулов при этом не мешает).
+    2. GUID есть с обеих сторон и РАЗЛИЧАЮТСЯ → конфликт идентичности: объекты
+       НЕ считаются одинаковыми, даже если совпадают наименования; статус
+       AMBIGUOUS, цена не допускается к автоматическому расчёту (price=None).
+    3. GUID только в OData → привязка допустима при однозначном совпадении
+       нормализованного наименования И артикула, если артикул имеется с обеих
+       сторон (противоречие артикулов → NEEDS_CONFIRM).
+    4. Совпадение только по артикулу без надёжного подтверждения личности →
+       NEEDS_CONFIRM.
+    5. Отсутствие подтверждения НИКОГДА не даёт OK: цена не допускается
+       (price=None), GUID из OData не привязывается.
     """
     from copy import deepcopy
     out = deepcopy(com)
@@ -308,18 +317,50 @@ def merge_odata_guid(com: OnecItem, oda: OnecItem) -> OnecItem:
         return out
     if not oda.guid_1c:
         return out
-    guid_matches = _guid_eq(com.guid_1c, oda.guid_1c)
-    name_matches = bool(com.name_1c and oda.name_1c and
-                        normalize_name(com.name_1c) == normalize_name(oda.name_1c))
-    sku_and_name = bool(com.sku_1c and oda.sku_1c and name_matches and
-                        str(com.sku_1c).strip() == str(oda.sku_1c).strip())
-    if guid_matches or name_matches or sku_and_name:
-        out.guid_1c = oda.guid_1c or com.guid_1c
+    guid_both = bool(com.guid_1c)
+    guid_eq = _guid_eq(com.guid_1c, oda.guid_1c)
+    name_eq = bool(com.name_1c and oda.name_1c and
+                   normalize_name(com.name_1c) == normalize_name(oda.name_1c))
+    sku_both = bool(com.sku_1c and oda.sku_1c)
+    sku_eq = bool(sku_both and
+                  str(com.sku_1c).strip() == str(oda.sku_1c).strip())
+    if guid_both and guid_eq:
+        # 1. GUID совпадают → объединение разрешено
+        out.guid_1c = oda.guid_1c
         return out
-    # разные объекты: цена COM не связывается с карточкой OData
-    out.guid_1c = com.guid_1c
-    out.status = ItemStatus.NOT_FOUND
+    if guid_both:
+        # 2. GUID имеются, но РАЗНЫЕ → конфликт идентичности
+        out.price = None
+        out.status = ItemStatus.AMBIGUOUS
+        out.detail = ('GUID COM и OData РАЗНЫЕ — конфликт идентичности; '
+                      f'цена {com.price} не допускается к автоматическому '
+                      'расчёту')
+        return out
+    # дальше GUID только в OData (COM без GUID)
+    if name_eq and (not sku_both or sku_eq):
+        # 3. наименование совпало, артикулы (если есть) не противоречат
+        out.guid_1c = oda.guid_1c
+        return out
+    if name_eq:
+        # противоречие наименования и артикула
+        out.price = None
+        out.status = ItemStatus.NEEDS_CONFIRM
+        out.detail = ('наименования совпадают, но артикулы COM/OData РАЗНЫЕ '
+                      f'({com.sku_1c} vs {oda.sku_1c}) — требуется '
+                      f'подтверждение; цена {com.price} не допускается к '
+                      'расчёту')
+        return out
+    if sku_eq:
+        # 4. только артикул — личность не подтверждена
+        out.price = None
+        out.status = ItemStatus.NEEDS_CONFIRM
+        out.detail = ('совпадение только по артикулу — личность товара не '
+                      f'подтверждена; цена {com.price} не допускается к '
+                      'расчёту')
+        return out
+    # 5. подтверждения идентичности нет вовсе
     out.price = None
+    out.status = ItemStatus.NOT_FOUND
     out.detail = ('цена COM и карточка OData указывают на РАЗНЫЕ объекты '
                   'номенклатуры — цена не связана')
     return out

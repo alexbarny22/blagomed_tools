@@ -458,9 +458,10 @@ def test_20_sku_only_no_price_is_no_price():
     assert item.price is None
 
 
-def test_21_com_odata_different_objects_not_linked():
-    """COM и OData указывают на разные объекты → GUID из OData НЕ привязывается,
-    цена COM не переносится (NOT_FOUND, price=None)."""
+def test_21_com_odata_different_guids_conflict():
+    """COM и OData дают РАЗНЫЕ GUID → конфликт идентичности: AMBIGUOUS, цена
+    COM не допускается к автоматическому расчёту (price=None), GUID из OData
+    не привязывается."""
     from app.core.onec import merge_odata_guid
     com = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо БЛАГО-ППК01',
                    guid_1c='GUID-COM', price=Decimal('290'), source='com',
@@ -470,9 +471,11 @@ def test_21_com_odata_different_objects_not_linked():
                    status=ItemStatus.NOT_AVAILABLE,
                    detail='найдено в справочнике 1С (цена N/A)')
     out = merge_odata_guid(com, oda)
-    assert out.status == ItemStatus.NOT_FOUND
+    assert out.status == ItemStatus.AMBIGUOUS
+    assert out.status != ItemStatus.OK
     assert out.price is None
-    assert 'РАЗНЫЕ объекты' in out.detail
+    assert out.guid_1c == 'GUID-COM'  # GUID из OData не привязывается
+    assert 'конфликт' in out.detail.lower()
 
 
 def test_21b_com_odata_same_object_links_guid():
@@ -601,3 +604,86 @@ def test_26_odata_error_not_not_found():
     assert items[0].status == ItemStatus.CONNECT_ERROR
     assert items[0].status != ItemStatus.NOT_FOUND
     assert items[0].price is None
+
+
+def test_27_different_guids_same_name_is_conflict():
+    """Разные GUID при ОДИНАКОВОМ наименовании — объекты НЕ считаются
+    одинаковыми: статус AMBIGUOUS, цена не допускается (price=None)."""
+    from app.core.onec import merge_odata_guid
+    com = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо',
+                   guid_1c='GUID-COM', price=Decimal('290'), source='com',
+                   status=ItemStatus.OK, price_date='2026-07-01')
+    oda = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо',
+                   guid_1c='GUID-ODATA', source='odata',
+                   status=ItemStatus.NOT_AVAILABLE)
+    out = merge_odata_guid(com, oda)
+    assert out.status == ItemStatus.AMBIGUOUS
+    assert out.status != ItemStatus.OK
+    assert out.price is None
+    assert 'GUID COM и OData РАЗНЫЕ' in out.detail
+
+
+def test_28_same_guid_different_sku_ok():
+    """Оба GUID совпадают → объединение разрешено даже при разном артикуле
+    (GUID первичен), цена и статус COM сохраняются."""
+    from app.core.onec import merge_odata_guid
+    com = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо',
+                   guid_1c='GUID-X', price=Decimal('290'), source='com',
+                   status=ItemStatus.OK, price_date='2026-07-01')
+    oda = OnecItem(sku_1c='999999', name_1c='Подушка-кольцо',
+                   guid_1c='GUID-X', source='odata',
+                   status=ItemStatus.NOT_AVAILABLE)
+    out = merge_odata_guid(com, oda)
+    assert out.status == ItemStatus.OK
+    assert out.price == Decimal('290')
+    assert out.guid_1c == 'GUID-X'
+
+
+def test_29_com_without_guid_oda_guid_name_sku_match_links():
+    """GUID только в OData, наименование и артикул совпадают → GUID OData
+    привязывается, цена COM сохраняется."""
+    from app.core.onec import merge_odata_guid
+    com = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо',
+                   price=Decimal('290'), source='com',
+                   status=ItemStatus.OK, price_date='2026-07-01')
+    oda = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо',
+                   guid_1c='GUID-ODATA', source='odata',
+                   status=ItemStatus.NOT_AVAILABLE)
+    out = merge_odata_guid(com, oda)
+    assert out.status == ItemStatus.OK
+    assert out.price == Decimal('290')
+    assert out.guid_1c == 'GUID-ODATA'
+
+
+def test_30_com_without_guid_name_sku_contradiction():
+    """GUID только в OData, наименования совпадают, но артикулы РАЗНЫЕ →
+    конфликт подтверждений: NEEDS_CONFIRM, цена не допускается (price=None)."""
+    from app.core.onec import merge_odata_guid
+    com = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо',
+                   price=Decimal('290'), source='com',
+                   status=ItemStatus.OK, price_date='2026-07-01')
+    oda = OnecItem(sku_1c='888888', name_1c='Подушка-кольцо',
+                   guid_1c='GUID-ODATA', source='odata',
+                   status=ItemStatus.NOT_AVAILABLE)
+    out = merge_odata_guid(com, oda)
+    assert out.status == ItemStatus.NEEDS_CONFIRM
+    assert out.status != ItemStatus.OK
+    assert out.price is None
+    assert 'артикулы COM/OData РАЗНЫЕ' in out.detail
+
+
+def test_31_sku_only_match_price_not_auto_used():
+    """Совпадение только по артикулу без подтверждения личности → NEEDS_CONFIRM,
+    цена не допускается к автоматическому расчёту (price=None, не OK)."""
+    from app.core.onec import merge_odata_guid
+    com = OnecItem(sku_1c='232899', name_1c=None,
+                   price=Decimal('290'), source='com',
+                   status=ItemStatus.OK, price_date='2026-07-01')
+    oda = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо',
+                   guid_1c='GUID-ODATA', source='odata',
+                   status=ItemStatus.NOT_AVAILABLE)
+    out = merge_odata_guid(com, oda)
+    assert out.status == ItemStatus.NEEDS_CONFIRM
+    assert out.status != ItemStatus.OK
+    assert out.price is None
+    assert 'только по артикулу' in out.detail
