@@ -264,11 +264,14 @@ def verify_ouput_only_target(src_path, dst_path, marketplace, cost_col,
                              all_sheets=True) -> None:
     """Структурная сверка результата с оригиналом.
 
-    Допустимое отличие — ТОЛЬКО значения целевых ячеек себестоимости. Сверка
-    охватывает ВСЕ листы файла (all_sheets=True по умолчанию): по каждому листу
-    сравниваются значения и формулы ячеек, форматирование целевых ячеек
-    (шрифт, заливка, рамки, выравнивание, формат числа), размеры, объединения
-    и закрепление областей. Любое отличие кроме целевых значений — ошибка.
+    Допустимое отличие — ТОЛЬКО значения целевых ячеек себестоимости И ТОЛЬКО
+    на целевом листе (WB/Ozon). Сверка охватывает ВСЕ листы файла
+    (all_sheets=True по умолчанию): по каждому листу сравниваются значения и
+    формулы ячеек, форматирование ВСЕХ ячеек (шрифт, заливка, рамки,
+    выравнивание, формат числа), размеры колонок, ВЫСОТЫ СТРОК, объединения
+    и закрепление областей. На нецелевых листах изменение значения запрещено
+    даже при совпадении номера строки/колонки с updates. Любое отличие кроме
+    целевых значений целевого листа — ошибка.
     """
     src = load_workbook(src_path, data_only=False)
     try:
@@ -289,13 +292,14 @@ def verify_ouput_only_target(src_path, dst_path, marketplace, cost_col,
                     f'(src={s_names!r}, dst={d_names!r})')
         # Целевые вкладки присутствуют (для них стоимость пишется; «лишней»
         # вкладки с целевым префиксом быть не должно).
-        _target_sheet(src, marketplace)
+        target_title = _target_sheet(src, marketplace).title
         _target_sheet(dst, marketplace)
         for s_title, d_title in zip(src.sheetnames, dst.sheetnames):
             if s_title != d_title:
                 diff.append(f'лист {s_title!r} переименован в {d_title!r}')
             _compare_sheets(src[s_title], dst[d_title], base=s_title,
-                            diff=diff, cost_col=cost_col, updates=updates)
+                            diff=diff, cost_col=cost_col, updates=updates,
+                            is_target=(s_title == target_title))
     finally:
         src.close()
         dst.close()
@@ -322,8 +326,15 @@ def _cell_style_stamp(c) -> str:
     return '\x1f'.join(parts)
 
 
-def _compare_sheets(ws_src, ws_dst, *, base: str, diff, cost_col, updates):
-    """Сверяет два листа; замечания копит в diff, грубые отличия — ExportError."""
+def _compare_sheets(ws_src, ws_dst, *, base: str, diff, cost_col, updates,
+                    is_target: bool):
+    """Сверяет два листа; замечания копит в diff, грубые отличия — ExportError.
+
+    Значения целевой колонки менять можно ТОЛЬКО на целевом листе (is_target).
+    На остальных листах любые изменения значений запрещены, даже при совпадении
+    номера строки/колонки с updates. Для всех ячеек сверяется оформление, а для
+    листа — высоты строк: значениями сверка не ограничивается.
+    """
     if (ws_src.max_row != ws_dst.max_row
             or ws_src.max_column != ws_dst.max_column):
         raise ExportError(
@@ -340,12 +351,16 @@ def _compare_sheets(ws_src, ws_dst, *, base: str, diff, cost_col, updates):
     d_dims = [(k, v.width, v.height) for k, v in
               ws_dst.column_dimensions.items()]
     if s_dims != d_dims:
-        diff.append(f'{base}: размеры колонок/строк различаются')
+        diff.append(f'{base}: размеры колонок различаются')
+    s_rows = sorted((k, v.height) for k, v in ws_src.row_dimensions.items())
+    d_rows = sorted((k, v.height) for k, v in ws_dst.row_dimensions.items())
+    if s_rows != d_rows:
+        diff.append(f'{base}: высоты строк различаются: {s_rows} vs {d_rows}')
     for r in range(1, ws_src.max_row + 1):
         for c in range(1, ws_src.max_column + 1):
             sc = ws_src.cell(row=r, column=c)
             dc = ws_dst.cell(row=r, column=c)
-            if c == cost_col and r in updates:
+            if is_target and c == cost_col and r in updates:
                 # Значение целевой ячейки менять можно, но только если перед
                 # этим это не была формула; форматирование сохраняется.
                 if (isinstance(sc.value, str) and sc.value.startswith('=')):
@@ -355,9 +370,14 @@ def _compare_sheets(ws_src, ws_dst, *, base: str, diff, cost_col, updates):
                     diff.append(f'{base}: {sc.coordinate}: изменено '
                                 f'форматирование ячейки')
                 continue
+            # Любая другая ячейка (в т.ч. «строка/колонка из updates» на чужом
+            # листе): значения и оформление обязаны совпадать.
             if sc.value != dc.value:
                 diff.append(f'{base}: {sc.coordinate}: исходник '
                             f'{sc.value!r} vs результат {dc.value!r}')
+            if _cell_style_stamp(sc) != _cell_style_stamp(dc):
+                diff.append(f'{base}: {sc.coordinate}: изменено '
+                            f'форматирование ячейки')
 
 
 # ── Сопоставление строк отчёта с товарами и статусы ─────────────────────────
@@ -759,6 +779,27 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
             updates[oc.marketplace][oc.row_number] = oc.cost
 
     stamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
+
+    # Идемпотентность: проверка уже завершённого запуска ДО создания временных
+    # XLSX. Ранний возврат при done-run не должен оставлять .tmp_* файлы в
+    # out_dir; заодно не строим и не сверяем Excel повторно — результат уже
+    # опубликован. _run_key_signature зависит только от входных данных (исход-
+    # ные файлы, настройки, результаты, дата/пользователь/salt), не от tmp.
+    key = None
+    if persist and con is not None:
+        key = _run_key_signature(con=con, wb_path=wb_path, ozon_path=ozon_path,
+                                 calc_date=d, user=user, salt=salt,
+                                 outcomes=outcomes, ok_unique=ok_unique)
+        existing = runs.get_run_by_key(con, key)
+        if existing is not None and existing['status'] == 'done':
+            report = RunReport(
+                calc_date=d, run_id=existing['id'],
+                status='draft' if drafts else 'ok',
+                wb_path=existing['wb_file'], ozon_path=existing['ozon_file'],
+                report_path=None, rows=_sorted_outcomes(outcomes),
+                summary=summary, hashes=hashes, drafts=drafts)
+            return _write_report_final(report, out_dir, d, stamp)
+
     tmp_wb = out_dir / f'.tmp_wb_{stamp}.xlsx'
     tmp_oz = out_dir / f'.tmp_ozon_{stamp}.xlsx'
     wb_new, _ = build_excel(wb_path, 'wb',
@@ -789,14 +830,14 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
 
     # История: одна транзакция run+snapshots
     run_id = None
-    if persist and con is not None:
-        key = _run_key_signature(con=con, wb_path=wb_path, ozon_path=ozon_path,
-                                 calc_date=d, user=user, salt=salt,
-                                 outcomes=outcomes, ok_unique=ok_unique)
+    if key is not None:
+        # Повторная проверка (защита от гонки): done-run мог появиться между
+        # ранней проверкой и записью истории. Переиспользуем его, но сначала
+        # ОБЯЗАТЕЛЬНО удаляем уже созданные временные XLSX.
         existing = runs.get_run_by_key(con, key)
         if existing is not None and existing['status'] == 'done':
-            # Идемпотентность: повторный запуск тех же входных данных — новых
-            # записей не создаём и уже опубликованные файлы не плодим.
+            tmp_wb.unlink(missing_ok=True)
+            tmp_oz.unlink(missing_ok=True)
             report = RunReport(
                 calc_date=d, run_id=existing['id'],
                 status='draft' if drafts else 'ok',

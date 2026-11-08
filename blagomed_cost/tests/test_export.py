@@ -650,3 +650,124 @@ def test_publish_failure_keeps_preexisting_files(tmp_path, monkeypatch):
                       ).fetchone()
     assert run['status'] == 'error'
     assert 'ozon publish failed' in (run['error'] or '')
+
+
+# ── Повторный идентичный запуск не оставляет временных XLSX ─────────────────
+
+
+def test_duplicate_done_run_leaves_no_temp_files(tmp_path):
+    con = base_db(tmp_path)
+    add_product(con, 'S1', weight=270)
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', 'Бренда нет', None)])
+    fetch = make_fetcher({'S1': ok_item('S1', '1000')})
+    out = tmp_path / 'out'
+
+    r1 = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                     ozon_path=p_oz, out_dir=out,
+                     fetch_prices=fetch, source_1c='com', persist=True)
+    # Полностью идентичный повтор (тот же run_key): проверка done-run идёт ДО
+    # создания временных XLSX → новых записей/файлов и .tmp_* быть не должно.
+    r2 = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                     ozon_path=p_oz, out_dir=out,
+                     fetch_prices=fetch, source_1c='com', persist=True)
+
+    assert r2.run_id == r1.run_id
+    assert Path(r2.wb_path) == Path(r1.wb_path)
+    assert Path(r2.ozon_path) == Path(r1.ozon_path)
+    assert con.execute('SELECT COUNT(*) c FROM runs').fetchone()['c'] == 1
+    published = sorted(p.name for p in out.glob('*.xlsx'))
+    assert published == sorted([Path(r1.wb_path).name, Path(r1.ozon_path).name])
+    assert list(out.glob('.tmp_*')) == []
+
+
+# ── verify_ouput_only_target: любые изменения только на целевом листе ──────
+
+
+WB_TARGET = 'Себестоимость за 2026-11'
+WB_COST_COL = 5
+OZ_COST_COL = 4
+
+
+def _resaved(src, dst, mutate):
+    """Копия XLSX с точечным изменением (имитация «испорченного» результата)."""
+    wb = load_workbook(src)
+    mutate(wb)
+    wb.save(dst)
+    return dst
+
+
+def test_verify_detects_extra_sheet_value_change_wb(tmp_path):
+    p_src = make_wb(tmp_path / 'src.xlsx', [('B1', 'S1', '0', None, None)])
+    wb = load_workbook(p_src)
+    extra = wb.create_sheet('Дополнительно')
+    extra['E5'] = 111
+    wb.save(p_src)
+    p_dst = tmp_path / 'dst.xlsx'
+
+    def mutate(wb_):
+        wb_['Дополнительно']['E5'] = 222
+
+    _resaved(p_src, p_dst, mutate)
+    # Строка/колонка совпадают с updates — прежняя логика такую подмену
+    # пропускала; теперь изменение на нецелевом листе запрещено.
+    with pytest.raises(ExportError, match='Дополнительно'):
+        exmod.verify_ouput_only_target(p_src, p_dst, 'wb', WB_COST_COL,
+                                       {5: 999})
+
+
+def test_verify_detects_extra_sheet_value_change_ozon(tmp_path):
+    p_src = make_ozon(tmp_path / 'src.xlsx',
+                      [('O1', 'S1', 'Бренда нет', None)])
+    wb = load_workbook(p_src)
+    extra = wb.create_sheet('Дополнительно')
+    extra['D4'] = 111
+    wb.save(p_src)
+    p_dst = tmp_path / 'dst.xlsx'
+
+    def mutate(wb_):
+        wb_['Дополнительно']['D4'] = 222
+
+    _resaved(p_src, p_dst, mutate)
+    with pytest.raises(ExportError, match='Дополнительно'):
+        exmod.verify_ouput_only_target(p_src, p_dst, 'ozon', OZ_COST_COL,
+                                       {4: 999})
+
+
+def test_verify_detects_non_target_cell_style_change(tmp_path):
+    from openpyxl.styles import Font
+    p_src = make_wb(tmp_path / 'src.xlsx', [('B1', 'S1', '0', None, None)])
+    p_dst = tmp_path / 'dst.xlsx'
+
+    def mutate(wb_):
+        wb_[WB_TARGET]['A2'].font = Font(bold=True)
+
+    _resaved(p_src, p_dst, mutate)
+    with pytest.raises(ExportError, match='форматирование'):
+        exmod.verify_ouput_only_target(p_src, p_dst, 'wb', WB_COST_COL,
+                                       {3: 100})
+
+
+def test_verify_detects_row_height_change(tmp_path):
+    p_src = make_wb(tmp_path / 'src.xlsx', [('B1', 'S1', '0', None, None)])
+    p_dst = tmp_path / 'dst.xlsx'
+
+    def mutate(wb_):
+        wb_[WB_TARGET].row_dimensions[2].height = 40
+
+    _resaved(p_src, p_dst, mutate)
+    with pytest.raises(ExportError, match='высот'):
+        exmod.verify_ouput_only_target(p_src, p_dst, 'wb', WB_COST_COL,
+                                       {3: 100})
+
+
+def test_verify_allows_target_cell_change_on_target_sheet(tmp_path):
+    p_src = make_wb(tmp_path / 'src.xlsx', [('B1', 'S1', '0', None, None)])
+    p_dst = tmp_path / 'dst.xlsx'
+
+    def mutate(wb_):
+        wb_[WB_TARGET]['E3'] = 1234
+
+    _resaved(p_src, p_dst, mutate)
+    # Ошибки быть не должно: изменена только целевая ячейка целевого листа.
+    exmod.verify_ouput_only_target(p_src, p_dst, 'wb', WB_COST_COL, {3: 1234})
