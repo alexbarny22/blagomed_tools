@@ -126,7 +126,7 @@ def test_migration_failure_rolls_back_and_keeps_user_version(tmp_path, monkeypat
 
     _write_migrations(mdir, '002_bad.sql', BAD_002)
     with pytest.raises(sqlite3.OperationalError):
-        apply_migrations(db_path, migrations_dir=mdir)
+        apply_migrations(db_path, migrations_dir=mdir, confirm=True)
 
     # Версия схемы и данные не изменились, неудачная таблица откачена
     assert get_schema_version(db_path) == 1
@@ -151,10 +151,10 @@ def test_apply_migrations_allows_recovery_after_fix(tmp_path, monkeypatch):
     apply_migrations(db_path, migrations_dir=mdir)
     _write_migrations(mdir, '002_bad.sql', BAD_002)
     with pytest.raises(sqlite3.OperationalError):
-        apply_migrations(db_path, migrations_dir=mdir)
+        apply_migrations(db_path, migrations_dir=mdir, confirm=True)
 
     _write_migrations(mdir, '002_bad.sql', GOOD_002)   # тот же файл исправлен
-    assert apply_migrations(db_path, migrations_dir=mdir) == 1
+    assert apply_migrations(db_path, migrations_dir=mdir, confirm=True) == 1
     assert get_schema_version(db_path) == 2
     con = connect(db_path)
     try:
@@ -176,7 +176,7 @@ def test_backup_is_taken_before_schema_change(tmp_path, monkeypatch):
     apply_migrations(db_path, migrations_dir=mdir)
 
     _write_migrations(mdir, '002_create.sql', GOOD_002)
-    apply_migrations(db_path, migrations_dir=mdir)
+    apply_migrations(db_path, migrations_dir=mdir, confirm=True)
 
     # Бэкап снят ДО второй миграции: версия 1, таблицы t2 ещё нет
     backups = sorted(backup_dir.glob('*.db'))
@@ -243,3 +243,58 @@ def test_backup_and_restore_in_wal_mode(tmp_path, monkeypatch):
             assert list(rc.execute('SELECT a, b FROM t ORDER BY b')) == expected
         finally:
             rc.close()
+# ── 002: подтверждение владельца для существующей БД + целостность данных ──
+
+
+def test_v1_db_upgrade_002_needs_confirmation_and_intact(tmp_path, monkeypatch):
+    """Реальная 002-миграция поверх БД версии 001: без confirm — отказ БЕЗ
+    изменений (MigrationConfirmationRequired); с confirm=True — *_exact-колонки
+    и runs.run_key появляются, legacy-данные остаются невредимыми."""
+    from app.core.db import MigrationConfirmationRequired, init_db
+
+    mdir = tmp_path / 'migrations'
+    mdir.mkdir()
+    mdir_001 = mdir / '001_init.sql'
+    mdir_001.write_bytes((MIGRATIONS_DIR / '001_init.sql').read_bytes())
+    db_path = tmp_path / 'cost.db'
+    monkeypatch.setattr(db, 'BACKUP_DIR', tmp_path / 'backup')  # изолировать бэкапы
+
+    apply_migrations(db_path, migrations_dir=mdir)          # новая БД → schema 001
+    assert get_schema_version(db_path) == 1
+    con = connect(db_path)
+    try:
+        con.execute("INSERT INTO products (sku_1c, active) VALUES ('2000001', 1)")
+        con.execute("INSERT INTO runs (started_at, finished_at, status)"
+                    " VALUES ('2026-11-01', '2026-11-01', 'done')")
+        con.execute("INSERT INTO cost_snapshots (run_id, product_id, price_1c,"
+                    " price_source, cost) VALUES (1, 1, 0.1, 'legacy', 7)")
+        con.commit()
+    finally:
+        con.close()
+
+    # 002 теперь в каталоге миграций, но БД уже существует: подтверждение
+    mdir_002 = mdir / '002_snapshots_exact.sql'
+    mdir_002.write_bytes((MIGRATIONS_DIR / '002_snapshots_exact.sql').read_bytes())
+    with pytest.raises(MigrationConfirmationRequired):
+        apply_migrations(db_path, migrations_dir=mdir)
+    with pytest.raises(MigrationConfirmationRequired):
+        init_db(db_path)
+    assert get_schema_version(db_path) == 1                 # ничего не изменено
+
+    # подтверждённая миграция: колонки добавлены, legacy-данные целы
+    assert apply_migrations(db_path, migrations_dir=mdir, confirm=True) == 1
+    assert get_schema_version(db_path) == 2
+    con = connect(db_path)
+    try:
+        exact = {r['name'] for r in con.execute('PRAGMA table_info(cost_snapshots)')}
+        assert {'price_1c_exact', 'ppu_rate_exact', 'ppu_rub_exact',
+                'extras_rub_exact', 'margin_pct_exact'} <= exact
+        assert 'run_key' in {r['name'] for r in con.execute('PRAGMA table_info(runs)')}
+        row = con.execute('SELECT price_1c, cost, price_1c_exact'
+                          ' FROM cost_snapshots').fetchone()
+        assert float(row['price_1c']) == 0.1   # REAL-значение legacy-снимка живо
+        assert row['price_1c_exact'] is None   # legacy не трогается (NULL)
+        assert row['cost'] == 7
+        assert con.execute('SELECT COUNT(*) c FROM products').fetchone()['c'] == 1
+    finally:
+        con.close()

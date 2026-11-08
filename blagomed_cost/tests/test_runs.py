@@ -203,17 +203,24 @@ def test_recovery_after_crash_before_publish(tmp_path):
     fetch = make_fetcher({'S1': ok_item('S1', '1000')})
 
     # «сбой» после фиксации run+snapshots, до публикации файлов
-    key = exmod._run_key_signature(p_wb, p_oz, '2026-11-01', 'cli', '')
-    run_id = start_run(con, run_key=key, user='cli', source_1c='com')
-    insert_snapshot(con, run_id, product_id=pid,
-                    result=compute_cost(price=1000, margin_pct=15))
-    con.commit()
+    first = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                        ozon_path=p_oz, out_dir=tmp_path / 'out',
+                        fetch_prices=fetch, source_1c='com', persist=True)
+    assert first.wb_path and Path(first.wb_path).exists()
 
-    # повторная попытка того же запуска — безопасное восстановление
+    # имитация сбоя: run не завершён, опубликованные файлы потеряны
+    with con:
+        con.execute('UPDATE runs SET status = \'running\', wb_file = NULL,'
+                    ' ozon_file = NULL WHERE id = ?', (first.run_id,))
+    for p in (Path(first.wb_path), Path(first.ozon_path)):
+        p.unlink(missing_ok=True)
+    assert list((tmp_path / 'out').glob('*.xlsx')) == []
+
+    # повторная попытка того же запуска — безопасное восстановление:
     report = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
                          ozon_path=p_oz, out_dir=tmp_path / 'out',
                          fetch_prices=fetch, source_1c='com', persist=True)
-    assert report.run_id == run_id
+    assert report.run_id == first.run_id
     runs_rows = con.execute('SELECT status FROM runs').fetchall()
     assert len(runs_rows) == 1
     assert runs_rows[0]['status'] == 'done'
@@ -224,6 +231,106 @@ def test_recovery_after_crash_before_publish(tmp_path):
                        ).fetchone()['c'] == 1
 
 
+def test_recovery_fills_only_missing_snapshots(tmp_path):
+    con = _con(tmp_path)
+    _settings(con)
+    pid1 = _product(con, 'S1')
+    pid2 = _product(con, 'S2')
+    for pid in (pid1, pid2):
+        con.execute('INSERT INTO ppu_weights (product_id, weight_g, valid_from)'
+                    ' VALUES (?, 270, ?)', (pid, '2026-07-01'))
+    con.commit()
+    p_wb = make_wb(tmp_path / 'wb.xlsx',
+                   [('B1', 'S1', '0', None, None),
+                    ('B2', 'S2', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', DUMMY_OZ)
+    fetch = make_fetcher({'S1': ok_item('S1', '1000'),
+                          'S2': ok_item('S2', '1200')})
+
+    first = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                        ozon_path=p_oz, out_dir=tmp_path / 'out',
+                        fetch_prices=fetch, source_1c='com', persist=True)
+    assert con.execute('SELECT COUNT(*) c FROM cost_snapshots'
+                       ).fetchone()['c'] == 2
+
+    # «сбой» после фиксации run: файлы потеряны, снимок S2 не зафиксировался
+    with con:
+        con.execute('UPDATE runs SET status = \'running\', wb_file = NULL,'
+                    ' ozon_file = NULL WHERE id = ?', (first.run_id,))
+        con.execute('DELETE FROM cost_snapshots WHERE product_id = ?', (pid2,))
+    for p in (Path(first.wb_path), Path(first.ozon_path)):
+        p.unlink(missing_ok=True)
+
+    report = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                         ozon_path=p_oz, out_dir=tmp_path / 'out',
+                         fetch_prices=fetch, source_1c='com', persist=True)
+    assert report.run_id == first.run_id
+    assert con.execute('SELECT status FROM runs').fetchone()['status'] == 'done'
+    # дозаписан только отсутствующий снимок, существующий не изменён
+    snaps = con.execute('SELECT product_id, price_1c_exact FROM cost_snapshots'
+                        ' ORDER BY product_id').fetchall()
+    assert [(s['product_id'], s['price_1c_exact']) for s in snaps] == [
+        (pid1, '1000'), (pid2, '1200')]
+
+
+def test_publish_second_file_failure_rolls_back_first(tmp_path, monkeypatch):
+    con = _con(tmp_path)
+    _settings(con)
+    pid = _product(con, 'S1')
+    con.execute('INSERT INTO ppu_weights (product_id, weight_g, valid_from)'
+                ' VALUES (?, 270, ?)', (pid, '2026-07-01'))
+    con.commit()
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', '', None)])
+    fetch = make_fetcher({'S1': ok_item('S1', '1000')})
+
+    real_replace = exmod.os.replace
+    def fail_on_ozon(src, dst):
+        if 'OZON' in str(dst):
+            raise OSError('ozon publish failed')
+        return real_replace(src, dst)
+    monkeypatch.setattr(exmod.os, 'replace', fail_on_ozon)
+
+    with pytest.raises(ExportError, match='ozon publish failed'):
+        run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                    ozon_path=p_oz, out_dir=tmp_path / 'out',
+                    fetch_prices=fetch, source_1c='com', persist=True)
+    run = con.execute('SELECT * FROM runs').fetchone()
+    assert run['status'] == 'error'
+    assert 'ozon publish failed' in (run['error'] or '')
+    # атомарность пары: WB уже был переименован, но откачен — «полупар» нет
+    assert list((tmp_path / 'out').glob('*.xlsx')) == []
+    assert list((tmp_path / 'out').glob('.tmp_*')) == []
+
+
+def test_changed_price_same_xlsx_gives_new_run(tmp_path):
+    """Цены 1С изменились при тех же именах XLSX → НОВЫЙ run_key и новый run,
+    а не молчаливый возврат уже опубликованных файлов прежнего запуска."""
+    con = _con(tmp_path)
+    _settings(con)
+    pid = _product(con, 'S1')
+    con.execute('INSERT INTO ppu_weights (product_id, weight_g, valid_from)'
+                ' VALUES (?, 270, ?)', (pid, '2026-07-01'))
+    con.commit()
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', '', None)])
+
+    r_low = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                        ozon_path=p_oz, out_dir=tmp_path / 'out1',
+                        fetch_prices=make_fetcher({'S1': ok_item('S1', '1000')}),
+                        source_1c='com', persist=True)
+    r_high = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                         ozon_path=p_oz, out_dir=tmp_path / 'out2',
+                         fetch_prices=make_fetcher({'S1': ok_item('S1', '1100')}),
+                         source_1c='com', persist=True)
+
+    assert r_low.run_id != r_high.run_id
+    assert con.execute('SELECT COUNT(*) c FROM runs').fetchone()['c'] == 2
+    snaps = con.execute('SELECT run_id, price_1c_exact FROM cost_snapshots'
+                        ' ORDER BY run_id').fetchall()
+    assert [(s['run_id'], s['price_1c_exact']) for s in snaps] == [
+        (r_low.run_id, '1000'), (r_high.run_id, '1100')]
+    assert Path(r_low.wb_path).exists() and Path(r_high.wb_path).exists()
 # ── 30. Точное хранение Decimal (миграция 002) ──────────────────────────────
 
 

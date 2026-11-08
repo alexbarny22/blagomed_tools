@@ -30,6 +30,7 @@ __all__ = [
     'RunError', 'DuplicateRun', 'RunAlreadyFinished', 'RunNotFound',
     'start_run', 'get_run_by_key', 'finish_run', 'fail_run',
     'insert_snapshot', 'insert_snapshots', 'snapshot_decimal_values',
+    'run_asset_for_result', 'validate_run_snapshots', 'PPU_UNCONFIRMED',
 ]
 
 # text-колонка точного Decimal -> REAL-колонка совместимости.
@@ -40,6 +41,12 @@ EXACT_PAIRS = (
     ('extras_rub_exact', 'extras_rub'),
     ('margin_pct_exact', 'margin_pct'),
 )
+
+# Отдельный статус позиции расчёта: себестоимость посчитана, но вес ППУ
+# (ppu_weights) не утверждён на дату расчёта. Такие позиции НЕ фиксируются ни
+# в cost_snapshots, ни в файлах «готово»: ни вес 0, ни рассчитанный на его
+# основе cost не выдаются за проверенную запись (см. export._resolve_rows).
+PPU_UNCONFIRMED = 'PPU_UNCONFIRMED'
 
 
 class RunError(Exception):
@@ -75,9 +82,12 @@ def start_run(con: sqlite3.Connection, *, run_key: str, user: str = 'cli',
     """Создаёт run (status='running') или возвращает id технической попытки.
 
     - run_key существует и status='done'   -> DuplicateRun (не дублируем).
-    - run_key существует и status='running' -> это повторная техническая
-      попытка завершить тот же запуск: возвращаем существующий id, дубль не
-      создаём.
+    - run_key существует и status='running' или 'error' — это повторная
+      техническая попытка завершить тот же запуск: возвращаем существующий id,
+      дубль не создаём. Содержимое снимков при этом проверяется вызовом
+      validate_run_snapshots (export.run_exports): entry-данные (цены 1С, вес
+      ППУ, доп. расходы) фактически входят в run_key, поэтому совпадение ключа
+      гарантирует, что повторная попытка продолжает ТОТ ЖЕ расчёт.
     """
     existing = get_run_by_key(con, run_key)
     if existing is not None:
@@ -176,6 +186,68 @@ def insert_snapshots(con: sqlite3.Connection, run_id: int,
                         price_meta=price_meta, ppu_approved=ppu_approved)
         n += 1
     return n
+
+
+def run_asset_for_result(result) -> dict:
+    """«Актив» снимка по результату расчёта — эталон validate_run_snapshots.
+
+    Все значения приводятся к канонической форме готовой строки cost_snapshots
+    (см. insert_snapshot): price/extras_rub — str(Decimal(...)), cost — INTEGER.
+    """
+    return {
+        'price': str(Decimal(str(result.price))),
+        'ppu_weight_g': int(result.ppu_weight_g),
+        'extras_rub': str(Decimal(str(result.extras_rub))),
+        'cost': int(result.cost),
+    }
+
+
+def validate_run_snapshots(con: sqlite3.Connection, run_id: int,
+                           expected: dict[int, dict]) -> list[int]:
+    """Проверяет полноту snapshots повторной попытки (восстановление после сбоя).
+
+    `expected` — {product_id: asset} эталонных снимков текущего расчёта (см.
+    run_asset_for_result). Возвращает product_id, для которых снимок отсутствует
+    целиком (их нужно дозаписать — случай «сбой до коммита снимков»).
+
+    Если снимок есть, но его содержимое (цена 1С, вес ППУ, сумма доп. расходов,
+    себестоимость) не совпадает с эталоном ИЛИ run содержит снимки позиций,
+    которых нет в эталоне, — поднимается RunError: повторная попытка не является
+    техническим продолжением того же самого расчёта (входные данные изменились),
+    и дописывать «поверх» снимков нельзя.
+    """
+    rows = con.execute(
+        'SELECT id, product_id, price_1c_exact, price_1c, ppu_weight_g,'
+        '       extras_rub_exact, extras_rub, cost'
+        ' FROM cost_snapshots WHERE run_id = ? ORDER BY id', (run_id,)).fetchall()
+    stored: dict[int, dict] = {}
+    for r in rows:
+        price_raw = (r['price_1c_exact'] if r['price_1c_exact'] is not None
+                     else r['price_1c'])
+        extras_raw = (r['extras_rub_exact'] if r['extras_rub_exact'] is not None
+                      else r['extras_rub'])
+        stored[int(r['product_id'])] = {
+            'price': str(Decimal(str(price_raw))),
+            'ppu_weight_g': int(r['ppu_weight_g']) if r['ppu_weight_g'] is not None else 0,
+            'extras_rub': str(Decimal(str(extras_raw))),
+            'cost': int(r['cost']),
+        }
+    extra = sorted(set(stored) - set(expected))
+    if extra:
+        raise RunError(
+            f'run {run_id}: снимки позиций {extra} отсутствуют в текущем расчёте. '
+            'Повторная попытка не продолжает тот же run_key (вход изменился) — '
+            'запустите расчёт заново (при желании с новым salt).')
+    mismatch = [pid for pid in expected
+                if pid in stored and stored[pid] != expected[pid]]
+    if mismatch:
+        bad = ', '.join(f'{pid}: сохранено {stored[pid]} != рассчитано '
+                        f'{expected[pid]}' for pid in mismatch)
+        raise RunError(
+            f'run {run_id}: содержимое снимков позиций {mismatch} не совпадает '
+            f'с текущим расчётом ({bad}). Цены 1С / вес ППУ / доп. расходы '
+            'изменились — повторная попытка не является тем же расчётом.')
+    return [pid for pid in expected if pid not in stored]
 
 
 def snapshot_decimal_values(row) -> dict[str, Decimal]:

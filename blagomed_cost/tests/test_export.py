@@ -191,7 +191,7 @@ def test_no_recalc_same_product_in_run(tmp_path, monkeypatch):
 
 def test_manual_price_priority(tmp_path):
     con = base_db(tmp_path)
-    add_product(con, 'S1', manual=1, manual_price=500)
+    add_product(con, 'S1', manual=1, manual_price=500, weight=270)
     p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
     p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', '', None)])
     fetch = make_fetcher({'S1': ok_item('S1', '9999')})   # 1С не при чём
@@ -202,7 +202,8 @@ def test_manual_price_priority(tmp_path):
     snap = con.execute('SELECT * FROM cost_snapshots').fetchone()
     assert snap['price_source'] == 'manual'
     assert Decimal(snap['price_1c_exact']) == Decimal('500')
-    expected = compute_cost(price=500, ppu_rate=405, margin_pct=15).cost
+    expected = compute_cost(price=500, weight_g=270, ppu_rate=405,
+                                margin_pct=15).cost
     assert snap['cost'] == expected
     # Ручным товарам внешняя цена не запрашивается
     assert not fetch.calls
@@ -343,13 +344,37 @@ def test_ppu_not_approved_not_fully_verified(tmp_path):
                          ozon_path=p_oz, out_dir=tmp_path / 'out',
                          fetch_prices=fetch, source_1c='com', persist=True)
     row = [r for r in report.rows if r.supplier_article == 'S1'][0]
-    assert row.status == 'OK'
+    assert row.status == 'PPU_UNCONFIRMED'   # отдельный статус, не OK
     assert row.ppu_approved is False
+    assert row.cost is None                  # cost не выдаётся за проверенный
     assert any('вес ППУ не утверждён' in n for n in row.notes)
-    assert report.summary['ppu_unapproved'] == 1
+    assert report.summary['ppu_unconfirmed'] == 1
+    assert report.summary['ppu_unapproved'] == 0
+    assert report.summary['ok'] == 0
     assert report.drafts          # без утверждённого ППУ — только черновик
     report_txt = Path(report.report_path).read_text(encoding='utf-8')
     assert 'вес ППУ не утверждён' in report_txt
+
+
+def test_manual_price_without_ppu_is_draft(tmp_path):
+    # Ручная цена без утверждённого веса ППУ: рассчитано, но НЕ OK — только
+    # черновик, файл «готово» не выпускается, cost в строке не выдаётся.
+    con = base_db(tmp_path)
+    add_product(con, 'S1', manual=1, manual_price=500)   # веса ППУ нет
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', '', None)])
+    fetch = make_fetcher({'S1': ok_item('S1', '9999')})  # цена 1С не участвует
+    report = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                         ozon_path=p_oz, out_dir=tmp_path / 'out',
+                         fetch_prices=fetch, source_1c='manual', persist=True)
+    row = [r for r in report.rows if r.supplier_article == 'S1'][0]
+    assert row.status == 'PPU_UNCONFIRMED'
+    assert row.cost is None
+    assert report.summary['ppu_unconfirmed'] == 2   # строка WB + строка OZON
+    assert report.drafts
+    assert list((tmp_path / 'out').glob('*_готово.xlsx')) == []
+    drafts_ = list((tmp_path / 'out').glob('*_черновик.xlsx'))
+    assert drafts_ and Path(drafts_[0]).exists()
 
 
 # ── 20. Текущая цена не выдаётся за историческую ────────────────────────────
