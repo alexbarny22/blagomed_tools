@@ -37,13 +37,20 @@
   того же run_key (status='running'/'error') проходит через
   runs.validate_run_snapshots: дозаписываются только отсутствующие снимки,
   а изменение содержимого снимков при том же run_key — ошибка (вход
-  изменился, обязан смениться и run_key).
+  изменился, обязан смениться и run_key). Сравниваются ВСЕ существенные
+  поля снимка, включая точные ставки ППУ и наценку (*_exact);
+- прерванный 'error'-запуск после успешной проверки snapshots возвращается
+  в 'running' контролируемым переходом runs.resume_run — повторная попытка
+  завершается штатным 'done' без дублирования записей.
 """
 from __future__ import annotations
 
 import hashlib
+import io
 import os
+import re
 import sqlite3
+import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -152,6 +159,82 @@ def _ppu_approved(con, product_id: int, d: str) -> bool:
 
 
 # ── Excel: копия оригинала, запись только целевой колонки ───────────────────
+
+# Детерминированная сериализация XLSX. openpyxl при каждом сохранении
+# перезаписывает workbook.properties.modified текущим UTC-временем
+# (openpyxl/writer/excel.py: save_workbook выставляет properties.modified =
+# datetime.now(...)) — идентичное содержимое, сохранённое в разные секунды,
+# даёт РАЗНЫЕ байты. Публикация отличает результаты по SHA-256 (переиспользование
+# уже существующего файла при идентичном содержимом), поэтому байты результата
+# обязаны зависеть только от содержимого: время в docProps/core.xml берётся из
+# ИСХОДНОГО файла, а штампы времени записей zip-архива фиксируются.
+
+_ZIP_TIME_FIXED = (2000, 1, 1, 0, 0, 0)    # единый штамп записей zip-архива
+_DEFAULT_TS = b'2000-01-01T00:00:00Z'      # если в исходном файле нет core.xml
+
+_CORE_TS_RE = {
+    'created': re.compile(rb'(<dcterms:created[^>]*>)([^<]*)(</dcterms:created>)'),
+    'modified': re.compile(rb'(<dcterms:modified[^>]*>)([^<]*)(</dcterms:modified>)'),
+}
+
+
+def _source_core_ts(src_path: Path) -> dict[str, bytes]:
+    """Значения dcterms:created/modified из core.xml исходного файла.
+
+    Они задают «момент документа» результата: два сохранения идентичного
+    содержимого обязаны совпасть байт-в-байт, поэтому время не берётся из
+    момента сохранения.
+    """
+    out = {}
+    try:
+        with zipfile.ZipFile(src_path) as z:
+            core = (z.read('docProps/core.xml')
+                    if 'docProps/core.xml' in z.namelist() else b'')
+    except (OSError, zipfile.BadZipFile):
+        core = b''
+    for name, re_ in _CORE_TS_RE.items():
+        m = re_.search(core)
+        out[name] = m.group(2) if m else _DEFAULT_TS
+    return out
+
+
+def _canonical_xlsx(data: bytes, ts: dict[str, bytes]) -> bytes:
+    """Переупаковывает XLSX в детерминированные байты.
+
+    Записи переписываются в том же порядке с фиксированными штампами времени
+    (сжатие ZIP_DEFLATED детерминировано); в docProps/core.xml
+    dcterms:created/modified заменяются на значения из ts. Итог зависит ТОЛЬКО
+    от содержимого workbook'а.
+    """
+    entries = []
+    with zipfile.ZipFile(io.BytesIO(data)) as zin:
+        for info in zin.infolist():
+            content = zin.read(info.filename)
+            if info.filename == 'docProps/core.xml':
+                for name, re_ in _CORE_TS_RE.items():
+                    ts_val = ts[name]
+
+                    def _sub(m, _ts=ts_val):
+                        return m.group(1) + _ts + m.group(3)
+
+                    content = re_.sub(_sub, content, count=1)
+            entries.append((info, content))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for info, content in entries:
+            zinfo = zipfile.ZipInfo(info.filename, date_time=_ZIP_TIME_FIXED)
+            zinfo.compress_type = zipfile.ZIP_DEFLATED
+            zinfo.external_attr = info.external_attr
+            zout.writestr(zinfo, content)
+    return buf.getvalue()
+
+
+def _save_xlsx_deterministic(wb, src_path: Path, dst_path: Path) -> None:
+    """Сохраняет workbook в dst_path с байтами, зависящими только от содержимого."""
+    buf = io.BytesIO()
+    wb.save(buf)
+    dst_path.write_bytes(_canonical_xlsx(buf.getvalue(),
+                                         _source_core_ts(src_path)))
 
 
 def _target_sheet(wb, marketplace: str):
@@ -638,11 +721,11 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
                 ) -> RunReport:
     """Основной запуск: парсинг → цены → расчёт → Excel → история → публикация.
 
-    mode='strict': при любой не-OK строке публикуются ТОЛЬКО черновики и
-    отчёт исключений; готовые файлы не выпускаются. Строка со статусом
-    PPU_UNCONFIRMED (товар рассчитан, но вес ППУ не утверждён) не считается
-    OK и не попадает в Excel. persist=False: записи в БД не производятся
-    (dry-run).
+    Допустимые mode: 'strict' и 'force' (иное — ExportError). Оба режима при
+    любой не-OK строке (включая PPU_UNCONFIRMED) публикуют ТОЛЬКО черновики и
+    отчёт исключений; «force» НЕ отключает этот запрет. PPU_UNCONFIRMED (вес
+    ППУ не утверждён) не считается OK и не попадает в Excel. persist=False:
+    записи в БД не производятся (dry-run).
     """
     d = _calc_date(calc_date)
     out_dir = Path(out_dir)
@@ -662,9 +745,13 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
         con=con, wb_rows=wb_rows, oz_rows=oz_rows, calc_date=d,
         fetch_prices=fetch_prices, catalog=catalog)
     summary = make_summary(outcomes)
+    if mode not in ('strict', 'force'):
+        raise ExportError(
+            f'Недопустимый режим: {mode!r}; допустимы "strict" и "force"')
+    # Любой режим выпускает ТОЛЬКО черновик, если остались исключённые строки
+    # или PPU_UNCONFIRMED: «force» не обходит запрет на файлы «готово».
     drafts = bool(summary['skipped'] > 0 or summary['ppu_unapproved'] > 0
-                  or summary['ppu_unconfirmed'] > 0) \
-        if mode == 'strict' else False
+                  or summary['ppu_unconfirmed'] > 0)
 
     updates = {'wb': {}, 'ozon': {}}
     for oc in outcomes:
@@ -679,8 +766,14 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
     oz_new, _ = build_excel(ozon_path, 'ozon',
                             mapping.MAPPING['ozon']['cost_col'], updates['ozon'])
     try:
-        wb_new.save(tmp_wb)
-        oz_new.save(tmp_oz)
+        # Детерминированная сериализация: openpyxl вписывает в core.xml текущее
+        # время сохранения (см. _canonical_xlsx), поэтому два сохранения
+        # идентичного содержимого в разные секунды дали бы разные SHA-256 и
+        # переиспользование уже опубликованного файла по хэшу не срабатывало бы.
+        # Время берём из исходного файла — байты результата зависят только от
+        # содержимого.
+        _save_xlsx_deterministic(wb_new, wb_path, tmp_wb)
+        _save_xlsx_deterministic(oz_new, ozon_path, tmp_oz)
     finally:
         wb_new.close()
         oz_new.close()
@@ -742,34 +835,49 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
                             result=rec['result'],
                             price_meta=rec['price_meta'],
                             ppu_approved=rec['ppu_approved'])
+            # Снимки совпали с текущим расчётом (или только что записаны
+            # полностью) — повторная попытка доказанно продолжает тот же
+            # запуск: контролируемый переход error → running (для running —
+            # no-op), чтобы финальный finish_run стал валидным.
+            runs.resume_run(con, run_id, run_key=key)
 
-    # Публикация: безопасное версионирование имён, атомарный os.replace пары.
-    # При сбое уже переименованный файл откатывается — «полупары» (новый WB
-    # без нового OZON и наоборот) не остаются. Если целевое имя уже занято
-    # файлом с идентичным содержимым, он остаётся как был.
+    # Публикация: безопасное версионирование имён, атомарная публикация пары.
+    # Файлы, существовавшие ДО запуска, никогда не перезаписываются и не
+    # удаляются: если в out_dir уже есть файл с идентичным содержимым
+    # (SHA-256 совпадает), он повторно используется БЕЗ записи (результат
+    # прошлой публикации); новый результат уходит под уникальным именем
+    # (unique_output_path: _v2, _v3…). При сбое второй половины уже
+    # переименованный НОВЫЙ файл откатывается — «полупары» не остаются,
+    # а существовавшие до запуска файлы остаются как были.
     suffix = HAS_DRAFT_SUFFIX if drafts else HAS_READY_SUFFIX
     period = d[:7]
     name_wb = f'WB_Себестоимость_{period}{suffix}.xlsx'
     name_oz = f'OZON_Себестоимость_{period}{suffix}.xlsx'
-    final_wb = unique_output_path(out_dir, name_wb, sha256_file(tmp_wb))
-    final_oz = unique_output_path(out_dir, name_oz, sha256_file(tmp_oz))
-    existed = {final_wb: final_wb.exists(), final_oz: final_oz.exists()}
+
+    pairs = [('wb', tmp_wb, name_wb), ('ozon', tmp_oz, name_oz)]
+    finals: dict[str, Path] = {}
     published: list[Path] = []
     try:
-        os.replace(tmp_wb, final_wb)
-        published.append(final_wb)
-        os.replace(tmp_oz, final_oz)
-        published.append(final_oz)
+        for key, tmp, name in pairs:
+            target = unique_output_path(out_dir, name, sha256_file(tmp))
+            if target.exists():
+                # Идентичное содержимое уже опубликовано ранее — переиспользуем
+                # БЕЗ записи (файл не заменяется, его метаданные не меняются).
+                tmp.unlink(missing_ok=True)
+            else:
+                os.replace(tmp, target)          # новый результат → unique name
+                published.append(target)
+            finals[key] = target
     except OSError as e:
         for p_ in published:
-            if not existed.get(p_):
-                p_.unlink(missing_ok=True)   # наша недописанная половина
+            p_.unlink(missing_ok=True)           # наши недописанные новые файлы
         for t in (tmp_wb, tmp_oz):
             t.unlink(missing_ok=True)
         if run_id is not None and con is not None:
             with con:
                 runs.fail_run(con, run_id, error=f'публикация: {e}')
         raise ExportError(f'Публикация файлов не удалась: {e}') from e
+    final_wb, final_oz = finals['wb'], finals['ozon']
 
     if run_id is not None and con is not None:
         with con:

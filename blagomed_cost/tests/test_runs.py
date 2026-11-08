@@ -402,3 +402,79 @@ def test_guid_apply_conflict_rolls_back(tmp_path):
     assert con.execute('SELECT guid_1c FROM products WHERE id = ?',
                        (p_b,)).fetchone()['guid_1c'] is None
     assert con.execute('SELECT COUNT(*) c FROM audit_log').fetchone()['c'] == 0
+
+
+# ── 31. Восстановление status=error после сбоя второго Excel ───────────────
+
+
+def test_error_run_retry_same_attempt_finishes_done(tmp_path, monkeypatch):
+    """Сбой второго Excel → run.status='error' → повтор той же попытки → done,
+    без дублирования runs и cost_snapshots."""
+    con = _con(tmp_path)
+    _settings(con)
+    pid = _product(con, 'S1')
+    con.execute('INSERT INTO ppu_weights (product_id, weight_g, valid_from)'
+                ' VALUES (?, 270, ?)', (pid, '2026-07-01'))
+    con.commit()
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', '', None)])
+    fetch = make_fetcher({'S1': ok_item('S1', '1000')})
+
+    real_replace = exmod.os.replace
+
+    def fail_ozon(src, dst):
+        if 'OZON' in str(dst):
+            raise OSError('ozon publish failed')
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(exmod.os, 'replace', fail_ozon)
+    with pytest.raises(ExportError, match='ozon publish failed'):
+        run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                    ozon_path=p_oz, out_dir=tmp_path / 'out',
+                    fetch_prices=fetch, source_1c='com', persist=True)
+    run = con.execute('SELECT * FROM runs').fetchone()
+    assert run['status'] == 'error'
+    assert 'ozon publish failed' in (run['error'] or '')
+    assert con.execute('SELECT COUNT(*) c FROM cost_snapshots'
+                       ).fetchone()['c'] == 1
+
+    # штатная публикация + повтор той же попытки (run_key совпадает)
+    monkeypatch.setattr(exmod.os, 'replace', real_replace)
+    report = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                         ozon_path=p_oz, out_dir=tmp_path / 'out',
+                         fetch_prices=fetch, source_1c='com', persist=True)
+    assert report.run_id == run['id']
+    assert con.execute('SELECT COUNT(*) c FROM runs').fetchone()['c'] == 1
+    assert con.execute('SELECT status FROM runs').fetchone()['status'] == 'done'
+    snaps = con.execute('SELECT product_id FROM cost_snapshots').fetchall()
+    assert [s['product_id'] for s in snaps] == [pid]   # без дублирования
+    assert Path(report.wb_path).exists() and Path(report.ozon_path).exists()
+
+
+def test_validate_snapshots_checks_exact_rates(tmp_path):
+    """При восстановлении сопоставляются ВСЕ существенные поля снимка,
+    включая точные ставки ППУ (ppu_rate) и наценку (margin_pct)."""
+    from app.core import runs as rums
+    from app.core.runs import RunError
+    con = _con(tmp_path)
+    _settings(con)
+    pid = _product(con, 'S1')
+    run_id = start_run(con, run_key='k-rates')
+    res = compute_cost(price=1000, weight_g=270, ppu_rate=405, margin_pct=15)
+    insert_snapshot(con, run_id, product_id=pid, result=res)
+    con.commit()
+    # эталон совпадает по всем полям (включая rate/margin) → не missing
+    assert rums.validate_run_snapshots(
+        con, run_id, {pid: rums.run_asset_for_result(res)}) == []
+    # изменилась только точная ставка ППУ → восстановление запрещено
+    changed_rate = compute_cost(price=1000, weight_g=270, ppu_rate=410,
+                                margin_pct=15)
+    with pytest.raises(RunError, match='ppu_rate'):
+        rums.validate_run_snapshots(
+            con, run_id, {pid: rums.run_asset_for_result(changed_rate)})
+    # изменилась только наценка → восстановление запрещено
+    changed_margin = compute_cost(price=1000, weight_g=270, ppu_rate=405,
+                                  margin_pct=20)
+    with pytest.raises(RunError, match='margin_pct'):
+        rums.validate_run_snapshots(
+            con, run_id, {pid: rums.run_asset_for_result(changed_margin)})

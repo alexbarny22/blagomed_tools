@@ -29,6 +29,7 @@ from typing import Iterable
 __all__ = [
     'RunError', 'DuplicateRun', 'RunAlreadyFinished', 'RunNotFound',
     'start_run', 'get_run_by_key', 'finish_run', 'fail_run',
+    'resume_run',
     'insert_snapshot', 'insert_snapshots', 'snapshot_decimal_values',
     'run_asset_for_result', 'validate_run_snapshots', 'PPU_UNCONFIRMED',
 ]
@@ -125,6 +126,34 @@ def fail_run(con: sqlite3.Connection, run_id: int, error: str | None = None,
              **kwargs) -> None:
     """Помечает run ошибкой (status='error'), историю не перезаписывает."""
     finish_run(con, run_id, status='error', error=error, **kwargs)
+
+
+def resume_run(con: sqlite3.Connection, run_id: int, *,
+               run_key: str | None = None) -> None:
+    """Контролируемый переход status='error' → 'running' (повторная попытка).
+
+    Допустимо ТОЛЬКО после успешной сверки snapshots повторного расчёта с
+    сохранёнными (validate_run_snapshots в export.run_exports) — только тогда
+    повторная попытка доказанно продолжает тот же run_key (вход не изменился).
+    Опциональный run_key дополнительно сверяет подпись запуска. Завершённые
+    'done' не изменяются никогда (RunAlreadyFinished); 'running' — no-op.
+    """
+    row = con.execute('SELECT status, run_key FROM runs WHERE id = ?',
+                      (run_id,)).fetchone()
+    if row is None:
+        raise RunNotFound(f'run id={run_id} не найден')
+    if run_key is not None and row['run_key'] != run_key:
+        raise RunError(
+            f'run id={run_id}: run_key {row["run_key"]!r} != {run_key!r} — '
+            'повторная попытка не является продолжением того же расчёта')
+    if row['status'] == 'done':
+        raise RunAlreadyFinished(
+            f'run id={run_id} уже завершён (status=done) — историю '
+            'не перезаписываем')
+    if row['status'] != 'error':
+        return   # уже 'running' — активная техническая попытка
+    con.execute("UPDATE runs SET status = 'running', error = NULL,"
+                " finished_at = NULL WHERE id = ?", (run_id,))
 def _empty_str_to_none(v):
     if isinstance(v, str) and not v.strip():
         return None
@@ -188,16 +217,24 @@ def insert_snapshots(con: sqlite3.Connection, run_id: int,
     return n
 
 
+def _snapshot_value(*, exact, real) -> str:
+    """Каноническое Decimal-значение снимка: *_exact, иначе legacy-REAL."""
+    return str(Decimal(str(exact if exact is not None else real)))
+
+
 def run_asset_for_result(result) -> dict:
     """«Актив» снимка по результату расчёта — эталон validate_run_snapshots.
 
     Все значения приводятся к канонической форме готовой строки cost_snapshots
-    (см. insert_snapshot): price/extras_rub — str(Decimal(...)), cost — INTEGER.
+    (см. insert_snapshot): price/ppu_rate/extras_rub/margin_pct —
+    str(Decimal(...)), вес — целое, cost — INTEGER.
     """
     return {
         'price': str(Decimal(str(result.price))),
         'ppu_weight_g': int(result.ppu_weight_g),
+        'ppu_rate': str(Decimal(str(result.ppu_rate))),
         'extras_rub': str(Decimal(str(result.extras_rub))),
+        'margin_pct': str(Decimal(str(result.margin_pct))),
         'cost': int(result.cost),
     }
 
@@ -210,26 +247,31 @@ def validate_run_snapshots(con: sqlite3.Connection, run_id: int,
     run_asset_for_result). Возвращает product_id, для которых снимок отсутствует
     целиком (их нужно дозаписать — случай «сбой до коммита снимков»).
 
-    Если снимок есть, но его содержимое (цена 1С, вес ППУ, сумма доп. расходов,
-    себестоимость) не совпадает с эталоном ИЛИ run содержит снимки позиций,
-    которых нет в эталоне, — поднимается RunError: повторная попытка не является
-    техническим продолжением того же самого расчёта (входные данные изменились),
-    и дописывать «поверх» снимков нельзя.
+    Если снимок есть, но его содержимое (цена 1С, вес ППУ, точные ставки ППУ
+    ppu_rate и наценка margin_pct, сумма доп. расходов, себестоимость) не
+    совпадает с эталоном ИЛИ run содержит снимки позиций, которых нет в
+    эталоне, — поднимается RunError: повторная попытка не является техническим
+    продолжением того же самого расчёта (входные данные изменились), и
+    дописывать «поверх» снимков нельзя.
     """
     rows = con.execute(
         'SELECT id, product_id, price_1c_exact, price_1c, ppu_weight_g,'
-        '       extras_rub_exact, extras_rub, cost'
+        '       ppu_rate_exact, ppu_rate, extras_rub_exact, extras_rub,'
+        '       margin_pct_exact, margin_pct, cost'
         ' FROM cost_snapshots WHERE run_id = ? ORDER BY id', (run_id,)).fetchall()
     stored: dict[int, dict] = {}
     for r in rows:
-        price_raw = (r['price_1c_exact'] if r['price_1c_exact'] is not None
-                     else r['price_1c'])
-        extras_raw = (r['extras_rub_exact'] if r['extras_rub_exact'] is not None
-                      else r['extras_rub'])
         stored[int(r['product_id'])] = {
-            'price': str(Decimal(str(price_raw))),
-            'ppu_weight_g': int(r['ppu_weight_g']) if r['ppu_weight_g'] is not None else 0,
-            'extras_rub': str(Decimal(str(extras_raw))),
+            'price': _snapshot_value(exact=r['price_1c_exact'],
+                                     real=r['price_1c']),
+            'ppu_weight_g': int(r['ppu_weight_g'])
+                if r['ppu_weight_g'] is not None else 0,
+            'ppu_rate': _snapshot_value(exact=r['ppu_rate_exact'],
+                                        real=r['ppu_rate']),
+            'extras_rub': _snapshot_value(exact=r['extras_rub_exact'],
+                                          real=r['extras_rub']),
+            'margin_pct': _snapshot_value(exact=r['margin_pct_exact'],
+                                          real=r['margin_pct']),
             'cost': int(r['cost']),
         }
     extra = sorted(set(stored) - set(expected))

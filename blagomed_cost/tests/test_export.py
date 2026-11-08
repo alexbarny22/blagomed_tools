@@ -521,3 +521,132 @@ def test_gitignore_covers_secrets_and_xlsx():
     for pattern in ('config.ini', '.env', '*.db', 'input/*.xlsx',
                     'output/*.xlsx', 'legacy/wb_catalog.json'):
         assert pattern in gi, f'.gitignore: нет шаблона {pattern!r}'
+
+
+# ── 37. Запрет обхода strict: любой режим выпускает только черновик ─────────
+
+
+def test_force_does_not_bypass_draft_gate(tmp_path):
+    con = base_db(tmp_path)
+    add_product(con, 'S1', weight=270)
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, 999)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', DUMMY_OZ)
+    fetch = make_fetcher({'S1': OnecItem(
+        sku_1c='S1', source='com', status=ItemStatus.NEEDS_CONFIRM,
+        price=Decimal('1000'), detail='прежнее значение')})
+    report = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                         ozon_path=p_oz, out_dir=tmp_path / 'out',
+                         fetch_prices=fetch, source_1c='com', persist=True,
+                         mode='force')
+    # «force» НЕ выпускает «готово» при исключённых строках — только черновик
+    assert report.drafts
+    assert report.status == 'draft'
+    assert Path(report.wb_path).name.endswith('_черновик.xlsx')
+    assert list((tmp_path / 'out').glob('*_готово.xlsx')) == []
+
+
+def test_ppu_unconfirmed_always_drafts(tmp_path):
+    con = base_db(tmp_path)
+    add_product(con, 'S1')                      # веса ППУ нет → PPU_UNCONFIRMED
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', '', None)])
+    fetch = make_fetcher({'S1': ok_item('S1', '1000')})
+    for mode in ('strict', 'force'):
+        report = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                             ozon_path=p_oz, out_dir=tmp_path / 'out',
+                             fetch_prices=fetch, source_1c='com',
+                             persist=True, mode=mode)
+        assert report.drafts, mode
+        assert Path(report.wb_path).name.endswith('_черновик.xlsx'), mode
+    assert list((tmp_path / 'out').glob('*_готово.xlsx')) == []
+
+
+def test_unknown_mode_rejected(tmp_path):
+    con = base_db(tmp_path)
+    add_product(con, 'S1', weight=270)
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', DUMMY_OZ)
+    with pytest.raises(ExportError, match='Недопустимый режим'):
+        run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                    ozon_path=p_oz, out_dir=tmp_path / 'out',
+                    fetch_prices=make_fetcher({'S1': ok_item('S1', '1000')}),
+                    source_1c='com', persist=False, mode='lax')
+# ── 38. Существующие файлы не перезаписываются ─────────────────────────────
+
+
+def test_identical_existing_file_reused_without_rewrite(tmp_path, monkeypatch):
+    con = base_db(tmp_path)
+    add_product(con, 'S1', weight=270)
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', 'Бренда нет', None)])
+    fetch = make_fetcher({'S1': ok_item('S1', '1000')})
+
+    r1 = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                     ozon_path=p_oz, out_dir=tmp_path / 'out',
+                     fetch_prices=fetch, source_1c='com', persist=True)
+    wb1, oz1 = Path(r1.wb_path), Path(r1.ozon_path)
+    h_wb, h_oz = exmod.sha256_file(wb1), exmod.sha256_file(oz1)
+
+    replaces = []
+    real_replace = exmod.os.replace
+
+    def spy(src, dst):
+        replaces.append(str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(exmod.os, 'replace', spy)
+    # Тот же контент, но другой run_key (иной salt) → публикация обязана
+    # переиспользовать существующие файлы БЕЗ записи (os.replace не вызывается).
+    r2 = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                     ozon_path=p_oz, out_dir=tmp_path / 'out',
+                     fetch_prices=fetch, source_1c='com', persist=True,
+                     salt='retry')
+    assert Path(r2.wb_path) == wb1 and Path(r2.ozon_path) == oz1
+    assert replaces == []                       # ни одной перезаписи файла
+    assert exmod.sha256_file(wb1) == h_wb       # содержимое не изменилось
+    assert exmod.sha256_file(oz1) == h_oz
+    assert con.execute('SELECT COUNT(*) c FROM runs').fetchone()['c'] == 2
+    # Порядок обхода каталога зависит от ФС (NTFS перечисляет по имени),
+    # поэтому сравниваем набор имён, а не порядок.
+    published = sorted(p.name for p in (tmp_path / 'out').glob('*.xlsx'))
+    assert published == sorted([wb1.name, oz1.name])
+
+
+def test_publish_failure_keeps_preexisting_files(tmp_path, monkeypatch):
+    con = base_db(tmp_path)
+    add_product(con, 'S1', weight=270)
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', 'Бренда нет', None)])
+    fetch = make_fetcher({'S1': ok_item('S1', '1000')})
+
+    r1 = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                     ozon_path=p_oz, out_dir=tmp_path / 'out',
+                     fetch_prices=fetch, source_1c='com', persist=True)
+    wb1, oz1 = Path(r1.wb_path), Path(r1.ozon_path)
+    h_wb, h_oz = exmod.sha256_file(wb1), exmod.sha256_file(oz1)
+
+    # Второй прогон: WB-результат идентичен (переиспользуется без записи),
+    # а OZON изменился (новая карточка) и при публикации падает — файлы,
+    # существовавшие до запуска, не удаляются и не изменяются.
+    p_oz2 = make_ozon(tmp_path / 'oz2.xlsx', [('O1', 'S1', 'Бренда нет', None),
+                                              ('O2', 'S1', 'Бренда нет', None)])
+    real_replace = exmod.os.replace
+
+    def fail_ozon(src, dst):
+        if 'OZON' in str(dst):
+            raise OSError('ozon publish failed')
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(exmod.os, 'replace', fail_ozon)
+    with pytest.raises(ExportError, match='ozon publish failed'):
+        run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                    ozon_path=p_oz2, out_dir=tmp_path / 'out',
+                    fetch_prices=fetch, source_1c='com', persist=True)
+    assert exmod.sha256_file(wb1) == h_wb       # существовавший WB не изменён
+    assert exmod.sha256_file(oz1) == h_oz       # и не удалён
+    assert wb1.exists() and oz1.exists()
+    assert list((tmp_path / 'out').glob('.tmp_*')) == []
+    run = con.execute('SELECT status, error FROM runs ORDER BY id DESC'
+                      ).fetchone()
+    assert run['status'] == 'error'
+    assert 'ozon publish failed' in (run['error'] or '')
