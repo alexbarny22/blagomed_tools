@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.onec import (  # noqa: E402
     ComSource, ItemStatus, OdataSource, OnecItem, OnecRequest, Params,
-    fetch_from_source,
+    fetch_from_source, merge_odata_guid,
 )
 
 OUT_DIR = Path(__file__).resolve().parents[1] / 'output'
@@ -90,7 +90,7 @@ def main() -> None:
     reqs = [_row(a) for a in ARTICLES]
 
     out = ['Артикул | Наименование 1С (COM) | GUID | Цена (полн. точн.) | '
-           'Дата цены | COM | OData | Примечание']
+           'Дата цены | Регистр | Источник | COM | OData | Примечание']
     com: dict[str, OnecItem] = {}
     oda: dict[str, OnecItem] = {}
     com_src: ComSource | None = None
@@ -111,15 +111,17 @@ def main() -> None:
         c = com.get(a)
         o = oda.get(a)
         if c is None:
-            out.append(f'{a} | — | | | | ERR | '
+            out.append(f'{a} | — | | | | | | ERR | '
                        f'{o.status.value if o else "ERR"} | COM пусто')
             continue
+        merged = merge_odata_guid(c, o) if o is not None else c
         out.append(
-            f'{a} | {c.name_1c or "—"} | {c.guid_1c or "—"} | '
-            f'{c.price if c.price is not None else "—"} | '
-            f'{c.price_date or "—"} | {c.status.value} | '
+            f'{a} | {c.name_1c or "—"} | {merged.guid_1c or "—"} | '
+            f'{merged.price if merged.price is not None else "—"} | '
+            f'{merged.price_date or "—"} | {c.register or "—"} | '
+            f'{c.source_status or "—"} | {merged.status.value} | '
             f'{o.status.value if o else "ERR"} | '
-            f'Ref_Key(OData)={o.guid_1c or "—"} | {c.detail}')
+            f'Ref_Key(OData)={o.guid_1c or "—"} | {merged.detail}')
 
     # История цен по артикулам (регистр поставщиков, прямые записи)
     if com_src is not None and com_src._last_data:

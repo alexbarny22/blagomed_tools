@@ -21,13 +21,21 @@
   1. GUID 1С (Ref_Key);
   2. нормализованное наименование (регистр/пробелы/ё→е);
   3. артикул — только подсказка, не доказательство идентичности.
-Нечёткое сопоставление для автоматического выбора НЕ используется. Модуль
-не пишет найденные GUID в SQLite: совпадения возвращаются для подтверждения.
+Нечёткое сопоставление для автоматического выбора НЕ используется. Совпадение
+только по артикулу НЕ считается доказанной идентификацией: результату
+присваивается статус NEEDS_CONFIRM (кандидат для подтверждения владельцем),
+а цена одного товара никогда не подставляется вместо другого. Цена принимается
+как проверенная только при доказанной идентификации (GUID или единственное
+наименование) И точном источнике (нужный вид цены и поставщик из config.ini).
 
-Статусы результата: OK / NO_PRICE / NOT_FOUND / AMBIGUOUS / AUTH_ERROR /
-CONNECT_ERROR / TIMEOUT / NOT_AVAILABLE / ERROR. Ошибка подключения отделяется
-от отсутствия цены. Некорректный ответ источника приравнивается к ошибке,
-а не к нулю.
+Статусы результата: OK / NO_PRICE / NOT_FOUND / AMBIGUOUS / NEEDS_CONFIRM /
+AUTH_ERROR / CONNECT_ERROR / TIMEOUT / NOT_AVAILABLE / ERROR. Ошибка
+подключения отделяется от отсутствия цены: CONNECT_ERROR ≠ NOT_FOUND.
+Некорректный ответ источника приравнивается к ошибке, а не к нулю.
+Для каждого результата сохраняются фактические: регистр, вид цены, поставщик,
+дата цены, цена и статус достоверности источника (source_status). GUID,
+полученный из OData, привязывается к цене COM только после проверки, что оба
+источника указывают на один и тот же объект номенклатуры (merge_odata_guid).
 """
 from __future__ import annotations
 
@@ -48,7 +56,7 @@ from typing import Iterable
 __all__ = [
     'COM_WORKER', 'ItemStatus', 'OnecError', 'OnecItem', 'OnecRequest',
     'OnecSource', 'ComSource', 'OdataSource', 'fetch_from_source',
-    'normalize_name', 'resolve_candidates', 'Params',
+    'normalize_name', 'resolve_candidates', 'merge_odata_guid', 'Params',
 ]
 
 # Путь к воркеру-подпроцессу COM (запускается тем же интерпретатором).
@@ -67,7 +75,8 @@ class ItemStatus(str, Enum):
     OK = 'OK'                        # товар сопоставлен, цена есть
     NO_PRICE = 'NO_PRICE'            # товар найден, цены нет
     NOT_FOUND = 'NOT_FOUND'          # товар не найден
-    AMBIGUOUS = 'AMBIGUOUS'          # несколько подходящих объектов
+    AMBIGUOUS = 'AMBIGUOUS'          # несколько подходящих объектов/цен
+    NEEDS_CONFIRM = 'NEEDS_CONFIRM'  # кандидат/цена требуют подтверждения
     AUTH_ERROR = 'AUTH_ERROR'        # неверные учётные данные
     CONNECT_ERROR = 'CONNECT_ERROR'  # сеть/подключение/сервер
     TIMEOUT = 'TIMEOUT'              # превышен таймаут подключения/чтения
@@ -99,7 +108,11 @@ class OnecItem:
     price — Decimal без преждевременного округления (полная точность 1С);
             None, если цены нет или товар не сопоставлен.
     price_date — дата действия цены (ISO-строка).
-    price_type / supplier — вид цены / поставщик (контроль источников).
+    price_type / supplier — вид цены / поставщик (контроль источников);
+    register — фактический регистр 1С, из которого взята цена;
+    source_status — достоверность источника ('exact' — точный вид+поставщик /
+        'vid_only' — вид точный, поставщик не сверен / 'any' — без условий /
+        'fallback_register' — добор из «Цены номенклатуры»).
     """
     sku_1c: str | None = None
     name_1c: str | None = None
@@ -108,6 +121,8 @@ class OnecItem:
     price_date: str | None = None
     price_type: str | None = None
     supplier: str | None = None
+    register: str | None = None
+    source_status: str | None = None
     source: str = 'unknown'
     status: ItemStatus = ItemStatus.NOT_FOUND
     detail: str = ''
@@ -134,12 +149,28 @@ class _Cand:
     price_date: str | None
     price_type: str | None
     supplier: str | None
+    register: str | None = None
+    source_status: str | None = None
     deletion_mark: bool = False
 
 
+def _guid_eq(a: str | None, b: str | None) -> bool:
+    """Сравнение GUID без учёта регистра/дефисов/скобок."""
+    if not a or not b:
+        return False
+    norm = lambda s: ''.join(ch for ch in s.lower() if ch.isalnum())
+    return norm(a) == norm(b)
+
+
+def _significant(c: _Cand) -> tuple:
+    """Существенные данные кандидата для определения неоднозначности:
+    цена/дата/вид/поставщик могут различать реально разные объекты."""
+    return (str(c.price), c.price_date, c.price_type, c.supplier)
+
+
 def _by_guid(guid: str, cands: list[_Cand]) -> list[_Cand]:
-    g = str(guid).strip().lower()
-    return [c for c in cands if c.guid and str(c.guid).strip().lower() == g]
+    g = str(guid).strip()
+    return [c for c in cands if _guid_eq(c.guid, g)]
 
 
 def _by_name(name: str, cands: list[_Cand]) -> list[_Cand]:
@@ -152,24 +183,82 @@ def _by_sku(sku: str, cands: list[_Cand]) -> list[_Cand]:
     return [c for c in cands if c.sku and str(c.sku).strip() == s]
 
 
-def _to_item(cand: _Cand, source: str, how: str) -> OnecItem:
-    status = ItemStatus.OK if cand.price is not None else ItemStatus.NO_PRICE
+def _to_item(cand: _Cand, source: str, how: str,
+             expected_price_type: str | None = None,
+             expected_supplier: str | None = None) -> OnecItem:
+    """Собирает результат. Правила (КОНТРОЛЬНАЯ ДОРАБОТКА этапа 5):
+    - цена None → NO_PRICE (цена никогда не заменяется нулём);
+    - точный источник (source_status exact/None) + доказанная идентификация
+      (GUID или уникальное наименование) → OK;
+    - совпадение ТОЛЬКО по артикулу → NEEDS_CONFIRM (не готовое сопоставление);
+    - цена не из нужного источника (vid_only/any/fallback_register) →
+      NEEDS_CONFIRM, чтобы не объявлять её проверенной;
+    - фактический поставщик/вид цены, отличающиеся от заданных →
+      NEEDS_CONFIRM (цена другого поставщика не принимается автоматически).
+    """
+    if cand.price is None:
+        status = ItemStatus.NO_PRICE
+        why = ''
+    elif cand.source_status not in (None, 'exact'):
+        status = ItemStatus.NEEDS_CONFIRM
+        why = f'источник цены не точный ({cand.source_status})'
+    elif how == 'sku':
+        status = ItemStatus.NEEDS_CONFIRM
+        why = 'сопоставление только по артикулу — требует подтверждения'
+    elif expected_price_type and cand.price_type and \
+            cand.price_type != expected_price_type:
+        status = ItemStatus.NEEDS_CONFIRM
+        why = f'вид цены {cand.price_type!r} ≠ заданный {expected_price_type!r}'
+    elif expected_supplier and cand.supplier and \
+            expected_supplier.lower() not in cand.supplier.lower():
+        status = ItemStatus.NEEDS_CONFIRM
+        why = f'поставщик {cand.supplier!r} ≠ заданный {expected_supplier!r}'
+    else:
+        status = ItemStatus.OK
+        why = ''
     return OnecItem(
         sku_1c=cand.sku, name_1c=cand.name, guid_1c=cand.guid,
         price=cand.price, price_date=cand.price_date,
         price_type=cand.price_type, supplier=cand.supplier,
+        register=cand.register, source_status=cand.source_status,
         source=source, status=status,
-        detail=f'сопоставлено по {how}')
+        detail=f'сопоставлено по {how}' + (f'; {why}' if why else ''))
+
+
+def _ambiguous_from_guid(req: OnecRequest, got: list[_Cand],
+                         source: str) -> OnecItem:
+    """Несколько РАЗНЫХ кандидатов по одному GUID → AMBIGUOUS (не первый)."""
+    uniq = []
+    for c in got:
+        if c not in uniq:
+            uniq.append(c)
+    return OnecItem(
+        sku_1c=req.sku_1c, name_1c=req.name_1c, guid_1c=req.guid_1c,
+        source=source, status=ItemStatus.AMBIGUOUS,
+        detail=f'GUID {req.guid_1c}: {len(uniq)} разных кандидатов'
+               f' (цены {", ".join(sorted({str(c.price) for c in uniq}))})')
 
 
 def resolve_candidates(req: OnecRequest, cands: list[_Cand],
-                       source: str) -> OnecItem:
+                       source: str,
+                       expected_price_type: str | None = None,
+                       expected_supplier: str | None = None) -> OnecItem:
     """Выбирает единственного кандидата по приоритету GUID → наименование →
-    артикул-подсказка (правила этапа 5). Цена берётся из записи регистра."""
+    артикул-подсказка. GUID первичен даже при изменённом артикуле; несколько
+    разных кандидатов с одним GUID → AMBIGUOUS; совпадение только по артикулу —
+    NEEDS_CONFIRM, а не готовое автоматическое сопоставление.
+    """
     if req.guid_1c:
         got = _by_guid(req.guid_1c, cands)
-        if got:
-            return _to_item(got[0], source, 'guid')
+        if len(got) == 1:
+            return _to_item(got[0], source, 'guid',
+                            expected_price_type, expected_supplier)
+        if len(got) > 1:
+            # одинаковые по содержанию записи считаем одним кандидатом
+            if len({_significant(c) for c in got}) == 1:
+                return _to_item(got[0], source, 'guid',
+                                expected_price_type, expected_supplier)
+            return _ambiguous_from_guid(req, got, source)
         # GUID передан, но не найден: не «добираем» по артикулу — это значит,
         # что локальная привязка товара отличается от 1С.
         return OnecItem(
@@ -179,7 +268,8 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
     if req.name_1c:
         got = _by_name(req.name_1c, cands)
         if len(got) == 1:
-            return _to_item(got[0], source, 'name')
+            return _to_item(got[0], source, 'name',
+                            expected_price_type, expected_supplier)
         if len(got) > 1:
             return OnecItem(
                 sku_1c=req.sku_1c, name_1c=req.name_1c, source=source,
@@ -188,7 +278,8 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
     if req.sku_1c:
         got = _by_sku(req.sku_1c, cands)
         if len(got) == 1:
-            return _to_item(got[0], source, 'sku')
+            return _to_item(got[0], source, 'sku',
+                            expected_price_type, expected_supplier)
         if len(got) > 1:
             return OnecItem(
                 sku_1c=req.sku_1c, name_1c=req.name_1c, source=source,
@@ -198,6 +289,40 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
         sku_1c=req.sku_1c, name_1c=req.name_1c,
         source=source, status=ItemStatus.NOT_FOUND,
         detail='кандидаты в 1С не найдены')
+
+
+def merge_odata_guid(com: OnecItem, oda: OnecItem) -> OnecItem:
+    """Связывает цену из COM с GUID (Ref_Key) из OData.
+
+    GUID из OData привязывается к цене COM ТОЛЬКО после проверки, что оба
+    источника указывают на один и тот же объект номенклатуры: совпадают либо
+    GUID, либо нормализованное наименование, либо артикул И наименование.
+    Если объекты разные — GUID НЕ привязывается и цена НЕ переносится
+    (результат NOT_FOUND с price=None), чтобы не присвоить цену чужого товара.
+    """
+    from copy import deepcopy
+    out = deepcopy(com)
+    # нет цены или OData не нашёл карточку — связывать нечего
+    if com.price is None or oda.status not in (ItemStatus.OK,
+                                               ItemStatus.NOT_AVAILABLE):
+        return out
+    if not oda.guid_1c:
+        return out
+    guid_matches = _guid_eq(com.guid_1c, oda.guid_1c)
+    name_matches = bool(com.name_1c and oda.name_1c and
+                        normalize_name(com.name_1c) == normalize_name(oda.name_1c))
+    sku_and_name = bool(com.sku_1c and oda.sku_1c and name_matches and
+                        str(com.sku_1c).strip() == str(oda.sku_1c).strip())
+    if guid_matches or name_matches or sku_and_name:
+        out.guid_1c = oda.guid_1c or com.guid_1c
+        return out
+    # разные объекты: цена COM не связывается с карточкой OData
+    out.guid_1c = com.guid_1c
+    out.status = ItemStatus.NOT_FOUND
+    out.price = None
+    out.detail = ('цена COM и карточка OData указывают на РАЗНЫЕ объекты '
+                  'номенклатуры — цена не связана')
+    return out
 
 
 # ── Параметры подключения (config.ini), секреты не выводятся ───────────────
@@ -352,8 +477,10 @@ class ComSource(OnecSource):
         if not reqs:
             return []
         skus = [r.sku_1c for r in reqs if r.sku_1c]
+        guids = [r.guid_1c for r in reqs if r.guid_1c]
         payload = {
             'articles': skus,
+            'guids': guids,
             'server': self._params.server,
             'base': self._params.base,
             'user': self._params.user,
@@ -368,20 +495,24 @@ class ComSource(OnecSource):
         data = self._run_worker(payload)
         self._last_data = data
         cands_by = data.get('candidates', [])
-        cands_by_sku: dict[str, list[_Cand]] = {}
+        cands_all: list[_Cand] = []
         for p in cands_by:
-            cands_by_sku.setdefault(p.get('sku', ''), []).append(_Cand(
+            cands_all.append(_Cand(
                 sku=p.get('sku'), name=p.get('name'), guid=p.get('guid'),
                 price=(Decimal(p['price']) if p.get('price') is not None
                        else None),
                 price_date=p.get('price_date'), price_type=p.get('price_type'),
-                supplier=p.get('supplier'),
+                supplier=p.get('supplier'), register=p.get('register'),
+                source_status=p.get('source_status'),
                 deletion_mark=bool(p.get('deletion_mark'))))
         notes = data.get('notes', {})
         items = []
         for r in reqs:
-            cands = cands_by_sku.get(r.sku_1c or '') or []
-            item = resolve_candidates(r, cands, 'com')
+            # Полный список кандидатов даёт GUID-приоритет даже при изменённом
+            # артикуле: resolver сам отберёт по GUID → наименованию → артикулу.
+            item = resolve_candidates(r, cands_all, 'com',
+                                      self._params.price_type,
+                                      self._params.supplier)
             if item.status == ItemStatus.OK and not item.price_type:
                 item.price_type = self._params.price_type
             if r.sku_1c and notes.get(r.sku_1c):

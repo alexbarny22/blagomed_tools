@@ -83,7 +83,10 @@ def test_1_read_price_through_interface():
     src = _FakeSource([_cand(sku='232899', name='Подушка Memory',
                              guid='AAAA', price=Decimal('290.50'),
                              price_date='2026-07-01')])
-    items = fetch_from_source(src, [OnecRequest(sku_1c='232899')])
+    # Идентификация по GUID (правила контрольной доработки: совпадение только
+    # по артикулу → NEEDS_CONFIRM, поэтому проверяем OK по GUID).
+    items = fetch_from_source(
+        src, [OnecRequest(sku_1c='232899', guid_1c='AAAA')])
     assert items[0].status == ItemStatus.OK
     assert items[0].price == Decimal('290.50')
     assert items[0].guid_1c == 'AAAA'
@@ -274,16 +277,22 @@ def test_11_precise_decimal():
 # ── 12. Отсутствие записи в 1С/БД (только чтение) ─────────────────────────
 
 def test_12_no_write_api_in_source_code():
-    """В исходниках модуля 1С нет ни операций записи 1С, ни SQL-запросов."""
+    """В исходниках модуля 1С нет ни операций записи 1С, ни SQL-запросов,
+    ни записывающих HTTP-методов (COM и OData — только чтение)."""
     for fname in ('onec.py', '_com_worker.py'):
         code = (BASE / 'app' / 'core' / fname).read_text(encoding='utf-8')
         for bad in ('Записать', 'Провести', 'УстановитьПометкуУдаления',
                     'INSERT INTO', 'UPDATE products', 'DELETE FROM',
                     'CREATE TABLE'):
             assert bad not in code, f'{fname}: недопустимая строка {bad!r}'
+    # OData: только GET; никаких записывающих методов HTTP.
+    code = (BASE / 'app' / 'core' / 'onec.py').read_text(encoding='utf-8')
+    for bad in ("method='POST'", "method='PUT'", "method='PATCH'",
+                "method='DELETE'"):
+        assert bad not in code, f'onec.py: недопустимый HTTP-метод {bad!r}'
+    assert "method='GET'" in code
     # в модуле onec.py нет даже скрытых SQL-инструкций (только в worker —
     # запросы ЧТЕНИЯ 1С: ВЫБРАТЬ/СрезПоследних)
-    code = (BASE / 'app' / 'core' / 'onec.py').read_text(encoding='utf-8')
     assert 'ВЫБРАТЬ' not in code
 
 
@@ -352,3 +361,243 @@ def test_15_odata_bad_response_is_not_price_zero():
     assert items[0].status in (ItemStatus.NOT_AVAILABLE,
                                ItemStatus.NOT_FOUND,
                                ItemStatus.AMBIGUOUS)
+# ── 16+. КОНТРОЛЬНАЯ ДОРАБОТКА: регрессионные тесты ─────────────────────
+
+def test_16_guid_wins_when_sku_changed():
+    """Верный GUID при изменённом артикуле: кандидат находится по GUID,
+    даже если артикул в 1С уже другой."""
+    src = _FakeSource([_cand(sku='232899-НОВЫЙ', name='Подушка Memory',
+                             guid='GUID-ПРАВИЛЬНЫЙ', price=Decimal('310.25'))])
+    items = fetch_from_source(
+        src, [OnecRequest(sku_1c='232899-СТАРЫЙ', guid_1c='GUID-ПРАВИЛЬНЫЙ')])
+    assert items[0].status == ItemStatus.OK
+    assert items[0].price == Decimal('310.25')
+    assert items[0].guid_1c == 'GUID-ПРАВИЛЬНЫЙ'
+
+
+def test_com_guid_wins_when_sku_changed_end_to_end(monkeypatch):
+    """Те же правила на полном пути ComSource (JSON из воркера)."""
+    import subprocess
+
+    class _P:
+        def __init__(self, *a, **kw):
+            self.returncode = 0
+
+        def communicate(self, data, timeout=0):
+            payload = (
+                '{"candidates": [{"sku":"232899-НОВЫЙ",'
+                '"name":"Подушка Memory","guid":"GUID-ПРАВИЛЬНЫЙ",'
+                '"price":"310.25","price_date":"2026-07-01",'
+                '"price_type":"Закупочная","supplier":"ГАВРЮШКИН",'
+                '"register":"ЦеныНоменклатурыПоставщиков",'
+                '"source_status":"exact"}], "notes":{}, "source":"com"}')
+            return payload, ''
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=0):
+            return 0
+
+    monkeypatch.setattr(subprocess, 'Popen', _P)
+    src = ComSource(_params(timeout_connect=1, timeout_read=1))
+    items = fetch_from_source(
+        src, [OnecRequest(sku_1c='232899-СТАРЫЙ', guid_1c='GUID-ПРАВИЛЬНЫЙ')])
+    assert items[0].status == ItemStatus.OK
+    assert items[0].price == Decimal('310.25')
+
+
+def test_17_wrong_guid_with_matching_sku_is_not_found():
+    """Неверный GUID при совпадающем артикуле → NOT_FOUND: GUID первичен,
+    совпадение по артикулу не подменяет отсутствующий GUID."""
+    src = _FakeSource([_cand(sku='232899', name='Подушка Memory',
+                             guid='GUID-ВЕРНЫЙ', price=Decimal('290'))])
+    items = fetch_from_source(
+        src, [OnecRequest(sku_1c='232899', guid_1c='GUID-НЕВЕРНЫЙ')])
+    assert items[0].status == ItemStatus.NOT_FOUND
+    assert items[0].price is None
+
+
+def test_18_same_guid_different_prices_ambiguous():
+    """Несколько кандидатов с одним GUID и РАЗНЫМИ ценами → AMBIGUOUS,
+    а не «первый попавшийся»."""
+    src = _FakeSource([
+        _cand(sku='232899', name='Подушка Memory', guid='G-1',
+              price=Decimal('290'), price_type='Закупочная',
+              supplier='ГАВРЮШКИН', source_status='exact'),
+        _cand(sku='232899', name='Подушка Memory', guid='G-1',
+              price=Decimal('305'), price_type='Закупочная',
+              supplier='ИНОЙ', source_status='exact'),
+    ])
+    items = fetch_from_source(
+        src, [OnecRequest(sku_1c='232899', guid_1c='G-1')])
+    assert items[0].status == ItemStatus.AMBIGUOUS
+    assert '290' in items[0].detail and '305' in items[0].detail
+
+
+def test_19_sku_only_needs_confirm():
+    """Только совпадение артикула без GUID → NEEDS_CONFIRM (кандидат на
+    подтверждение), а не готовое автоматическое сопоставление."""
+    src = _FakeSource([_cand(sku='232899', name='Подушка Memory',
+                             guid='G-1', price=Decimal('290'))])
+    items = fetch_from_source(src, [OnecRequest(sku_1c='232899')])
+    assert items[0].status == ItemStatus.NEEDS_CONFIRM
+    assert items[0].price == Decimal('290')  # цена приложена, но не объявлена
+    assert 'подтверждения' in items[0].detail
+def test_20_sku_only_no_price_is_no_price():
+    """Отсутствие цены не заменяется нулём и не становится OK даже при
+    совпадении по артикулу: NO_PRICE + price=None."""
+    from app.core.onec import _Cand
+    cand = _Cand(sku='232899', name='Подушка', guid='G-1', price=None,
+                 price_date=None, price_type='Закупочная',
+                 supplier='ГАВРЮШКИН', register='ЦеныНоменклатурыПоставщиков',
+                 source_status='exact', deletion_mark=False)
+    item = resolve_candidates(OnecRequest(sku_1c='232899'), [cand], 'com',
+                              expected_price_type='Закупочная', expected_supplier='ГАВРЮШКИН')
+    assert item.status == ItemStatus.NO_PRICE
+    assert item.price is None
+
+
+def test_21_com_odata_different_objects_not_linked():
+    """COM и OData указывают на разные объекты → GUID из OData НЕ привязывается,
+    цена COM не переносится (NOT_FOUND, price=None)."""
+    from app.core.onec import merge_odata_guid
+    com = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо БЛАГО-ППК01',
+                   guid_1c='GUID-COM', price=Decimal('290'), source='com',
+                   status=ItemStatus.OK, price_date='2026-07-01')
+    oda = OnecItem(sku_1c='232905', name_1c='Ремень для фиксации',
+                   guid_1c='GUID-ODATA', source='odata',
+                   status=ItemStatus.NOT_AVAILABLE,
+                   detail='найдено в справочнике 1С (цена N/A)')
+    out = merge_odata_guid(com, oda)
+    assert out.status == ItemStatus.NOT_FOUND
+    assert out.price is None
+    assert 'РАЗНЫЕ объекты' in out.detail
+
+
+def test_21b_com_odata_same_object_links_guid():
+    """COM и OData указывают на один объект (совпадают наименование) —
+    GUID из OData привязывается к цене COM."""
+    from app.core.onec import merge_odata_guid
+    com = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо БЛАГО-ППК01',
+                   price=Decimal('290'), source='com', status=ItemStatus.OK,
+                   price_date='2026-07-01')
+    oda = OnecItem(sku_1c='232899', name_1c='Подушка-кольцо БЛАГО-ППК01',
+                   guid_1c='GUID-ODATA', source='odata',
+                   status=ItemStatus.NOT_AVAILABLE)
+    out = merge_odata_guid(com, oda)
+    assert out.status == ItemStatus.OK
+    assert out.price == Decimal('290')
+    assert out.guid_1c == 'GUID-ODATA'
+
+
+def test_22_other_supplier_price_not_accepted():
+    """Цена другого поставщика не принимается автоматически даже при верном
+    GUID: source_status не точный → NEEDS_CONFIRM, не OK."""
+    from app.core.onec import _Cand
+    cand = _Cand(sku='232899', name='Подушка Memory', guid='G-1',
+                 price=Decimal('280'), price_date='2026-07-01',
+                 price_type='Закупочная', supplier='ДРУГОЙ-ПОСТАВЩИК',
+                 register='ЦеныНоменклатурыПоставщиков',
+                 source_status='vid_only', deletion_mark=False)
+    item = resolve_candidates(OnecRequest(sku_1c='232899', guid_1c='G-1'),
+                              [cand], 'com',
+                              expected_price_type='Закупочная',
+                              expected_supplier='ГАВРЮШКИН')
+    assert item.status == ItemStatus.NEEDS_CONFIRM
+    assert item.price == Decimal('280')
+    assert 'источник' in item.detail or 'поставщик' in item.detail
+
+
+def test_23_missing_requested_price_type_is_no_price():
+    """Отсутствие заданного вида закупочной цены: кандидат с ДРУГИМ видом цены
+    не принимается как подтверждённый — NO_PRICE/NEEDS_CONFIRM, не OK."""
+    from app.core.onec import _Cand
+    cand = _Cand(sku='232899', name='Подушка Memory', guid='G-1',
+                 price=Decimal('500'), price_date='2026-07-01',
+                 price_type='Розничная', supplier='ГАВРЮШКИН',
+                 register='ЦеныНоменклатурыПоставщиков',
+                 source_status='exact', deletion_mark=False)
+    item = resolve_candidates(OnecRequest(sku_1c='232899', guid_1c='G-1'),
+                              [cand], 'com',
+                              expected_price_type='Закупочная',
+                              expected_supplier='ГАВРЮШКИН')
+    assert item.status != ItemStatus.OK
+    assert item.price is not None  # цена другого вида не теряется, но и не в OK
+    assert ('вид цены' in item.detail
+            or 'подтвержден' in item.detail.lower())
+def test_24_fractional_price_via_com_json(monkeypatch):
+    """Точная дробная цена сохраняется на всём пути COM → JSON → Python."""
+    import subprocess
+
+    class _P:
+        def __init__(self, *a, **kw):
+            self.returncode = 0
+
+        def communicate(self, data, timeout=0):
+            payload = (
+                '{"candidates": [{"sku":"232956",'
+                '"name":"Подушка круглая","guid":"G-PPRN01",'
+                '"price":"289.5654","price_date":"2026-07-13",'
+                '"price_type":"Закупочная","supplier":"ГАВРЮШКИН",'
+                '"register":"ЦеныНоменклатурыПоставщиков",'
+                '"source_status":"exact"}], "notes":{}, "source":"com"}')
+            return payload, ''
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=0):
+            return 0
+
+    monkeypatch.setattr(subprocess, 'Popen', _P)
+    src = ComSource(_params())
+    items = fetch_from_source(
+        src, [OnecRequest(sku_1c='232956', guid_1c='G-PPRN01')])
+    assert items[0].status == ItemStatus.OK
+    assert items[0].price == Decimal('289.5654')
+    assert items[0].price.as_tuple().exponent == -4
+
+
+def test_25_connect_error_not_not_found(monkeypatch):
+    """Ошибки соединения НЕ превращаются в NOT_FOUND: статус CONNECT_ERROR
+    с price=None (не отсутствие товара)."""
+    import subprocess
+
+    class _P:
+        def __init__(self, *a, **kw):
+            self.returncode = 1
+
+        def communicate(self, data, timeout=0):
+            return '', 'COM-WORKER ERROR: сеть недоступна'
+
+        def poll(self):
+            return 1
+
+        def wait(self, timeout=0):
+            return 0
+
+    monkeypatch.setattr(subprocess, 'Popen', _P)
+    src = ComSource(_params())
+    items = fetch_from_source(src, [OnecRequest(sku_1c='232899')])
+    assert items[0].status == ItemStatus.CONNECT_ERROR
+    assert items[0].status != ItemStatus.NOT_FOUND
+    assert items[0].price is None
+
+
+def test_26_odata_error_not_not_found():
+    """OData: сетевая ошибка — CONNECT_ERROR, а не NOT_FOUND и не 0."""
+
+    class _Opener:
+        def open(self, req, timeout=0):
+            import urllib.error
+            raise urllib.error.URLError('сеть недоступна')
+
+        def close(self):
+            pass
+
+    src = OdataSource(_params(), opener=_Opener())
+    items = fetch_from_source(src, [OnecRequest(sku_1c='232899')])
+    assert items[0].status == ItemStatus.CONNECT_ERROR
+    assert items[0].status != ItemStatus.NOT_FOUND
+    assert items[0].price is None
