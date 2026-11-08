@@ -30,6 +30,8 @@ backup/
 # Входные отчёты MPSPACE и результаты расчёта
 input/*.xlsx
 output/*.xlsx
+# Диагностика 1С (tools/onec_diag.py) — в git не попадает
+output/*.txt
 
 # Временные результаты анализа xlsx (tools/inspect_xlsx.py, tools/peek_xlsx.py)
 *.inspect.txt
