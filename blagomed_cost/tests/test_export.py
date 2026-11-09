@@ -761,6 +761,39 @@ def test_verify_detects_row_height_change(tmp_path):
                                        {3: 100})
 
 
+def test_verify_handles_column_widths_on_real_like_file(tmp_path):
+    """Регресс: ColumnDimension не имеет .height (падало на реальных отчётах)."""
+    p_src = make_wb(tmp_path / 'src.xlsx', [('B1', 'S1', '0', None, None)])
+    wb = load_workbook(p_src)
+    ws = wb[WB_TARGET]
+    ws.column_dimensions['A'].width = 24.5
+    ws.column_dimensions['E'].width = 12
+    wb.save(p_src)
+    p_dst = tmp_path / 'dst.xlsx'
+
+    def mutate(wb_):
+        wb_[WB_TARGET]['E3'] = 777
+
+    _resaved(p_src, p_dst, mutate)
+    # Не должно падать AttributeError; изменение только целевой ячейки — ок.
+    exmod.verify_ouput_only_target(p_src, p_dst, 'wb', WB_COST_COL, {3: 777})
+
+
+def test_verify_detects_column_width_change(tmp_path):
+    p_src = make_wb(tmp_path / 'src.xlsx', [('B1', 'S1', '0', None, None)])
+    wb = load_workbook(p_src)
+    wb[WB_TARGET].column_dimensions['A'].width = 24.5
+    wb.save(p_src)
+    p_dst = tmp_path / 'dst.xlsx'
+
+    def mutate(wb_):
+        wb_[WB_TARGET].column_dimensions['A'].width = 40
+
+    _resaved(p_src, p_dst, mutate)
+    with pytest.raises(ExportError, match='колонок'):
+        exmod.verify_ouput_only_target(p_src, p_dst, 'wb', WB_COST_COL, {3: 100})
+
+
 def test_verify_allows_target_cell_change_on_target_sheet(tmp_path):
     p_src = make_wb(tmp_path / 'src.xlsx', [('B1', 'S1', '0', None, None)])
     p_dst = tmp_path / 'dst.xlsx'
