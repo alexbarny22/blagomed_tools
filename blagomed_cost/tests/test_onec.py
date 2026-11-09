@@ -219,7 +219,9 @@ def test_8_ambiguous_duplicate_guids():
 
 # ── 9. Совпадение по нормализованному наименованию ────────────────────────
 
-def test_9_match_by_normalized_name():
+def test_9_match_by_normalized_name_needs_confirm_if_sku_given():
+    """Артикул задан, но точного совпадения нет: совпадение по наименованию с
+    объектом другого артикула НЕ даёт OK — только NEEDS_CONFIRM-кандидат."""
     src = _FakeSource([
         _cand(sku='232899', name='  Подушка-кольцо  БЛАГО-ППК01,',
               guid='g1', price=Decimal(290)),
@@ -227,6 +229,20 @@ def test_9_match_by_normalized_name():
     items = fetch_from_source(
         src, [OnecRequest(sku_1c='неизвестный',
                           name_1c='подушка-кольцо благо-ппк01,')])
+    assert items[0].status == ItemStatus.NEEDS_CONFIRM
+    assert items[0].price == Decimal(290)
+    assert 'не найден' in items[0].detail
+    assert '232899' in items[0].detail
+
+
+def test_9b_name_only_request_can_be_ok():
+    """Без заданного артикула уникальное наименование по-прежнему даёт OK."""
+    src = _FakeSource([
+        _cand(sku='232899', name='Подушка-кольцо БЛАГО-ППК01,',
+              guid='g1', price=Decimal(290)),
+    ])
+    items = fetch_from_source(
+        src, [OnecRequest(name_1c='подушка-кольцо благо-ппк01,')])
     assert items[0].status == ItemStatus.OK
     assert items[0].guid_1c == 'g1'
     assert 'name' in items[0].detail
@@ -238,16 +254,38 @@ def test_9b_normalize_yo():
 
 # ── 10. Неверный артикул при верном GUID — первичен GUID ──────────────────
 
-def test_10_guid_wins_over_sku():
+def test_10_guid_with_conflicting_sku_needs_confirm():
+    """GUID найден, но артикул объекта противоречит запросу → цена НЕ
+    принимается автоматически (NEEDS_CONFIRM с причиной конфликта)."""
     src = _FakeSource([
         _cand(sku='232899', name='Подушка Memory', guid='RIGHT-GUID',
               price=Decimal(290)),
     ])
     items = fetch_from_source(
         src, [OnecRequest(sku_1c='ОШИБОЧНЫЙ', guid_1c='right-guid')])
+    assert items[0].status == ItemStatus.NEEDS_CONFIRM
+    assert items[0].price == Decimal(290)
+    assert 'конфликт' in items[0].detail.lower()
+
+
+def test_10c_guid_without_sku_on_one_side_is_not_conflict():
+    """Артикул отсутствует у одной из сторон — это НЕ доказанное
+    противоречие: действуют прежние правила (OK по подтверждённому GUID)."""
+    src = _FakeSource([
+        _cand(sku='232899', name='Подушка Memory', guid='RIGHT-GUID',
+              price=Decimal(290)),
+    ])
+    items = fetch_from_source(
+        src, [OnecRequest(guid_1c='right-guid')])
     assert items[0].status == ItemStatus.OK
-    assert items[0].guid_1c == 'RIGHT-GUID'
-    assert 'guid' in items[0].detail
+
+    src2 = _FakeSource([
+        _cand(sku=None, name='Подушка Memory', guid='RIGHT-GUID',
+              price=Decimal(290)),
+    ])
+    items2 = fetch_from_source(
+        src2, [OnecRequest(sku_1c='232899', guid_1c='right-guid')])
+    assert items2[0].status == ItemStatus.OK
 
 
 def test_10b_conflicting_guid_blocks():
@@ -365,16 +403,16 @@ def test_15_odata_bad_response_is_not_price_zero():
                                ItemStatus.AMBIGUOUS)
 # ── 16+. КОНТРОЛЬНАЯ ДОРАБОТКА: регрессионные тесты ─────────────────────
 
-def test_16_guid_wins_when_sku_changed():
-    """Верный GUID при изменённом артикуле: кандидат находится по GUID,
-    даже если артикул в 1С уже другой."""
+def test_16_guid_with_changed_sku_needs_confirm():
+    """GUID верный, но артикул объекта изменился → автоматическая цена не
+    принимается: NEEDS_CONFIRM с причиной конфликта артикулов."""
     src = _FakeSource([_cand(sku='232899-НОВЫЙ', name='Подушка Memory',
                              guid='GUID-ПРАВИЛЬНЫЙ', price=Decimal('310.25'))])
     items = fetch_from_source(
         src, [OnecRequest(sku_1c='232899-СТАРЫЙ', guid_1c='GUID-ПРАВИЛЬНЫЙ')])
-    assert items[0].status == ItemStatus.OK
+    assert items[0].status == ItemStatus.NEEDS_CONFIRM
     assert items[0].price == Decimal('310.25')
-    assert items[0].guid_1c == 'GUID-ПРАВИЛЬНЫЙ'
+    assert 'конфликт' in items[0].detail.lower()
 
 
 def test_com_guid_wins_when_sku_changed_end_to_end(monkeypatch):
@@ -405,8 +443,9 @@ def test_com_guid_wins_when_sku_changed_end_to_end(monkeypatch):
     src = ComSource(_params(timeout_connect=1, timeout_read=1))
     items = fetch_from_source(
         src, [OnecRequest(sku_1c='232899-СТАРЫЙ', guid_1c='GUID-ПРАВИЛЬНЫЙ')])
-    assert items[0].status == ItemStatus.OK
+    assert items[0].status == ItemStatus.NEEDS_CONFIRM
     assert items[0].price == Decimal('310.25')
+    assert 'конфликт' in items[0].detail.lower()
 
 
 def test_17_wrong_guid_with_matching_sku_is_conflict():
@@ -493,6 +532,61 @@ def test_19d_sku_name_contradiction_needs_confirm():
     assert items[0].status == ItemStatus.NEEDS_CONFIRM
     assert items[0].price == Decimal('290')
     assert 'характеристик' in items[0].detail
+def _sku_req(sku='232899', name=None):
+    return OnecRequest(sku_1c=sku, name_1c=name)
+
+
+def test_19e_unique_sku_requires_exact_source():
+    """Новый авто-путь «уникальный артикул» требует source_status='exact':
+    пропущенный источник не считается подтверждённым."""
+    cand = _cand(sku='232899', name='Подушка', guid='G-1',
+                 price=Decimal('290'), source_status=None,
+                 price_type='Закупочная', supplier='ГАВРЮШКИН')
+    item = resolve_candidates(_sku_req(), [cand], 'com',
+                              expected_price_type='Закупочная',
+                              expected_supplier='ГАВРЮШКИН')
+    assert item.status == ItemStatus.NEEDS_CONFIRM
+    assert item.price == Decimal('290')
+    assert 'exact' in item.detail
+
+
+def test_19f_unique_sku_requires_price_type():
+    """Пропущенный вид цены при заданной конфигурации — не подтверждение."""
+    cand = _cand(sku='232899', name='Подушка', guid='G-1',
+                 price=Decimal('290'), source_status='exact',
+                 price_type=None, supplier='ГАВРЮШКИН')
+    item = resolve_candidates(_sku_req(), [cand], 'com',
+                              expected_price_type='Закупочная',
+                              expected_supplier='ГАВРЮШКИН')
+    assert item.status == ItemStatus.NEEDS_CONFIRM
+    assert 'вид цены' in item.detail
+
+
+def test_19g_unique_sku_requires_supplier():
+    """Пропущенный поставщик при заданной конфигурации — не подтверждение."""
+    cand = _cand(sku='232899', name='Подушка', guid='G-1',
+                 price=Decimal('290'), source_status='exact',
+                 price_type='Закупочная', supplier=None)
+    item = resolve_candidates(_sku_req(), [cand], 'com',
+                              expected_price_type='Закупочная',
+                              expected_supplier='ГАВРЮШКИН')
+    assert item.status == ItemStatus.NEEDS_CONFIRM
+    assert 'поставщик' in item.detail
+
+
+def test_19h_unique_sku_confirmed_source_ok():
+    """Все требования выполнены: уникальный артикул + exact + вид цены +
+    поставщик → OK."""
+    cand = _cand(sku='232899', name='Подушка', guid='G-1',
+                 price=Decimal('290'), source_status='exact',
+                 price_type='Закупочная', supplier='ГАВРЮШКИН')
+    item = resolve_candidates(_sku_req(), [cand], 'com',
+                              expected_price_type='Закупочная',
+                              expected_supplier='ГАВРЮШКИН')
+    assert item.status == ItemStatus.OK
+    assert item.price == Decimal('290')
+
+
 def test_20_sku_only_no_price_is_no_price():
     """Отсутствие цены не заменяется нулём и не становится OK даже при
     совпадении по артикулу: NO_PRICE + price=None."""

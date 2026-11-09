@@ -217,21 +217,42 @@ def _characteristics_diff(got: list[_Cand]) -> str:
 
 def _to_item(cand: _Cand, source: str, how: str,
              expected_price_type: str | None = None,
-             expected_supplier: str | None = None) -> OnecItem:
+             expected_supplier: str | None = None,
+             strict_source: bool = False) -> OnecItem:
     """Собирает результат. Правила (артикул — основной идентификатор):
     - цена None → NO_PRICE (цена никогда не заменяется нулём);
-    - точный источник (source_status exact/None) + однозначный кандидат
-      (GUID или УНИКАЛЬНЫЙ артикул без противоречий) → OK;
+    - strict_source=True (новый автоматический путь «уникальный артикул»):
+      требуется source_status='exact', а заданные конфигурацией вид цены и
+      поставщик должны быть ФАКТИЧЕСКИ подтверждены (пропуск ≠ подтверждение);
+    - без strict_source — прежние правила (GUID/подтверждённый GUID);
     - несколько кандидатов по артикулу разрешаются только по наименованию/
       характеристикам; иначе AMBIGUOUS (не «первый попавшийся»);
     - цена не из нужного источника (vid_only/any/fallback_register) →
-      NEEDS_CONFIRM, чтобы не объявлять её проверенной;
+      NEEDS_CONFIRM;
     - фактический поставщик/вид цены, отличающиеся от заданных →
       NEEDS_CONFIRM (цена другого поставщика не принимается автоматически).
     """
     if cand.price is None:
         status = ItemStatus.NO_PRICE
         why = ''
+    elif strict_source:
+        if cand.source_status != 'exact':
+            status = ItemStatus.NEEDS_CONFIRM
+            why = ('источник цены не подтверждён (требуется exact): '
+                   f'{cand.source_status!r}')
+        elif expected_price_type and cand.price_type != expected_price_type:
+            status = ItemStatus.NEEDS_CONFIRM
+            why = (f'вид цены {cand.price_type!r} ≠ заданный '
+                   f'{expected_price_type!r} (или не указан)')
+        elif expected_supplier and not (
+                cand.supplier
+                and expected_supplier.lower() in cand.supplier.lower()):
+            status = ItemStatus.NEEDS_CONFIRM
+            why = (f'поставщик {cand.supplier!r} не подтверждает заданного '
+                   f'{expected_supplier!r}')
+        else:
+            status = ItemStatus.OK
+            why = ''
     elif cand.source_status not in (None, 'exact'):
         status = ItemStatus.NEEDS_CONFIRM
         why = f'источник цены не точный ({cand.source_status})'
@@ -289,7 +310,22 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
         if got:
             uniq = _uniq_candidates(got)
             if len(uniq) == 1:
-                return _to_item(uniq[0], source, 'guid',
+                cand = uniq[0]
+                # Сохранённый GUID найден, но артикул объекта противоречит
+                # запросу → цена НЕ принимается автоматически (NEEDS_CONFIRM).
+                if (req.sku_1c and cand.sku
+                        and str(cand.sku).strip() != str(req.sku_1c).strip()):
+                    return OnecItem(
+                        sku_1c=cand.sku, name_1c=cand.name, guid_1c=cand.guid,
+                        price=cand.price, price_date=cand.price_date,
+                        price_type=cand.price_type, supplier=cand.supplier,
+                        register=cand.register,
+                        source_status=cand.source_status, source=source,
+                        status=ItemStatus.NEEDS_CONFIRM,
+                        detail=f'GUID {req.guid_1c} указывает на объект с '
+                               f'артикулом {cand.sku}, в запросе {req.sku_1c} — '
+                               f'конфликт артикулов, требуется подтверждение')
+                return _to_item(cand, source, 'guid',
                                 expected_price_type, expected_supplier)
             return _ambiguous_from_guid(req, got, source)
         # GUID не найден: если по артикулу объект есть — это КОНФЛИКТ привязки.
@@ -321,7 +357,8 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
                     detail='артикул совпал, но наименование различается — '
                            'требуется проверка характеристик')
             return _to_item(cand, source, 'sku',
-                            expected_price_type, expected_supplier)
+                            expected_price_type, expected_supplier,
+                            strict_source=True)
         if len(got) > 1:
             # Дубли артикула: пробуем различить по наименованию из запроса.
             if req.name_1c:
@@ -330,7 +367,8 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
                      and normalize_name(c.name) == normalize_name(req.name_1c)])
                 if len(by_name) == 1:
                     return _to_item(by_name[0], source, 'sku+name',
-                                    expected_price_type, expected_supplier)
+                                    expected_price_type, expected_supplier,
+                                    strict_source=True)
                 if by_name:
                     got = by_name
             diff = _characteristics_diff(got)
@@ -343,7 +381,22 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
     if req.name_1c:
         got = _uniq_candidates(_by_name(req.name_1c, cands))
         if len(got) == 1:
-            return _to_item(got[0], source, 'name',
+            cand = got[0]
+            # Артикул задан, но точного совпадения по нему нет: совпадение
+            # наименования с объектом ДРУГОГО артикула не даёт OK — только
+            # предложение кандидата на подтверждение.
+            if req.sku_1c:
+                return OnecItem(
+                    sku_1c=cand.sku, name_1c=cand.name, guid_1c=cand.guid,
+                    price=cand.price, price_date=cand.price_date,
+                    price_type=cand.price_type, supplier=cand.supplier,
+                    register=cand.register,
+                    source_status=cand.source_status, source=source,
+                    status=ItemStatus.NEEDS_CONFIRM,
+                    detail=f'артикул {req.sku_1c} в 1С не найден; по '
+                           f'наименованию найден объект с артикулом '
+                           f'{cand.sku} — требуется подтверждение')
+            return _to_item(cand, source, 'name',
                             expected_price_type, expected_supplier)
         if len(got) > 1:
             return OnecItem(
