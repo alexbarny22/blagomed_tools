@@ -331,10 +331,10 @@ def test_different_guid_blocks_price(tmp_path):
         "SELECT id FROM products WHERE sku_1c='S1'").fetchone()['id']]
 
 
-# ── 19. Товар без утверждённого ППУ НЕ получает статус «полностью проверен» ─
+# ── 19. Отсутствие веса ППУ — не ошибка: ППУ = 0, строка OK ────────────────
 
 
-def test_ppu_not_approved_not_fully_verified(tmp_path):
+def test_missing_ppu_weight_is_not_an_error(tmp_path):
     con = base_db(tmp_path)
     add_product(con, 'S1')                       # веса ППУ нет
     p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
@@ -344,21 +344,21 @@ def test_ppu_not_approved_not_fully_verified(tmp_path):
                          ozon_path=p_oz, out_dir=tmp_path / 'out',
                          fetch_prices=fetch, source_1c='com', persist=True)
     row = [r for r in report.rows if r.supplier_article == 'S1'][0]
-    assert row.status == 'PPU_UNCONFIRMED'   # отдельный статус, не OK
-    assert row.ppu_approved is False
-    assert row.cost is None                  # cost не выдаётся за проверенный
-    assert any('вес ППУ не утверждён' in n for n in row.notes)
-    assert report.summary['ppu_unconfirmed'] == 1
+    assert row.status == 'OK'                # отсутствие веса не понижает статус
+    assert row.ppu_approved is True
+    assert row.cost == 1150                  # floor((1000 + 0) * 1.15)
+    assert not any('вес ППУ' in n for n in row.notes)
+    assert report.summary['ok'] == 1
+    assert report.summary['ppu_unconfirmed'] == 0
     assert report.summary['ppu_unapproved'] == 0
-    assert report.summary['ok'] == 0
-    assert report.drafts          # без утверждённого ППУ — только черновик
+    assert report.drafts                     # черновик только из-за NO_MATCH OZON
     report_txt = Path(report.report_path).read_text(encoding='utf-8')
-    assert 'вес ППУ не утверждён' in report_txt
+    assert 'вес ППУ не утверждён' not in report_txt
 
 
-def test_manual_price_without_ppu_is_draft(tmp_path):
-    # Ручная цена без утверждённого веса ППУ: рассчитано, но НЕ OK — только
-    # черновик, файл «готово» не выпускается, cost в строке не выдаётся.
+def test_manual_price_without_ppu_weight_is_ready(tmp_path):
+    # Ручная цена без веса ППУ: ППУ = 0 — нормальная ситуация, строка OK,
+    # выпускается файл «готово» (если других исключений нет).
     con = base_db(tmp_path)
     add_product(con, 'S1', manual=1, manual_price=500)   # веса ППУ нет
     p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
@@ -367,14 +367,14 @@ def test_manual_price_without_ppu_is_draft(tmp_path):
     report = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
                          ozon_path=p_oz, out_dir=tmp_path / 'out',
                          fetch_prices=fetch, source_1c='manual', persist=True)
-    row = [r for r in report.rows if r.supplier_article == 'S1'][0]
-    assert row.status == 'PPU_UNCONFIRMED'
-    assert row.cost is None
-    assert report.summary['ppu_unconfirmed'] == 2   # строка WB + строка OZON
-    assert report.drafts
-    assert list((tmp_path / 'out').glob('*_готово.xlsx')) == []
-    drafts_ = list((tmp_path / 'out').glob('*_черновик.xlsx'))
-    assert drafts_ and Path(drafts_[0]).exists()
+    rows = [r for r in report.rows if r.supplier_article == 'S1']
+    assert len(rows) == 2
+    assert all(r.status == 'OK' and r.cost == 575 for r in rows)
+    assert report.summary['ok'] == 2
+    assert not report.drafts and report.status == 'ok'
+    assert list((tmp_path / 'out').glob('*_черновик.xlsx')) == []
+    ready = list((tmp_path / 'out').glob('*_готово.xlsx'))
+    assert len(ready) == 2 and all(Path(p).exists() for p in ready)
 
 
 # ── 20. Текущая цена не выдаётся за историческую ────────────────────────────
@@ -545,9 +545,9 @@ def test_force_does_not_bypass_draft_gate(tmp_path):
     assert list((tmp_path / 'out').glob('*_готово.xlsx')) == []
 
 
-def test_ppu_unconfirmed_always_drafts(tmp_path):
+def test_missing_ppu_weight_does_not_block_ready(tmp_path):
     con = base_db(tmp_path)
-    add_product(con, 'S1')                      # веса ППУ нет → PPU_UNCONFIRMED
+    add_product(con, 'S1')                      # веса ППУ нет → ППУ = 0 (норма)
     p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
     p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', '', None)])
     fetch = make_fetcher({'S1': ok_item('S1', '1000')})
@@ -556,9 +556,31 @@ def test_ppu_unconfirmed_always_drafts(tmp_path):
                              ozon_path=p_oz, out_dir=tmp_path / 'out',
                              fetch_prices=fetch, source_1c='com',
                              persist=True, mode=mode)
-        assert report.drafts, mode
-        assert Path(report.wb_path).name.endswith('_черновик.xlsx'), mode
-    assert list((tmp_path / 'out').glob('*_готово.xlsx')) == []
+        assert not report.drafts, mode
+        assert report.status == 'ok', mode
+        assert Path(report.wb_path).name.endswith('_готово.xlsx'), mode
+        assert Path(report.ozon_path).name.endswith('_готово.xlsx'), mode
+    assert len(list((tmp_path / 'out').glob('*_готово.xlsx'))) == 2
+
+
+def test_ppu_weight_used_only_when_present(tmp_path):
+    con = base_db(tmp_path)
+    add_product(con, 'S1')                      # без веса → ППУ 0
+    add_product(con, 'S2', weight=1000)         # вес есть → ППУ 405 ₽
+    p_wb = make_wb(tmp_path / 'wb.xlsx',
+                   [('B1', 'S1', '0', None, None),
+                    ('B2', 'S2', '0', None, None)])
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', DUMMY_OZ)
+    fetch = make_fetcher({'S1': ok_item('S1', '1000'),
+                          'S2': ok_item('S2', '1000')})
+    report = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                         ozon_path=p_oz, out_dir=tmp_path / 'out',
+                         fetch_prices=fetch, source_1c='com', persist=True)
+    by_sku = {r.supplier_article: r for r in report.rows}
+    assert by_sku['S1'].cost == 1150            # floor((1000 + 0) * 1.15)
+    assert by_sku['S2'].cost == 1615            # floor((1000 + 405) * 1.15)
+    assert report.summary['ok'] == 2
+    assert report.summary['ppu_unconfirmed'] == 0
 
 
 def test_unknown_mode_rejected(tmp_path):
