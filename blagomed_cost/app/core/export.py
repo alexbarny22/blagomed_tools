@@ -16,11 +16,11 @@
   не создаются. Для строк не-OK ячейка себестоимости НЕ перезаписывается
   (ноль/фиктивная цена не подставляются), а отчёт фиксирует, что прежнее
   значение в файле не проверено;
-- товар без утверждённого веса ППУ (нет записи ppu_weights на дату) получает
-  ОТДЕЛЬНЫЙ статус PPU_UNCONFIRMED: себестоимость посчитана, но ни вес 0, ни
-  cost не выдаются за проверенную запись — строка не попадает в Excel и не
-  блокирует «черновики» (в cost_snapshots сохраняется с ppu_approved=false
-  как свидетельство «что было рассчитано в этом запуске»);
+- ППУ учитывается ТОЛЬКО при наличии веса в исходных данных (ppu_weights на
+  дату). Отсутствие веса — НОРМАЛЬНАЯ ситуация: расход на ППУ = 0, отдельного
+  подтверждения не требуется, статус строки не понижается. Устаревший статус
+  PPU_UNCONFIRMED больше не выставляется (вес 0 не подменяется условными
+  записями в ppu_weights);
 - товар, встречающийся на нескольких карточках, рассчитывается один раз на
   запуск (общий кэш по product_id);
 - история: one run-запись на логический запуск (WB+OZON), cost_snapshots с
@@ -77,6 +77,8 @@ HAS_DRAFT_SUFFIX = '_черновик'
 SIGNATURE_ALGORITHM = 'run-key-v1'
 
 # Отдельный статус строки: товар рассчитан, но вес ППУ не утверждён
+# Исторический статус этапа 6: больше не выставляется — отсутствие веса ППУ
+# означает расход 0 (нормальная ситуация), см. правило владельца.
 PPU_UNCONFIRMED = 'PPU_UNCONFIRMED'
 
 PRICE_STATUS_OK = {ItemStatus.OK}
@@ -97,11 +99,10 @@ class RowOutcome:
     supplier_article: str | None
     size: str | None
     product_id: int | None
-    status: str                    # OK / PPU_UNCONFIRMED / NEEDS_CONFIRM / ...
+    status: str                    # OK / NEEDS_CONFIRM / AMBIGUOUS / ...
     reason: str = ''
     previous_cost: object = None   # прежнее значение ячейки (не проверено)
-    cost: int | None = None        # себестоимость; ТОЛЬКО для OK-строк
-                                   # (PPU_UNCONFIRMED/не-OK — None)
+    cost: int | None = None        # себестоимость; только для OK-строк
     ppu_approved: bool = True
     notes: tuple[str, ...] = ()
 
@@ -151,7 +152,11 @@ def _load_catalog(con) -> dict[str, dict]:
     return out
 
 
-def _ppu_approved(con, product_id: int, d: str) -> bool:
+def _ppu_weight_present(con, product_id: int, d: str) -> bool:
+    """Есть ли вес ППУ на дату (только для информации; статус не понижает).
+
+    Отсутствие веса — нормальная ситуация: ППУ = 0 (правило владельца).
+    """
     row = con.execute(
         'SELECT 1 FROM ppu_weights WHERE product_id = ? AND valid_from <= ?'
         ' LIMIT 1', (product_id, d)).fetchone()
@@ -479,14 +484,12 @@ def _resolve_rows(*, con, wb_rows, oz_rows, calc_date: str,
                               'price_meta': {}, 'ppu_approved': False,
                               'notes': ()}
                 continue
-            ppu_ok = _ppu_approved(con, pid, calc_date)
-            cache[pid] = {'status': 'OK' if ppu_ok else PPU_UNCONFIRMED,
-                          'reason': ('' if ppu_ok else 'вес ППУ не утверждён '
-                                     '(нет записи ppu_weights на дату) — '
-                                     'нулевой вес не доказан, себестоимость '
-                                     'не фиксируется'),
+            cache[pid] = {'status': 'OK', 'reason': '',
                           'result': res, 'item': None, 'price_meta': {},
-                          'ppu_approved': ppu_ok, 'notes': ()}
+                          'ppu_approved': True,
+                          'ppu_weight_present': _ppu_weight_present(
+                              con, pid, calc_date),
+                          'notes': ()}
             continue
         item, why = item_by_pid.get(pid, (None, ''))
         if item is None:
@@ -507,18 +510,13 @@ def _resolve_rows(*, con, wb_rows, oz_rows, calc_date: str,
                               'price_meta': _price_meta(item),
                               'ppu_approved': False, 'notes': ()}
                 continue
-            ppu_ok = _ppu_approved(con, pid, calc_date)
-            notes = () if ppu_ok else (
-                'вес ППУ не утверждён (нет записи ppu_weights на дату) — '
-                'нулевой вес не доказан',)
-            cache[pid] = {'status': 'OK' if ppu_ok else PPU_UNCONFIRMED,
-                          'reason': ('' if ppu_ok else 'вес ППУ не утверждён '
-                                     '(нет записи ppu_weights на дату) — '
-                                     'нулевой вес не доказан, себестоимость '
-                                     'не фиксируется'),
+            cache[pid] = {'status': 'OK', 'reason': '',
                           'result': res, 'item': item,
                           'price_meta': _price_meta(item),
-                          'ppu_approved': ppu_ok, 'notes': notes}
+                          'ppu_approved': True,
+                          'ppu_weight_present': _ppu_weight_present(
+                              con, pid, calc_date),
+                          'notes': ()}
         else:
             cache[pid] = {'status': status, 'reason': reason,
                           'result': None, 'item': item,
@@ -535,9 +533,7 @@ def _resolve_rows(*, con, wb_rows, oz_rows, calc_date: str,
         pk = cache[prod['id']]
         oc = _outcome_for(row, prod['id'], pk['status'], pk['reason'],
                           cost=(pk['result'].cost
-                                if (pk['result'] is not None
-                                    and pk['ppu_approved'])
-                                else None),
+                                if pk['result'] is not None else None),
                           ppu_approved=pk['ppu_approved'],
                           notes=pk['notes'])
         outcomes.append(oc)
@@ -644,10 +640,7 @@ def write_exception_report(report_path: Path, report: RunReport) -> Path:
                 ('not_found', 'не найдено в 1С (NOT_FOUND)'),
                 ('no_price', 'нет закупочной цены (NO_PRICE)'),
                 ('no_match', 'нет товара в каталоге (NO_MATCH)'),
-                ('errors', 'ошибки источника/расчёта (ERROR)'),
-                ('ppu_unconfirmed', 'рассчитано, но вес ППУ не утверждён '
-                                    '(PPU_UNCONFIRMED)'),
-                ('ppu_unapproved', 'OK, но вес ППУ не утверждён')]
+                ('errors', 'ошибки источника/расчёта (ERROR)')]
     for key, title in sum_keys:
         lines.append(f'  {title}: {report.summary.get(key, 0)}')
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -742,10 +735,10 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
     """Основной запуск: парсинг → цены → расчёт → Excel → история → публикация.
 
     Допустимые mode: 'strict' и 'force' (иное — ExportError). Оба режима при
-    любой не-OK строке (включая PPU_UNCONFIRMED) публикуют ТОЛЬКО черновики и
-    отчёт исключений; «force» НЕ отключает этот запрет. PPU_UNCONFIRMED (вес
-    ППУ не утверждён) не считается OK и не попадает в Excel. persist=False:
-    записи в БД не производятся (dry-run).
+    любой не-OK строке публикуют ТОЛЬКО черновики и отчёт исключений; «force»
+    НЕ отключает этот запрет. ППУ учитывается только при наличии веса в
+    исходных данных: отсутствие веса — норма, ППУ = 0, строка может быть OK.
+    persist=False: записи в БД не производятся (dry-run).
     """
     d = _calc_date(calc_date)
     out_dir = Path(out_dir)
@@ -768,10 +761,10 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
     if mode not in ('strict', 'force'):
         raise ExportError(
             f'Недопустимый режим: {mode!r}; допустимы "strict" и "force"')
-    # Любой режим выпускает ТОЛЬКО черновик, если остались исключённые строки
-    # или PPU_UNCONFIRMED: «force» не обходит запрет на файлы «готово».
-    drafts = bool(summary['skipped'] > 0 or summary['ppu_unapproved'] > 0
-                  or summary['ppu_unconfirmed'] > 0)
+    # Любой режим выпускает ТОЛЬКО черновик, если остались исключённые строки;
+    # «force» не обходит запрет на файлы «готово». Отсутствие веса ППУ
+    # исключённой строкой не является (ППУ = 0).
+    drafts = bool(summary['skipped'] > 0)
 
     updates = {'wb': {}, 'ozon': {}}
     for oc in outcomes:
