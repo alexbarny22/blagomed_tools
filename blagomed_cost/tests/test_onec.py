@@ -250,16 +250,18 @@ def test_10_guid_wins_over_sku():
     assert 'guid' in items[0].detail
 
 
-def test_10b_provided_guid_not_found_never_falls_back_to_sku():
+def test_10b_conflicting_guid_blocks():
+    """Сохранённый GUID не соответствует объекту по артикулу → блокировка
+    (AMBIGUOUS: конфликт привязки), цена не допускается."""
     src = _FakeSource([
         _cand(sku='232899', name='Подушка Memory', guid='OTHER',
               price=Decimal(290)),
     ])
     items = fetch_from_source(
         src, [OnecRequest(sku_1c='232899', guid_1c='не-тот-guid')])
-    assert items[0].status == ItemStatus.NOT_FOUND
-    assert items[0].guid_1c == 'не-тот-guid'
-    assert 'GUID' in items[0].detail
+    assert items[0].status == ItemStatus.AMBIGUOUS
+    assert items[0].price is None
+    assert 'конфликт' in items[0].detail.lower()
 
 
 # ── 11. Сохранение копеек и точного Decimal ────────────────────────────────
@@ -407,15 +409,16 @@ def test_com_guid_wins_when_sku_changed_end_to_end(monkeypatch):
     assert items[0].price == Decimal('310.25')
 
 
-def test_17_wrong_guid_with_matching_sku_is_not_found():
-    """Неверный GUID при совпадающем артикуле → NOT_FOUND: GUID первичен,
-    совпадение по артикулу не подменяет отсутствующий GUID."""
+def test_17_wrong_guid_with_matching_sku_is_conflict():
+    """Неверный GUID при совпадающем артикуле → блокировка (AMBIGUOUS:
+    конфликт привязки); совпадение по артикулу не подменяет конфликт GUID."""
     src = _FakeSource([_cand(sku='232899', name='Подушка Memory',
                              guid='GUID-ВЕРНЫЙ', price=Decimal('290'))])
     items = fetch_from_source(
         src, [OnecRequest(sku_1c='232899', guid_1c='GUID-НЕВЕРНЫЙ')])
-    assert items[0].status == ItemStatus.NOT_FOUND
+    assert items[0].status == ItemStatus.AMBIGUOUS
     assert items[0].price is None
+    assert 'конфликт' in items[0].detail.lower()
 
 
 def test_18_same_guid_different_prices_ambiguous():
@@ -435,15 +438,61 @@ def test_18_same_guid_different_prices_ambiguous():
     assert '290' in items[0].detail and '305' in items[0].detail
 
 
-def test_19_sku_only_needs_confirm():
-    """Только совпадение артикула без GUID → NEEDS_CONFIRM (кандидат на
-    подтверждение), а не готовое автоматическое сопоставление."""
+def test_19_unique_sku_auto_ok():
+    """Артикул точно совпал с ЕДИНСТВЕННЫМ товаром 1С и цена из утверждённого
+    источника → автоматическое сопоставление, статус OK (без ручного
+    подтверждения)."""
     src = _FakeSource([_cand(sku='232899', name='Подушка Memory',
-                             guid='G-1', price=Decimal('290'))])
+                             guid='G-1', price=Decimal('290'),
+                             source_status='exact')])
     items = fetch_from_source(src, [OnecRequest(sku_1c='232899')])
+    assert items[0].status == ItemStatus.OK
+    assert items[0].price == Decimal('290')
+    assert items[0].guid_1c == 'G-1'
+    assert 'sku' in items[0].detail
+
+
+def test_19b_duplicate_sku_disambiguated_by_name():
+    """Дубли артикула различаются по наименованию запроса → однозначный выбор."""
+    src = _FakeSource([
+        _cand(sku='232899', name='Подушка Memory 41см', guid='G-41',
+              price=Decimal('290'), source_status='exact'),
+        _cand(sku='232899', name='Подушка Memory 51см', guid='G-51',
+              price=Decimal('310'), source_status='exact'),
+    ])
+    items = fetch_from_source(
+        src, [OnecRequest(sku_1c='232899', name_1c='подушка memory 51см')])
+    assert items[0].status == ItemStatus.OK
+    assert items[0].guid_1c == 'G-51'
+    assert items[0].price == Decimal('310')
+
+
+def test_19c_duplicate_sku_ambiguous_characteristics():
+    """Дубли артикула без однозначных характеристик → AMBIGUOUS; выбор
+    произвольного кандидата запрещён, различие зафиксировано в detail."""
+    src = _FakeSource([
+        _cand(sku='232899', name='Подушка Memory 41см', guid='G-41',
+              price=Decimal('290'), source_status='exact'),
+        _cand(sku='232899', name='Подушка Memory 51см', guid='G-51',
+              price=Decimal('310'), source_status='exact'),
+    ])
+    items = fetch_from_source(src, [OnecRequest(sku_1c='232899')])
+    assert items[0].status == ItemStatus.AMBIGUOUS
+    assert items[0].price is None
+    assert '41см' in items[0].detail and '51см' in items[0].detail
+
+
+def test_19d_sku_name_contradiction_needs_confirm():
+    """Артикул совпал, но наименование противоречит → NEEDS_CONFIRM (не OK)."""
+    src = _FakeSource([
+        _cand(sku='232899', name='Подушка Memory', guid='G-1',
+              price=Decimal('290'), source_status='exact'),
+    ])
+    items = fetch_from_source(
+        src, [OnecRequest(sku_1c='232899', name_1c='Совершенно другой товар')])
     assert items[0].status == ItemStatus.NEEDS_CONFIRM
-    assert items[0].price == Decimal('290')  # цена приложена, но не объявлена
-    assert 'подтверждения' in items[0].detail
+    assert items[0].price == Decimal('290')
+    assert 'характеристик' in items[0].detail
 def test_20_sku_only_no_price_is_no_price():
     """Отсутствие цены не заменяется нулём и не становится OK даже при
     совпадении по артикулу: NO_PRICE + price=None."""

@@ -184,14 +184,46 @@ def _by_sku(sku: str, cands: list[_Cand]) -> list[_Cand]:
     return [c for c in cands if c.sku and str(c.sku).strip() == s]
 
 
+def _same_object(a: _Cand, b: _Cand) -> bool:
+    """Одна и та же запись: тот же объект (GUID/наименование/артикул) и цена."""
+    return (_significant(a) == _significant(b)
+            and _guid_eq(a.guid, b.guid)
+            and normalize_name(a.name) == normalize_name(b.name)
+            and (a.sku or '') == (b.sku or ''))
+
+
+def _uniq_candidates(got: list[_Cand]) -> list[_Cand]:
+    out: list[_Cand] = []
+    for c in got:
+        if not any(_same_object(c, u) for u in out):
+            out.append(c)
+    return out
+
+
+def _characteristics_diff(got: list[_Cand]) -> str:
+    """Что именно различается у кандидатов — для диагностики, без выбора."""
+    names = sorted({(c.name or '').strip() for c in got if c.name})
+    guids = sorted({(c.guid or '').strip() for c in got if c.guid})
+    prices = sorted({str(c.price) for c in got})
+    parts = []
+    if len(names) > 1:
+        parts.append('наименования: ' + ' | '.join(names))
+    if len(guids) > 1:
+        parts.append('GUID: ' + ' | '.join(guids))
+    if len(prices) > 1:
+        parts.append('цены: ' + ' | '.join(prices))
+    return '; '.join(parts)
+
+
 def _to_item(cand: _Cand, source: str, how: str,
              expected_price_type: str | None = None,
              expected_supplier: str | None = None) -> OnecItem:
-    """Собирает результат. Правила (КОНТРОЛЬНАЯ ДОРАБОТКА этапа 5):
+    """Собирает результат. Правила (артикул — основной идентификатор):
     - цена None → NO_PRICE (цена никогда не заменяется нулём);
-    - точный источник (source_status exact/None) + доказанная идентификация
-      (GUID или уникальное наименование) → OK;
-    - совпадение ТОЛЬКО по артикулу → NEEDS_CONFIRM (не готовое сопоставление);
+    - точный источник (source_status exact/None) + однозначный кандидат
+      (GUID или УНИКАЛЬНЫЙ артикул без противоречий) → OK;
+    - несколько кандидатов по артикулу разрешаются только по наименованию/
+      характеристикам; иначе AMBIGUOUS (не «первый попавшийся»);
     - цена не из нужного источника (vid_only/any/fallback_register) →
       NEEDS_CONFIRM, чтобы не объявлять её проверенной;
     - фактический поставщик/вид цены, отличающиеся от заданных →
@@ -203,9 +235,6 @@ def _to_item(cand: _Cand, source: str, how: str,
     elif cand.source_status not in (None, 'exact'):
         status = ItemStatus.NEEDS_CONFIRM
         why = f'источник цены не точный ({cand.source_status})'
-    elif how == 'sku':
-        status = ItemStatus.NEEDS_CONFIRM
-        why = 'сопоставление только по артикулу — требует подтверждения'
     elif expected_price_type and cand.price_type and \
             cand.price_type != expected_price_type:
         status = ItemStatus.NEEDS_CONFIRM
@@ -244,30 +273,75 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
                        source: str,
                        expected_price_type: str | None = None,
                        expected_supplier: str | None = None) -> OnecItem:
-    """Выбирает единственного кандидата по приоритету GUID → наименование →
-    артикул-подсказка. GUID первичен даже при изменённом артикуле; несколько
-    разных кандидатов с одним GUID → AMBIGUOUS; совпадение только по артикулу —
-    NEEDS_CONFIRM, а не готовое автоматическое сопоставление.
+    """Выбирает кандидата. Артикул — основной рабочий идентификатор.
+
+    Правила (подтверждены владельцем):
+    1. Артикул точно совпал с ЕДИНСТВЕННЫМ товаром 1С, нет противоречий по
+       GUID/наименованию и цена из утверждённого источника → OK;
+    2. Несколько товаров с одним артикулом — разрешаем ТОЛЬКО по наименованию/
+       характеристикам; если однозначно не разрешается → AMBIGUOUS (никогда не
+       берём «первого попавшегося»);
+    3. Сохранённый GUID, противоречащий найденному по артикулу объекту, —
+       блокирует расчёт (AMBIGUOUS: конфликт привязки), конфликт не игнорируем.
     """
     if req.guid_1c:
         got = _by_guid(req.guid_1c, cands)
-        if len(got) == 1:
-            return _to_item(got[0], source, 'guid',
-                            expected_price_type, expected_supplier)
-        if len(got) > 1:
-            # одинаковые по содержанию записи считаем одним кандидатом
-            if len({_significant(c) for c in got}) == 1:
-                return _to_item(got[0], source, 'guid',
+        if got:
+            uniq = _uniq_candidates(got)
+            if len(uniq) == 1:
+                return _to_item(uniq[0], source, 'guid',
                                 expected_price_type, expected_supplier)
             return _ambiguous_from_guid(req, got, source)
-        # GUID передан, но не найден: не «добираем» по артикулу — это значит,
-        # что локальная привязка товара отличается от 1С.
+        # GUID не найден: если по артикулу объект есть — это КОНФЛИКТ привязки.
+        if req.sku_1c and _by_sku(req.sku_1c, cands):
+            return OnecItem(
+                sku_1c=req.sku_1c, name_1c=req.name_1c, guid_1c=req.guid_1c,
+                source=source, status=ItemStatus.AMBIGUOUS,
+                detail=f'конфликт привязки: GUID {req.guid_1c} не соответствует '
+                       f'объекту, найденному по артикулу {req.sku_1c}; '
+                       f'цена не допускается')
         return OnecItem(
             sku_1c=req.sku_1c, name_1c=req.name_1c, guid_1c=req.guid_1c,
             source=source, status=ItemStatus.NOT_FOUND,
             detail=f'GUID {req.guid_1c} не найден в 1С')
+    if req.sku_1c:
+        got = _uniq_candidates(_by_sku(req.sku_1c, cands))
+        if len(got) == 1:
+            cand = got[0]
+            # Противоречие характеристик: артикул совпал, наименование — нет.
+            if (req.name_1c and cand.name
+                    and normalize_name(req.name_1c) != normalize_name(cand.name)):
+                return OnecItem(
+                    sku_1c=cand.sku or req.sku_1c, name_1c=cand.name,
+                    guid_1c=cand.guid, price=cand.price,
+                    price_date=cand.price_date, price_type=cand.price_type,
+                    supplier=cand.supplier, register=cand.register,
+                    source_status=cand.source_status, source=source,
+                    status=ItemStatus.NEEDS_CONFIRM,
+                    detail='артикул совпал, но наименование различается — '
+                           'требуется проверка характеристик')
+            return _to_item(cand, source, 'sku',
+                            expected_price_type, expected_supplier)
+        if len(got) > 1:
+            # Дубли артикула: пробуем различить по наименованию из запроса.
+            if req.name_1c:
+                by_name = _uniq_candidates(
+                    [c for c in got if c.name
+                     and normalize_name(c.name) == normalize_name(req.name_1c)])
+                if len(by_name) == 1:
+                    return _to_item(by_name[0], source, 'sku+name',
+                                    expected_price_type, expected_supplier)
+                if by_name:
+                    got = by_name
+            diff = _characteristics_diff(got)
+            return OnecItem(
+                sku_1c=req.sku_1c, name_1c=req.name_1c, source=source,
+                status=ItemStatus.AMBIGUOUS,
+                detail=f'артикул {req.sku_1c}: {len(got)} объектов, '
+                       f'произвольный выбор запрещён'
+                       + (f'; различаются {diff}' if diff else ''))
     if req.name_1c:
-        got = _by_name(req.name_1c, cands)
+        got = _uniq_candidates(_by_name(req.name_1c, cands))
         if len(got) == 1:
             return _to_item(got[0], source, 'name',
                             expected_price_type, expected_supplier)
@@ -275,17 +349,8 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
             return OnecItem(
                 sku_1c=req.sku_1c, name_1c=req.name_1c, source=source,
                 status=ItemStatus.AMBIGUOUS,
-                detail=f'наименование даёт {len(got)} совпадений')
-    if req.sku_1c:
-        got = _by_sku(req.sku_1c, cands)
-        if len(got) == 1:
-            return _to_item(got[0], source, 'sku',
-                            expected_price_type, expected_supplier)
-        if len(got) > 1:
-            return OnecItem(
-                sku_1c=req.sku_1c, name_1c=req.name_1c, source=source,
-                status=ItemStatus.AMBIGUOUS,
-                detail=f'артикул {req.sku_1c}: {len(got)} совпадений')
+                detail=f'наименование даёт {len(got)} совпадений; '
+                       f'{_characteristics_diff(got)}')
     return OnecItem(
         sku_1c=req.sku_1c, name_1c=req.name_1c,
         source=source, status=ItemStatus.NOT_FOUND,
