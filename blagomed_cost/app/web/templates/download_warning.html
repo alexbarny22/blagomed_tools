@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+{% block title %}Предупреждение о черновике{% endblock %}
+{% block content %}
+<h1>Файл является черновиком</h1>
+<div class="warn-box">
+  Запуск №{{ run.id }} содержит нерешённые строки: {{ summary.skipped }}.
+  Скачиваемый файл <span class="mono">{{ filename }}</span> содержит себестоимость
+  только для подтверждённых строк. Нерешённые позиции нельзя считать рассчитанными.
+</div>
+<p>Вы можете скачать файл как черновик либо вернуться и сначала закрыть проблемы.</p>
+<p>
+  <a class="btn" href="{{ url_for('download', run_id=run.id, kind=kind, confirm=1) }}">Скачать как черновик</a>
+  <a class="btn secondary" href="{{ url_for('run_detail', run_id=run.id) }}">Вернуться к запуску</a>
+  <a class="btn secondary" href="{{ url_for('issues', run_id=run.id) }}">Открыть проблемы</a>
+</p>
+{% endblock %}

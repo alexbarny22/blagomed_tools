@@ -1,0 +1,108 @@
+{% extends 'base.html' %}
+{% block title %}Расходы{% endblock %}
+{% block content %}
+<h1>Расходы и вес ППУ <span class="muted small">на {{ today }}</span></h1>
+
+<div class="split">
+  <div class="card">
+    <h2>Вес ППУ товара</h2>
+    <p class="small muted">Вес хранится с датой начала действия. Отсутствующий вес — не ошибка,
+      ППУ = 0. Ставка ППУ берётся из настроек (по умолчанию 405 ₽/кг).</p>
+    <form class="inline" method="post" action="{{ url_for('expenses_ppu') }}">
+      <label>Товар
+        <select name="product_id" required>
+          <option value="">— выберите —</option>
+          {% for p in products %}<option value="{{ p.id }}">{{ p.sku }} — {{ p.name or '' }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Вес, г
+        <input name="weight_g" inputmode="numeric" required placeholder="270">
+      </label>
+      <label>С даты
+        <input type="date" name="valid_from" value="{{ today }}" required>
+      </label>
+      <button type="submit">Сохранить вес</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Статья доп. расходов</h2>
+    <p class="small muted">Новая сумма той же статьи заменяет старую с указанной даты;
+      разные статьи суммируются. Закрытая статья не возобновляется.</p>
+    <form class="inline" method="post" action="{{ url_for('expenses_extras') }}">
+      <label>Товар
+        <select name="product_id" required>
+          <option value="">— выберите —</option>
+          {% for p in products %}<option value="{{ p.id }}">{{ p.sku }} — {{ p.name or '' }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Статья
+        <input name="kind" list="kinds" required placeholder="Поролон">
+        <datalist id="kinds">{% for k in kinds %}<option value="{{ k }}">{% endfor %}</datalist>
+      </label>
+      <label>Сумма, ₽
+        <input name="rub" inputmode="decimal" required placeholder="110">
+      </label>
+      <label>С даты
+        <input type="date" name="valid_from" value="{{ today }}" required>
+      </label>
+      <label>По (необязательно)
+        <input type="date" name="valid_to">
+      </label>
+      <button type="submit">Сохранить статью</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+    <h2>Параметры расчёта (ставка ППУ и наценка)</h2>
+    <p class="small muted">Действуют на {{ today }}: ППУ
+      <b>{{ settings.ppu_rub_per_kg|money }} ₽/кг</b>, наценка
+      <b>{{ settings.margin_pct|money }}%</b>. Новая запись с даты заменяет
+      прежнюю для расчётов начиная с этой даты; исторические снимки не меняются.</p>
+    <form class="inline" method="post" action="{{ url_for('expenses_settings') }}">
+      <label>Ставка ППУ, ₽/кг
+        <input name="ppu_rub_per_kg" inputmode="decimal" required
+               value="{{ settings.ppu_rub_per_kg }}">
+      </label>
+      <label>Наценка, %
+        <input name="margin_pct" inputmode="decimal" required
+               value="{{ settings.margin_pct }}">
+      </label>
+      <label>Действует с
+        <input type="date" name="valid_from" value="{{ today }}" required>
+      </label>
+      <button type="submit">Сохранить параметры</button>
+    </form>
+  </div>
+
+  <h2>Текущие значения</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Артикул</th><th>Наименование</th><th>Вес ППУ</th><th>Действует с</th>
+      <th>Доп. расходы</th><th>Сумма</th><th></th></tr>
+  {% for p in products %}
+  <tr>
+    <td><a href="{{ url_for('product_card', pid=p.id) }}">{{ p.sku }}</a></td>
+    <td>{{ p.name or '—' }}</td>
+    <td>{{ p.weight_g|weight if p.weight_g is not none else '—' }}</td>
+    <td>{{ p.weight_from or '—' }}</td>
+    <td>{% if p.extras %}{% for e in p.extras %}{{ e.kind }} {{ e.rub|money }} ₽{% if not loop.last %}<br>{% endif %}{% endfor %}{% else %}—{% endif %}</td>
+    <td>{{ p.extras_sum|money }}</td>
+    <td><a href="{{ url_for('product_card', pid=p.id) }}">изменить</a></td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+
+<div class="card">
+  <h2>Последние изменения (аудит)</h2>
+  <table>
+    <tr><th>Когда</th><th>Кто</th><th>Сущность</th><th>Товар</th><th>Новое значение</th></tr>
+    {% for c in changes %}
+      <tr><td class="small">{{ c.at }}</td><td>{{ c.user }}</td><td>{{ c.entity }}</td>
+        <td>{{ c.entity_id }}</td><td class="small mono">{{ c.new }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">изменений ещё не было</td></tr>{% endfor %}
+  </table>
+</div>
+{% endblock %}

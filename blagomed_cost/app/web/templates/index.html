@@ -1,0 +1,78 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Главная</h1>
+
+{% if not info.exists %}
+  <div class="danger-box">База данных не найдена: {{ info.path }}.
+    <a href="{{ url_for('setup') }}">Создайте тестовую/рабочую базу</a> явным действием.</div>
+{% elif info.integrity != 'ok' %}
+  <div class="danger-box">Проверка целостности БД: {{ info.integrity or info.error }}.
+    Работа приостановлена до выяснения причин.</div>
+{% endif %}
+
+<div class="grid">
+  <div class="stat"><div class="n">{{ products_total }}</div><div class="l">товаров в каталоге</div></div>
+  <div class="stat"><div class="n">{{ counts.runs or 0 }}</div><div class="l">запусков в истории</div></div>
+  <div class="stat"><div class="n">{{ counts.cost_snapshots or 0 }}</div><div class="l">снимков себестоимости</div></div>
+  <div class="stat"><div class="n">{{ counts.manual_prices or 0 }}</div><div class="l">записей ручных цен</div></div>
+</div>
+
+<div class="split">
+  <div class="card">
+    <h2>Последний расчёт</h2>
+    {% if last_summary %}
+      <p><b>Успешно:</b> {{ last_summary.ok }} из {{ last_summary.wb_total + last_summary.ozon_total }} строк
+        (WB {{ last_summary.wb_total }}, Ozon {{ last_summary.ozon_total }}).</p>
+      <p class="muted">Проблемных: {{ last_summary.skipped }}. Это черновик, если есть нерешённые строки.</p>
+      {% if runs %}<a class="btn" href="{{ url_for('run_detail', run_id=runs[0].row.id) }}">Открыть запуск №{{ runs[0].row.id }}</a>{% endif %}
+    {% else %}
+      <p class="muted">Расчётов ещё не было. <a href="{{ url_for('calc') }}">Перейти к расчёту</a>.</p>
+    {% endif %}
+  </div>
+  <div class="card">
+    <h2>1С (только чтение)</h2>
+    <p class="{{ 'ok-box' if onec.configured else 'warn-box' }}">{{ onec.message }}</p>
+    <p class="small muted">Без 1С доступны ручные цены и исторические снимки с явной пометкой.
+      Цена одного товара никогда не подставляется другому.</p>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Загруженные файлы</h2>
+  <table>
+    <tr><th>Площадка</th><th>Файл</th><th>Строк</th><th>Загружен</th></tr>
+    {% for mp, label in [('wb','Wildberries'), ('ozon','Ozon')] %}
+    <tr>
+      <td>{{ label }}</td>
+      {% if uploads[mp] %}
+        <td>{{ uploads[mp].name }}</td>
+        <td>—</td>
+        <td class="muted">загружен</td>
+      {% else %}
+        <td class="muted">не загружен</td><td>—</td><td>—</td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  <p><a href="{{ url_for('calc') }}">Загрузить и рассчитать →</a></p>
+</div>
+
+{% if runs %}
+<div class="card">
+  <h2>Последние запуски</h2>
+  <table>
+    <tr><th>№</th><th>Начало</th><th>Источник</th><th>Статус</th><th>Успешно</th><th></th></tr>
+    {% for r in runs %}
+    <tr>
+      <td>{{ r.row.id }}</td>
+      <td>{{ r.row.started_at }}</td>
+      <td>{{ r.row.source_1c or '—' }}</td>
+      <td><span class="badge {{ 'ready' if r.row.status == 'done' else 'draft' }}">{{ r.row.status }}</span></td>
+      <td>{{ r.meta.summary.ok if r.meta.summary else '—' }}</td>
+      <td><a href="{{ url_for('run_detail', run_id=r.row.id) }}">открыть</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,79 @@
+{% extends 'base.html' %}
+{% block title %}Проблемы{% endblock %}
+{% block content %}
+<h1>Проблемы расчёта</h1>
+
+<form class="toolbar" method="get" action="{{ url_for('issues') }}">
+  <label>Запуск
+    <select name="run_id" onchange="this.form.submit()">
+      {% for r in runs %}
+        <option value="{{ r.row.id }}" {% if run_id == r.row.id %}selected{% endif %}>
+          №{{ r.row.id }} от {{ r.row.started_at }} ({{ r.row.status }})
+        </option>
+      {% endfor %}
+    </select>
+  </label>
+  <noscript><button type="submit">Показать</button></noscript>
+</form>
+
+<p class="small muted">Нерешённые позиции не блокируют остальные товары. Ручная цена
+  назначается только товару, который есть в каталоге; для NO_MATCH сначала нужен товар.
+  Автоматический подбор чужой цены запрещён.</p>
+
+<div class="{{ 'ok-box' if onec.configured else 'warn-box' }}">
+  <b>1С:</b> {{ meta.onec.message if meta.onec else onec.message }}
+  {% if meta.price_message %}<div class="small">Источник цен запуска: {{ meta.price_message }}</div>{% endif %}
+</div>
+
+{% if not run %}
+  <div class="card muted">Запусков ещё нет. <a href="{{ url_for('calc') }}">Выполните расчёт</a>.</div>
+{% elif not meta.rows %}
+  <div class="card muted">Для этого запуска нет сохранённой детализации (например, legacy-перенос).
+    Выберите более новый запуск.</div>
+{% elif not groups %}
+  <div class="ok-box">В запуске №{{ run.id }} нет проблемных строк по известным статусам.</div>
+{% endif %}
+
+{% if groups %}
+<h2>Сводка: {{ groups|length }} позиций</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Артикул поставщика</th><th>Артикул МП</th><th>Статус</th><th>Строк</th>
+      <th>Объяснение</th><th>Причина источника</th><th>Действие</th></tr>
+  {% for g in groups %}
+  <tr>
+    <td>{{ g.supplier_article or '—' }}</td>
+    <td>{{ g.mp_article or '—' }}</td>
+    <td><span class="badge {{ g.status }}">{{ g.status }}</span></td>
+    <td>{{ g.count }} ({{ g.marketplaces|join(', ')|upper }})</td>
+    <td class="reason">{{ explanations.get(g.status, '') }}</td>
+    <td class="reason">{% for r in g.reasons %}{{ r }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% if not g.reasons %}—{% endif %}</td>
+    <td>
+      {% if g.product_id %}
+        <form class="inline" method="post" action="{{ url_for('issues_manual') }}">
+          <input type="hidden" name="product_id" value="{{ g.product_id }}">
+          <input type="hidden" name="run_id" value="{{ run_id or '' }}">
+          <label>Ручная цена, ₽
+            <input name="price" inputmode="decimal" required placeholder="743">
+          </label>
+          <label>С даты
+            <input type="date" name="valid_from" value="{{ today }}" required>
+          </label>
+          <button type="submit">Сохранить</button>
+        </form>
+        <form method="post" action="{{ url_for('issues_skip') }}" style="margin-top:6px">
+          <input type="hidden" name="product_id" value="{{ g.product_id }}">
+          <input type="hidden" name="run_id" value="{{ run_id or '' }}">
+          <button type="submit" class="secondary">Оставить нерешённым</button>
+        </form>
+        <div class="small"><a href="{{ url_for('product_card', pid=g.product_id) }}">карточка товара</a></div>
+      {% else %}
+        <span class="muted small">Нет товара в каталоге: ручная цена недоступна.</span>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
+{% endblock %}

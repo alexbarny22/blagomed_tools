@@ -1,0 +1,76 @@
+{% extends 'base.html' %}
+{% block title %}Запуск №{{ run.id }}{% endblock %}
+{% block content %}
+<h1>Запуск №{{ run.id }}
+  {% if draft %}<span class="badge draft">черновик: есть нерешённые строки</span>
+  {% else %}<span class="badge ready">готово</span>{% endif %}
+</h1>
+
+<dl class="kv card">
+  <dt>Начало / завершение</dt><dd>{{ run.started_at }} → {{ run.finished_at or '—' }}</dd>
+  <dt>Дата расчёта</dt><dd>{{ meta.calc_date or '—' }}</dd>
+  <dt>Источник цен</dt><dd>{{ meta.price_message or meta.source_label or run.source_1c or '—' }}</dd>
+  <dt>Инициатор</dt><dd>{{ run.user or '—' }}</dd>
+  {% if meta.uploads %}
+  <dt>Исходные файлы</dt>
+  <dd class="small">
+    {% for mp, u in meta.uploads.items() %}{% if u %}{{ mp|upper }}: {{ u.original or u.path }} ({{ u.rows or '?' }} строк)<br>{% endif %}{% endfor %}
+  </dd>
+  {% endif %}
+  {% if meta.hashes %}
+  <dt>SHA-256 исходников</dt>
+  <dd class="mono small">WB {{ meta.hashes.wb }}<br>OZON {{ meta.hashes.ozon }}</dd>
+  {% endif %}
+</dl>
+
+{% if draft %}
+<div class="warn-box">
+  <b>Внимание: это черновик.</b> Нерешённых строк: {{ summary.skipped }}.
+  Файлы содержат себестоимость только для успешно рассчитанных строк; неподтверждённые
+  результаты нельзя выдавать за окончательные. Скачивание потребует подтверждения.
+</div>
+{% endif %}
+
+<div class="grid">
+  <div class="stat"><div class="n">{{ summary.ok or 0 }}</div><div class="l">успешно</div></div>
+  <div class="stat"><div class="n">{{ summary.skipped or 0 }}</div><div class="l">проблемных</div></div>
+  <div class="stat"><div class="n">{{ summary.wb_total or 0 }} / {{ summary.ozon_total or 0 }}</div><div class="l">строк WB / Ozon</div></div>
+  <div class="stat"><div class="n">{{ rows|length }}</div><div class="l">всего строк</div></div>
+</div>
+
+<div class="card">
+  <h2>Скачать результаты</h2>
+  <p class="small muted">Оригиналы не изменяются; в копиях записывается только колонка
+    «Себестоимость товара» на целевом листе.</p>
+  <p>
+    {% if run.wb_file %}<a class="btn" href="{{ url_for('download', run_id=run.id, kind='wb') }}">WB XLSX</a>{% endif %}
+    {% if run.ozon_file %}<a class="btn" href="{{ url_for('download', run_id=run.id, kind='ozon') }}">Ozon XLSX</a>{% endif %}
+    {% if meta.report_path %}<a class="btn secondary" href="{{ url_for('download', run_id=run.id, kind='report') }}">Отчёт исключений</a>{% endif %}
+    {% if draft %}<span class="small muted">(будет показано предупреждение)</span>{% endif %}
+  </p>
+  {% if not run.wb_file or not run.ozon_file %}
+    <p class="small muted">В этом запуске обработана только одна площадка: файл второй
+      площадки отсутствовал и не имитировался.</p>
+  {% endif %}
+</div>
+
+<h2>Строки расчёта</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>МП</th><th>Стр.</th><th>Артикул МП</th><th>Артикул поставщика</th>
+      <th>Товар</th><th>Статус</th><th>Себестоимость</th><th>Причина / примечание</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.marketplace|upper }}</td>
+    <td>{{ r.row_number }}</td>
+    <td>{{ r.mp_article or '—' }}</td>
+    <td>{{ r.supplier_article or '—' }}</td>
+    <td>{% if r.product_id %}<a href="{{ url_for('product_card', pid=r.product_id) }}">{{ r.product_id }}</a>{% else %}—{% endif %}</td>
+    <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+    <td>{{ r.cost if r.cost is not none else '—' }}</td>
+    <td class="reason">{{ r.reason }}{% if r.notes %} {{ r.notes|join('; ') }}{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endblock %}

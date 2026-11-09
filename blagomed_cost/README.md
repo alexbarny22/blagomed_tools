@@ -40,11 +40,14 @@
 ## Установка и настройка нового модуля
 
 1. `python -m venv venv`, затем `venv\Scripts\pip install -r requirements.txt`
-2. Скопировать `config.example.ini` в `config.ini`, заполнить данные 1С и логин веб-интерфейса
-3. Пароль для веб-интерфейса: `python tools/hash_password.py <пароль>`
-4. Перенести файлы-память старого бота в `legacy/` (см. «Локальные файлы») →
-   `python tools/migrate_legacy.py`
-5. Запуск: `python -m app.web.app`
+2. Скопировать `config.example.ini` в `config.ini`, заполнить данные 1С, логин веб-интерфейса и хэш пароля
+3. Пароль для веб-интерфейса: `python tools/hash_password.py <пароль>` → вставить строку в `[auth] pass_hash`
+4. Создать БД и перенести данные старого бота: страница «База данных» → «Создать БД», затем «Перенести legacy»
+5. Запуск: `python -m app.web.server` (или `start.bat` на Windows, см. `README_WINDOWS.md`)
+
+Вход в интерфейс обязателен: без заполненного `[auth]` все разделы закрыты.
+Подробная установка, `start.bat`/`stop.bat`/`env-check.bat`, доступ с другой
+машины и ограничения — в `README_WINDOWS.md`.
 
 ## Тесты
 

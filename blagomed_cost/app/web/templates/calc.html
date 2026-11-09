@@ -1,0 +1,86 @@
+{% extends 'base.html' %}
+{% block title %}Расчёт{% endblock %}
+{% block content %}
+<h1>Расчёт себестоимости</h1>
+
+<div class="card">
+  <h2>1. Загрузка отчётов MPSPACE</h2>
+  <p class="small muted">Оригиналы не изменяются. Принимается только .xlsx с проверкой
+    формата листов; размер — не более {{ cfg.max_upload_mb }} МБ. Можно загружать по одному файлу.</p>
+  <form class="inline" method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+    <label>Площадка
+      <select name="marketplace">
+        <option value="auto">Определить автоматически</option>
+        <option value="wb">Wildberries</option>
+        <option value="ozon">Ozon</option>
+      </select>
+    </label>
+    <label>Файл(ы) XLSX — можно два сразу
+      <input type="file" name="files" accept=".xlsx" multiple required>
+    </label>
+    <button type="submit">Загрузить</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>2. Загруженные файлы</h2>
+  <table>
+    <tr><th>Площадка</th><th>Файл</th><th>Строк</th><th>Загружен</th><th>SHA-256</th></tr>
+    {% for mp, label in [('wb','Wildberries'), ('ozon','Ozon')] %}
+      <tr>
+        <td>{{ label }}</td>
+        {% if uploads[mp] %}
+          <td>{{ uploads[mp].original or uploads[mp].name }}<div class="small muted mono">{{ uploads[mp].name }}</div></td>
+          <td>{{ uploads[mp].rows if uploads[mp].rows is not none else '—' }}</td>
+          <td>{{ uploads[mp].mtime }}</td>
+          <td class="mono small">{{ (uploads[mp].sha256 or '—')[:16] }}…</td>
+        {% else %}
+          <td class="muted">не загружен</td><td>—</td><td>—</td><td>—</td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <h2>3. Параметры и запуск</h2>
+  <p class="{{ 'ok-box' if onec.configured else 'warn-box' }}">{{ onec.message }}</p>
+  <form method="post" action="{{ url_for('calc_run') }}">
+    <div class="inline">
+      <label>Дата расчёта
+        <input type="date" name="calc_date" value="{{ today }}" required>
+      </label>
+      <label>Источник закупочных цен
+        <select name="price_mode">
+          {% for key, text in price_modes.items() %}
+            <option value="{{ key }}" {% if key == 'none' %}selected{% endif %}>{{ text }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit">Рассчитать</button>
+    </div>
+  </form>
+  <p class="small muted">Режим «снимок» подставляет исторические цены прошлого расчёта и всегда
+    помечает их как не свежие. Режим «без 1С» оставляет товары без ручной цены в NEEDS_CONFIRM.
+    Нерешённые строки не блокируют расчёт остальных и публикуются только как черновик.</p>
+</div>
+
+{% if runs %}
+<div class="card">
+  <h2>Последние запуски</h2>
+  <table>
+    <tr><th>№</th><th>Начало</th><th>Источник</th><th>Статус</th><th>Успешно</th><th></th></tr>
+    {% for r in runs %}
+      <tr>
+        <td>{{ r.row.id }}</td>
+        <td>{{ r.row.started_at }}</td>
+        <td>{{ r.row.source_1c or '—' }}</td>
+        <td>{{ r.row.status }}</td>
+        <td>{{ r.meta.summary.ok if r.meta.summary else '—' }}</td>
+        <td><a href="{{ url_for('run_detail', run_id=r.row.id) }}">результаты</a></td>
+      </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+{% endblock %}

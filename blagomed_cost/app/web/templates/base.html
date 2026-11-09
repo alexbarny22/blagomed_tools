@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Себестоимость МП{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Себестоимость МП <span>локально</span></div>
+  {% if current_user %}
+  <nav>
+    <a href="{{ url_for('index') }}">Главная</a>
+    <a href="{{ url_for('calc') }}">Расчёт</a>
+    <a href="{{ url_for('products') }}">Товары</a>
+    <a href="{{ url_for('expenses') }}">Расходы</a>
+    <a href="{{ url_for('issues') }}">Проблемы</a>
+    <a href="{{ url_for('history') }}">История</a>
+    <a href="{{ url_for('setup') }}">База данных</a>
+    <form method="post" action="{{ url_for('logout') }}" class="nav-form">
+      <span class="who">{{ current_user }}</span>
+      <button type="submit" class="linklike">Выйти</button>
+    </form>
+  </nav>
+  {% endif %}
+</header>
+<main class="wrap">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flashes">
+      {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+<footer>
+  Локальный интерфейс: 127.0.0.1 · рабочая БД не изменяется без явного действия ·
+  <a href="{{ url_for('setup') }}">состояние базы</a>
+</footer>
+</body>
+</html>

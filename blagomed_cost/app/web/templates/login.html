@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% block title %}Вход{% endblock %}
+{% block content %}
+<div class="card auth-card">
+  <h1>Вход</h1>
+  {% if not auth_configured %}
+    <div class="danger-box">
+      Вход не настроен. Добавьте в <span class="mono">{{ config_path }}</span>
+      раздел <span class="mono">[auth]</span> с логином и хэшем пароля.
+    </div>
+    <p class="small muted">Хэш создаётся командой:
+      <span class="mono">python tools/hash_password.py &lt;пароль&gt;</span>.
+      Пароль в открытом виде в config.ini не хранится.</p>
+  {% else %}
+    {% if error %}<div class="danger-box">{{ error }}</div>{% endif %}
+    <form method="post" action="{{ url_for('login') }}">
+      <label>Логин
+        <input name="user" autocomplete="username" required autofocus>
+      </label>
+      <label>Пароль
+        <input name="password" type="password" autocomplete="current-password"
+               required>
+      </label>
+      <button type="submit">Войти</button>
+    </form>
+    <p class="small muted">Доступ к расчёту, товарам и базе данных — только
+      после входа.</p>
+  {% endif %}
+</div>
+{% endblock %}
