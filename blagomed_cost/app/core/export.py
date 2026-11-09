@@ -346,10 +346,10 @@ def _compare_sheets(ws_src, ws_dst, *, base: str, diff, cost_col, updates,
                     f'vs {ws_dst.freeze_panes!r}')
     if set(ws_src.merged_cells.ranges) != set(ws_dst.merged_cells.ranges):
         diff.append(f'{base}: объединённые ячейки различаются')
-    s_dims = [(k, v.width, v.height) for k, v in
-              ws_src.column_dimensions.items()]
-    d_dims = [(k, v.width, v.height) for k, v in
-              ws_dst.column_dimensions.items()]
+    # ColumnDimension не имеет .height (высота — свойство RowDimension);
+    # сравнение высот строк выполняется отдельно ниже по row_dimensions.
+    s_dims = [(k, v.width) for k, v in ws_src.column_dimensions.items()]
+    d_dims = [(k, v.width) for k, v in ws_dst.column_dimensions.items()]
     if s_dims != d_dims:
         diff.append(f'{base}: размеры колонок различаются')
     s_rows = sorted((k, v.height) for k, v in ws_src.row_dimensions.items())
