@@ -178,6 +178,46 @@ def test_setup_requires_explicit_creation(tmp_path, monkeypatch):
     assert 'уже существует' in r.get_data(as_text=True)
 
 
+def test_new_database_uses_15_percent_margin(tmp_path, monkeypatch):
+    """Новая БД получает 405/15/10; 1000 ₽ без ППУ дают 1150 ₽, не 1000 ₽."""
+    base = tmp_path / 'fresh-margin'
+    monkeypatch.setenv('BLAGOMED_HOME', str(base))
+    monkeypatch.setenv('BLAGOMED_DB', str(base / 'data' / 'cost.db'))
+    auth_env(monkeypatch)
+    cfg = load_config(base)
+    app = create_app(cfg)
+    app.config['TESTING'] = True
+    client = app.test_client()
+    login(client)
+    r = client.post('/setup/create', follow_redirects=True)
+    assert r.status_code == 200 and cfg.db_path.exists()
+
+    con = connect(cfg.db_path)
+    settings = {row['key']: row['value'] for row in con.execute(
+        "SELECT key, value FROM settings"
+        " WHERE key IN ('ppu_rub_per_kg', 'margin_pct', 'alert_pct')")}
+    assert settings['ppu_rub_per_kg'] == pytest.approx(405)
+    assert settings['margin_pct'] == pytest.approx(15)
+    assert settings['alert_pct'] == pytest.approx(10)
+    pid = seed(con, 'A1', manual=True, price=1000)
+    con.close()
+
+    page = client.get(f'/products/{pid}?date=2026-11-01').get_data(
+        as_text=True)
+    assert page_cost(page) == 1150
+
+    expenses = client.get('/expenses?date=2026-11-01').get_data(as_text=True)
+    assert '15,00%' in expenses
+    assert '0,15%' not in expenses
+
+
+def test_config_example_margin_is_percent():
+    text = (Path(__file__).resolve().parents[1] /
+            'config.example.ini').read_text(encoding='utf-8')
+    assert 'margin_pct = 15' in text
+    assert 'margin_pct = 0.15' not in text
+
+
 def test_upload_validation_and_multiple_files(env):
     client = env['client']
     wb = make_wb_bytes([('B1', 'A1', '0', '', None)])

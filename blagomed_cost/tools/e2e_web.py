@@ -319,6 +319,19 @@ def main(argv=None) -> int:
         checks.check('2a. база до создания отсутствует', not DB.exists(),
                      str(DB))
         client.post('/setup/create', {})
+        st_e, body_e, _, _ = client.get('/expenses')
+        expenses_new = body_e.decode('utf-8', 'replace')
+        con = db_con()
+        defaults = {r['key']: r['value'] for r in con.execute(
+            "SELECT key, value FROM settings"
+            " WHERE key IN ('ppu_rub_per_kg', 'margin_pct', 'alert_pct')")}
+        con.close()
+        checks.check('2e. новая БД: наценка 15% (не 0,15), ППУ 405, порог 10',
+                     abs(defaults.get('margin_pct', 0) - 15) < 1e-9 and
+                     abs(defaults.get('ppu_rub_per_kg', 0) - 405) < 1e-9 and
+                     abs(defaults.get('alert_pct', 0) - 10) < 1e-9 and
+                     '15,00%' in expenses_new and '405,00' in expenses_new,
+                     f'settings={defaults}, HTTP {st_e}')
         st_h, body_h, _, _ = client.get('/healthz')
         hj = json.loads(body_h.decode('utf-8'))
         checks.check('2b. тестовая SQLite создана штатными миграциями',
@@ -775,9 +788,10 @@ def _close(result, checks, hashes_before, working_db_before, wb_copy,
                                'downloads': str(E2E / 'downloads'),
                                'results': str(RESULTS)}
         result['db_counts'] = {'runs': runs_n}
+        prior = checks.summary()
         checks.check('25. все проверки пройдены',
-                     not checks.summary()['failed'],
-                     str(checks.summary()))
+                     not prior['failed'],
+                     f"до этой проверки: {prior}")
         server.stop()
         _write_result(result, checks, hashes_before, working_db_before,
                       wb_copy, oz_copy)

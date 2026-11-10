@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -99,6 +100,24 @@ def cmd_start(base: Path) -> int:
         print('Вход не настроен. Заполните [auth] user/pass_hash в '
               f'{cfg.config_ini}\n'
               'Хэш: python tools/hash_password.py "<пароль>"',
+              file=sys.stderr)
+        return 2
+    # Уже работающий экземпляр: не запускаем второй процесс.
+    ok, detail = health(cfg)
+    if ok:
+        print(f'Сервер уже работает: http://{cfg.host}:{cfg.port} '
+              f'(healthz: {detail})')
+        return 0
+    # Порт мог быть занят другим приложением. Проверяем до запуска,
+    # чтобы не оставлять пользователя с неясной ошибкой в журнале.
+    bind_host = ('0.0.0.0' if cfg.host in ('0.0.0.0', '::')
+                 else cfg.host)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((bind_host, cfg.port))
+    except OSError as e:
+        print(f'Порт {cfg.port} занят или недоступен: {e}. Остановите '
+              'старый процесс (stop.bat) или измените port в config.ini.',
               file=sys.stderr)
         return 2
     env = os.environ.copy()

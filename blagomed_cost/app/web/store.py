@@ -130,6 +130,16 @@ def create_db(cfg) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     con = core_db.init_db(path)
     try:
+        # Новая БД должна быть сразу пригодна к расчёту: те же стартовые
+        # параметры, что и при переносе legacy (405 / 15% / 10%).
+        from app.core.migrate import INITIAL_SETTINGS, VALID_FROM
+        with con:
+            for key, value in INITIAL_SETTINGS:
+                con.execute(
+                    'INSERT OR IGNORE INTO settings'
+                    ' (key, value, valid_from, changed_by)'
+                    ' VALUES (?, ?, ?, ?)',
+                    (key, float(value), VALID_FROM, 'setup'))
         ok = con.execute('PRAGMA integrity_check').fetchone()[0]
         if ok != 'ok':
             raise WebStoreError(f'Проверка целостности новой БД: {ok}')

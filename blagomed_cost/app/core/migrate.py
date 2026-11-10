@@ -70,6 +70,11 @@ FIXED_COSTS = {
 }
 
 VALID_FROM = '2026-07-01'  # старт импорта — период контрольного файла 07.2026
+INITIAL_SETTINGS = (
+    ('ppu_rub_per_kg', 405.0),
+    ('margin_pct', 15.0),          # проценты: 15 = 15%, не 0.15
+    ('alert_pct', 10.0),
+)
 
 
 def _parse_period(value) -> str:
@@ -176,8 +181,7 @@ def migrate(db_path: Path, legacy_dir: Path | None = None, *,
                     ns['manual_prices'] += 1
 
             # 5) Параметры расчёта (на VALID_FROM)
-            for key, value in (('ppu_rub_per_kg', 405.0), ('margin_pct', 15.0),
-                               ('alert_pct', 10.0)):
+            for key, value in INITIAL_SETTINGS:
                 if con.execute(
                         'SELECT 1 FROM settings WHERE key = ? AND valid_from = ?',
                         (key, VALID_FROM)).fetchone() is None:
