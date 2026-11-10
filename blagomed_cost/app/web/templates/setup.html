@@ -1,0 +1,76 @@
+{% extends 'base.html' %}
+{% block title %}База данных{% endblock %}
+{% block content %}
+<h1>База данных</h1>
+
+<div class="card">
+  <dl class="kv">
+    <dt>Путь</dt><dd class="mono">{{ info.path }}</dd>
+    <dt>Существует</dt><dd>{{ 'да' if info.exists else 'нет' }}</dd>
+    {% if info.exists %}
+      <dt>Версия схемы (PRAGMA user_version)</dt><dd>{{ info.user_version }}</dd>
+      <dt>Проверка целостности</dt>
+      <dd>{% if info.integrity == 'ok' %}<span class="badge OK">ok</span>{% else %}{{ info.integrity or info.error }}{% endif %}</dd>
+      <dt>Размер</dt><dd>{{ (info.size / 1024) | round(1) }} КБ</dd>
+      <dt>Записей</dt><dd class="small">{% for t, n in info.counts.items() %}{{ t }}={{ n }}{% if not loop.last %}, {% endif %}{% endfor %}</dd>
+    {% endif %}
+  </dl>
+</div>
+
+{% if not info.exists %}
+  <div class="warn-box">
+    Существующая база не перезаписывается. Новая база создаётся штатными миграциями
+    и сразу проверяется на целостность. Для приёмки используйте отдельную тестовую БД
+    (переменная окружения BLAGOMED_DB или параметр --db).
+  </div>
+  <form method="post" action="{{ url_for('setup_create') }}">
+    <button type="submit">Создать новую базу по этому пути</button>
+  </form>
+{% else %}
+  <form method="post" action="{{ url_for('setup_verify') }}">
+    <button type="submit" class="secondary">Проверить целостность ещё раз</button>
+  </form>
+
+  <div class="card">
+    <h2>Схема базы</h2>
+    <p class="small">Версия схемы: {{ migrations.applied }}. Неприменённых
+      миграций: {{ migrations.pending|length }}.</p>
+    {% if migrations.pending %}
+      <div class="warn-box">Перед изменением существующей схемы будет создана
+        резервная копия в backup/. Применение миграций требует явного
+        подтверждения владельца.</div>
+      <p class="small mono">{{ migrations.pending|join(', ') }}</p>
+      <form method="post" action="{{ url_for('setup_migrate') }}">
+        <label style="flex-direction:row;align-items:center;gap:8px">
+          <input type="checkbox" name="confirm" value="yes" required>
+          Подтверждаю изменение схемы существующей БД
+        </label>
+        <p><button type="submit" class="danger">Применить миграции</button></p>
+      </form>
+    {% else %}
+      <p class="ok-box">Все миграции применены; схема актуальна.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Перенос данных старого бота</h2>
+    <p class="small">Используются файлы legacy/wb_catalog.json и legacy/cost_history.json.
+      Перенос идемпотентен (повторный запуск не создаёт дублей).</p>
+    <p class="small">
+      wb_catalog.json: {{ 'найден' if legacy['wb_catalog.json'] else 'нет' }},
+      cost_history.json: {{ 'найден' if legacy['cost_history.json'] else 'нет' }}
+    </p>
+    <form method="post" action="{{ url_for('setup_legacy') }}">
+      <button type="submit" class="secondary" {% if not (legacy['wb_catalog.json'] and legacy['cost_history.json']) %}disabled{% endif %}>
+        Перенести каталог и историю старого бота
+      </button>
+    </form>
+  </div>
+{% endif %}
+
+<div class="card">
+  <h2>Подключение к 1С</h2>
+  <p class="{{ 'ok-box' if onec.configured else 'warn-box' }}">{{ onec.message }}</p>
+  <p class="small muted">Пароль 1С в интерфейс не выводится. Запись в 1С запрещена.</p>
+</div>
+{% endblock %}

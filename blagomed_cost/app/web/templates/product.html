@@ -1,0 +1,141 @@
+{% extends 'base.html' %}
+{% block title %}Товар {{ p.sku }}{% endblock %}
+{% block content %}
+<h1>Товар {{ p.sku or p.id }} <span class="muted small">{{ p.name or '' }}</span></h1>
+<p><a href="{{ url_for('products', date=p.on_date) }}">← к списку товаров</a></p>
+
+<div class="card">
+  <dl class="kv">
+    <dt>ID / артикул 1С</dt><dd>{{ p.id }} / {{ p.sku or '—' }}</dd>
+    <dt>Наименование</dt><dd>{{ p.name or '—' }}</dd>
+    <dt>GUID 1С</dt>
+    <dd class="mono">{% if p.guid %}{{ p.guid }}{% else %}<span class="muted">не подтверждён (ручное
+      редактирование GUID запрещено)</span>{% endif %}</dd>
+    <dt>Закупочная цена на {{ p.on_date }}</dt>
+    <dd>{{ p.price|money if p.price is not none else '—' }}
+      <span class="small muted">({{ p.price_source_label }}{% if p.price_date %}, с {{ p.price_date }}{% endif %})</span>
+      {% if p.price_note %}<div class="reason">{{ p.price_note }}</div>{% endif %}</dd>
+    <dt>Вес ППУ</dt><dd>{{ p.weight_g|weight if p.weight_g is not none else 'не задан (ППУ = 0 — не ошибка)' }}
+      {% if p.weight_from %}<span class="small muted">с {{ p.weight_from }}</span>{% endif %}</dd>
+    <dt>Доп. расходы</dt>
+    <dd>{% if p.extras %}{% for e in p.extras %}{{ e.kind }}: {{ e.rub|money }} ₽{% if not loop.last %}; {% endif %}{% endfor %}
+      {% else %}нет{% endif %}
+      {% if p.extras_error %}<div class="danger-box">{{ p.extras_error }}</div>{% endif %}</dd>
+    <dt>Себестоимость</dt>
+    <dd><b>{{ p.cost if p.cost is not none else '—' }} ₽</b>
+      <span class="badge {{ p.status }}">{{ p.status_label }}</span>
+      {% if p.cost_error %}<div class="reason">{{ p.cost_error }}</div>{% endif %}</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="card">
+    <h2>Ручная закупочная цена</h2>
+    <p class="small muted">Ручная цена имеет приоритет и хранится с датой начала действия.
+      Переключение на 1С/снимок не удаляет историю ручных цен.</p>
+    <form class="inline" method="post" action="{{ url_for('product_manual', pid=p.id) }}">
+      <input type="hidden" name="action" value="set">
+      <label>Цена, ₽
+        <input name="price" inputmode="decimal" placeholder="например 743" required
+               value="{{ p.price if p.price is not none else '' }}">
+      </label>
+      <label>Действует с
+        <input type="date" name="valid_from" value="{{ today }}" required>
+      </label>
+      <button type="submit">Сохранить цену</button>
+    </form>
+    <form method="post" action="{{ url_for('product_manual', pid=p.id) }}" style="margin-top:8px">
+      <input type="hidden" name="action" value="clear">
+      <button type="submit" class="secondary">Использовать 1С/снимок (ручную отключить)</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Вес ППУ</h2>
+    <p class="small muted">Ставка ППУ — из настроек (по умолчанию 405 ₽/кг). Вес 0 допустим.
+      Новая запись с даты заменяет предыдущую для расчётов начиная с этой даты.</p>
+    <form class="inline" method="post" action="{{ url_for('product_ppu', pid=p.id) }}">
+      <label>Вес, г
+        <input name="weight_g" inputmode="numeric" placeholder="270" required
+               value="{{ p.weight_g if p.weight_g is not none else '' }}">
+      </label>
+      <label>Действует с
+        <input type="date" name="valid_from" value="{{ today }}" required>
+      </label>
+      <button type="submit">Сохранить вес</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Добавить/изменить доп. расход</h2>
+  <p class="small muted">Одинаковая статья с новой датой заменяет прежнюю с этой даты;
+    разные статьи суммируются. Дата окончания необязательна.</p>
+  <form class="inline" method="post" action="{{ url_for('product_extras', pid=p.id) }}">
+    <label>Статья
+      <input name="kind" list="kinds" placeholder="Поролон" required>
+      <datalist id="kinds">{% for k in kinds %}<option value="{{ k }}">{% endfor %}</datalist>
+    </label>
+    <label>Сумма, ₽
+      <input name="rub" inputmode="decimal" placeholder="110" required>
+    </label>
+    <label>С
+      <input type="date" name="valid_from" value="{{ today }}" required>
+    </label>
+    <label>По (необязательно)
+      <input type="date" name="valid_to">
+    </label>
+    <button type="submit">Сохранить расход</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>История изменений</h2>
+
+  <h3>Ручные цены</h3>
+  <table>
+    <tr><th>Действует с</th><th>Цена, ₽</th><th>Кто изменил</th></tr>
+    {% for r in history.manual_prices %}
+      <tr><td>{{ r.valid_from }}</td><td>{{ r.price|money }}</td><td>{{ r.changed_by or '—' }}</td></tr>
+    {% else %}<tr><td colspan="3" class="muted">нет записей</td></tr>{% endfor %}
+  </table>
+
+  <h3>Вес ППУ</h3>
+  <table>
+    <tr><th>Действует с</th><th>Вес</th><th>Кто изменил</th></tr>
+    {% for r in history.ppu_weights %}
+      <tr><td>{{ r.valid_from }}</td><td>{{ r.weight_g|weight }}</td><td>{{ r.changed_by or '—' }}</td></tr>
+    {% else %}<tr><td colspan="3" class="muted">нет записей</td></tr>{% endfor %}
+  </table>
+
+  <h3>Доп. расходы</h3>
+  <table>
+    <tr><th>Статья</th><th>Сумма, ₽</th><th>С</th><th>По</th><th>Кто</th><th></th></tr>
+    {% for r in history.extras %}
+      <tr>
+        <td>{{ r.kind }}</td><td>{{ r.rub|money }}</td><td>{{ r.valid_from }}</td>
+        <td>{{ r.valid_to or '—' }}</td><td>{{ r.changed_by or '—' }}</td>
+        <td>
+          {% if not r.valid_to %}
+          <form class="inline" method="post" action="{{ url_for('extra_close', eid=r.id) }}">
+            <input type="date" name="valid_to" required>
+            <button type="submit" class="secondary">Закрыть с даты</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}<tr><td colspan="6" class="muted">нет записей</td></tr>{% endfor %}
+  </table>
+
+  <details>
+    <summary>Аудит изменений (последние 50)</summary>
+    <table>
+      <tr><th>Когда</th><th>Кто</th><th>Сущность</th><th>Было</th><th>Стало</th></tr>
+      {% for a in history.audit %}
+        <tr><td class="small">{{ a.at }}</td><td>{{ a.user }}</td><td>{{ a.entity }}</td>
+          <td class="small mono">{{ a.old or '—' }}</td><td class="small mono">{{ a.new or '—' }}</td></tr>
+      {% else %}<tr><td colspan="5" class="muted">нет записей</td></tr>{% endfor %}
+    </table>
+  </details>
+</div>
+{% endblock %}

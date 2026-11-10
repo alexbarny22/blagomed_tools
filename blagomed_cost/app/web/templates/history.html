@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+{% block title %}История{% endblock %}
+{% block content %}
+<h1>История расчётов</h1>
+<p class="muted small">История не удаляется при перезапуске. Снимки себестоимости
+  неизменяемы: последующие корректировки цен/весов/расходов не меняют прошлые запуски.
+  Всего снимков: {{ total_snapshots }}, legacy-запусков: {{ legacy_runs }}.</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>№</th><th>Дата/время</th><th>Источник</th><th>Пользователь</th>
+      <th>Файлы</th><th>Строк</th><th>Успешно</th><th>Проблем</th><th>Снимков</th><th></th></tr>
+  {% for r in runs %}
+  <tr>
+    <td>{{ r.row.id }}</td>
+    <td>{{ r.row.started_at }}{% if r.row.finished_at %}<div class="small muted">завершён {{ r.row.finished_at }}</div>{% endif %}</td>
+    <td>{{ r.row.source_1c or '—' }}{% if r.meta.price_mode %}<div class="small muted">режим: {{ r.meta.price_mode }}</div>{% endif %}</td>
+    <td>{{ r.row.user or '—' }}</td>
+    <td class="small">
+      {% if r.meta.uploads %}
+        {% for mp, u in r.meta.uploads.items() %}{% if u %}{{ mp|upper }}: {{ u.original or 'файл' }}<br>{% endif %}{% endfor %}
+      {% else %}
+        {% if r.row.wb_file %}<div class="mono">WB: {{ r.row.wb_file.split('\\')[-1] }}</div>{% endif %}
+        {% if r.row.ozon_file %}<div class="mono">OZON: {{ r.row.ozon_file.split('\\')[-1] }}</div>{% endif %}
+      {% endif %}
+    </td>
+    <td>{{ (r.meta.summary.wb_total + r.meta.summary.ozon_total) if r.meta.summary else '—' }}</td>
+    <td>{{ r.meta.summary.ok if r.meta.summary else '—' }}</td>
+    <td>{% if r.meta.summary %}{{ r.meta.summary.skipped }}
+      {% if r.meta.summary.skipped %}<span class="badge draft">черновик</span>{% endif %}
+      {% else %}—{% endif %}</td>
+    <td>{{ r.row.snapshots }}</td>
+    <td>
+      <a href="{{ url_for('run_detail', run_id=r.row.id) }}">результаты</a><br>
+      {% if r.meta.summary and r.meta.summary.skipped %}
+        <a href="{{ url_for('issues', run_id=r.row.id) }}">проблемы</a>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="10" class="muted">История пуста.</td></tr>
+  {% endfor %}
+</table>
+</div>
+
+<div class="card">
+  <h2>Сохранность</h2>
+  <p class="small">Повторный запуск приложения использует тот же файл БД
+    <span class="mono">{{ cfg.db_path }}</span>; резервные копии перед изменением схемы
+    создаются штатным механизмом миграций в каталоге backup/.</p>
+</div>
+{% endblock %}

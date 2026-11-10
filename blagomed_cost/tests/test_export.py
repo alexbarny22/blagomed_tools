@@ -519,7 +519,8 @@ def test_gitignore_covers_secrets_and_xlsx():
     root = Path(__file__).resolve().parents[1]
     gi = (root / '.gitignore').read_text(encoding='utf-8-sig')
     for pattern in ('config.ini', '.env', '*.db', 'input/*.xlsx',
-                    'output/*.xlsx', 'legacy/wb_catalog.json'):
+                    'output/', 'data/', 'uploads/', 'logs/',
+                    'legacy/wb_catalog.json'):
         assert pattern in gi, f'.gitignore: нет шаблона {pattern!r}'
 
 
@@ -826,3 +827,48 @@ def test_verify_allows_target_cell_change_on_target_sheet(tmp_path):
     _resaved(p_src, p_dst, mutate)
     # Ошибки быть не должно: изменена только целевая ячейка целевого листа.
     exmod.verify_ouput_only_target(p_src, p_dst, 'wb', WB_COST_COL, {3: 1234})
+# ── Отсутствующий файл одной площадки (ТЗ №7, п. 8) ────────────────────────
+
+
+def test_single_wb_file_without_ozon(tmp_path):
+    con = base_db(tmp_path)
+    add_product(con, 'S1', manual=1, manual_price=500)
+    p_wb = make_wb(tmp_path / 'wb.xlsx', [('B1', 'S1', '0', None, None)])
+    out = tmp_path / 'out'
+    report = run_exports(con=con, calc_date='2026-11-01', wb_path=p_wb,
+                         ozon_path=None, out_dir=out, source_1c='none',
+                         persist=True)
+    assert report.summary['wb_total'] == 1
+    assert report.summary['ozon_total'] == 0
+    assert report.summary['ok'] == 1
+    assert report.wb_path and Path(report.wb_path).exists()
+    assert report.ozon_path is None
+    assert not list(out.glob('.tmp_*'))
+    row = con.execute('SELECT wb_file, ozon_file FROM runs ORDER BY id DESC'
+                      ).fetchone()
+    assert row['wb_file'] and row['ozon_file'] is None
+    ws = load_workbook(report.wb_path, data_only=True)['Себестоимость за 2026-11']
+    assert ws.cell(row=3, column=5).value is not None
+
+
+def test_single_ozon_file_without_wb(tmp_path):
+    con = base_db(tmp_path)
+    add_product(con, 'S1', manual=1, manual_price=500)
+    p_oz = make_ozon(tmp_path / 'oz.xlsx', [('O1', 'S1', 'Бренд', None)])
+    out = tmp_path / 'out'
+    report = run_exports(con=con, calc_date='2026-11-01', wb_path=None,
+                         ozon_path=p_oz, out_dir=out, source_1c='none',
+                         persist=True)
+    assert report.summary['wb_total'] == 0
+    assert report.summary['ozon_total'] == 1
+    assert report.summary['ok'] == 1
+    assert report.wb_path is None
+    assert report.ozon_path and Path(report.ozon_path).exists()
+    assert not list(out.glob('.tmp_*'))
+
+
+def test_no_files_rejected(tmp_path):
+    con = base_db(tmp_path)
+    with pytest.raises(ExportError, match='ни один входной файл'):
+        run_exports(con=con, calc_date='2026-11-01', wb_path=None,
+                    ozon_path=None, out_dir=tmp_path / 'out', persist=False)

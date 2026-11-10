@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+{% block title %}Товары{% endblock %}
+{% block content %}
+<h1>Товары <span class="muted small">на {{ on_date }}</span></h1>
+
+<form class="toolbar" method="get" action="{{ url_for('products') }}">
+  <label>Поиск по артикулу/наименованию
+    <input name="q" value="{{ q }}" placeholder="например 232946">
+  </label>
+  <label>Фильтр
+    <select name="status">
+      <option value="" {% if not status %}selected{% endif %}>все</option>
+      <option value="ok" {% if status == 'ok' %}selected{% endif %}>рассчитаны</option>
+      <option value="problem" {% if status == 'problem' %}selected{% endif %}>проблемные</option>
+      <option value="manual" {% if status == 'manual' %}selected{% endif %}>ручная цена</option>
+      <option value="no_price" {% if status == 'no_price' %}selected{% endif %}>без ручной цены</option>
+    </select>
+  </label>
+  <label>Дата
+    <input type="date" name="date" value="{{ on_date }}">
+  </label>
+  <button type="submit">Показать</button>
+</form>
+
+<p class="small muted">GUID 1С показывается только если он достоверно известен; вручную
+  GUID не редактируется. Цена «снимок» — историческая, не свежая цена 1С.</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Артикул</th><th>Наименование</th><th>GUID 1С</th><th>Закупочная цена</th>
+      <th>Источник цены</th><th>Вес ППУ</th><th>Доп. расходы</th>
+      <th>Себестоимость</th><th>Статус</th></tr>
+  {% for p in products %}
+  <tr>
+    <td><a href="{{ url_for('product_card', pid=p.id) }}">{{ p.sku or '—' }}</a></td>
+    <td>{{ p.name or '—' }}</td>
+    <td class="mono small">{% if p.guid %}{{ p.guid }}{% else %}<span class="muted">не подтверждён</span>{% endif %}</td>
+    <td>{{ p.price|money if p.price is not none else '—' }}</td>
+    <td class="small">{{ p.price_source_label }}{% if p.price_date %}<div class="muted">{{ p.price_date }}</div>{% endif %}</td>
+    <td>{{ p.weight_g|weight if p.weight_g is not none else '—' }}</td>
+    <td>{{ p.extras_sum|money }}</td>
+    <td><b>{{ p.cost if p.cost is not none else '—' }}</b></td>
+    <td><span class="badge {{ p.status }}">{{ p.status_label }}</span>
+      {% if p.cost_error %}<div class="reason">{{ p.cost_error }}</div>{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="9" class="muted">Ничего не найдено.</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% endblock %}

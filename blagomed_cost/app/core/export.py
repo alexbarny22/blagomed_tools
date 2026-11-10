@@ -689,8 +689,10 @@ def _run_key_signature(*, con, wb_path: Path, ozon_path: Path, calc_date: str,
     h.update(user.encode('utf-8', 'replace'))
     h.update(str(salt).encode('utf-8', 'replace'))
     for p in (wb_path, ozon_path):
-        h.update(str(p.resolve()).encode('utf-8', 'replace'))
-        h.update(sha256_file(p).encode('ascii'))
+        h.update((str(p.resolve()) if p is not None else 'none')
+                 .encode('utf-8', 'replace'))
+        h.update((sha256_file(p) if p is not None else 'none')
+                 .encode('ascii'))
     if con is not None:
         for key in sorted(calc.get_settings(con, calc_date)):
             h.update(key.encode('utf-8', 'replace'))
@@ -743,15 +745,25 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
     d = _calc_date(calc_date)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    wb_path, ozon_path = Path(wb_path), Path(ozon_path)
+    # Один из отчётов площадки может отсутствовать (например, в месяце не было
+    # продаж Ozon). Тогда обрабатывается только переданный файл; расчёт и
+    # публикация второго не имитируются.
+    wb_path = Path(wb_path) if wb_path else None
+    ozon_path = Path(ozon_path) if ozon_path else None
+    if wb_path is None and ozon_path is None:
+        raise ExportError('Не передан ни один входной файл (WB/Ozon)')
     for p in (wb_path, ozon_path):
-        if not p.exists():
+        if p is not None and not p.exists():
             raise ExportError(f'Входной файл не найден: {p}')
 
-    hashes = {'wb': sha256_file(wb_path), 'ozon': sha256_file(ozon_path)}
+    hashes = {}
+    if wb_path is not None:
+        hashes['wb'] = sha256_file(wb_path)
+    if ozon_path is not None:
+        hashes['ozon'] = sha256_file(ozon_path)
 
-    wb_rows = mapping.parse(wb_path, 'wb')
-    oz_rows = mapping.parse(ozon_path, 'ozon')
+    wb_rows = mapping.parse(wb_path, 'wb') if wb_path is not None else []
+    oz_rows = mapping.parse(ozon_path, 'ozon') if ozon_path is not None else []
 
     catalog = _load_catalog(con) if con is not None else {}
     outcomes, ok_unique = _resolve_rows(
@@ -793,12 +805,10 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
                 summary=summary, hashes=hashes, drafts=drafts)
             return _write_report_final(report, out_dir, d, stamp)
 
-    tmp_wb = out_dir / f'.tmp_wb_{stamp}.xlsx'
-    tmp_oz = out_dir / f'.tmp_ozon_{stamp}.xlsx'
-    wb_new, _ = build_excel(wb_path, 'wb',
-                            mapping.MAPPING['wb']['cost_col'], updates['wb'])
-    oz_new, _ = build_excel(ozon_path, 'ozon',
-                            mapping.MAPPING['ozon']['cost_col'], updates['ozon'])
+    tmp_wb = out_dir / f'.tmp_wb_{stamp}.xlsx' if wb_path is not None else None
+    tmp_oz = (out_dir / f'.tmp_ozon_{stamp}.xlsx'
+              if ozon_path is not None else None)
+    wb_new = oz_new = None
     try:
         # Детерминированная сериализация: openpyxl вписывает в core.xml текущее
         # время сохранения (см. _canonical_xlsx), поэтому два сохранения
@@ -806,20 +816,35 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
         # переиспользование уже опубликованного файла по хэшу не срабатывало бы.
         # Время берём из исходного файла — байты результата зависят только от
         # содержимого.
-        _save_xlsx_deterministic(wb_new, wb_path, tmp_wb)
-        _save_xlsx_deterministic(oz_new, ozon_path, tmp_oz)
+        if wb_path is not None:
+            wb_new, _ = build_excel(wb_path, 'wb',
+                                    mapping.MAPPING['wb']['cost_col'],
+                                    updates['wb'])
+            _save_xlsx_deterministic(wb_new, wb_path, tmp_wb)
+        if ozon_path is not None:
+            oz_new, _ = build_excel(ozon_path, 'ozon',
+                                    mapping.MAPPING['ozon']['cost_col'],
+                                    updates['ozon'])
+            _save_xlsx_deterministic(oz_new, ozon_path, tmp_oz)
     finally:
-        wb_new.close()
-        oz_new.close()
+        if wb_new is not None:
+            wb_new.close()
+        if oz_new is not None:
+            oz_new.close()
 
     # Структурная сверка и неизменность оригиналов
-    verify_ouput_only_target(wb_path, tmp_wb, 'wb',
-                             mapping.MAPPING['wb']['cost_col'], updates['wb'])
-    verify_ouput_only_target(ozon_path, tmp_oz, 'ozon',
-                             mapping.MAPPING['ozon']['cost_col'], updates['ozon'])
-    if (sha256_file(wb_path) != hashes['wb']
-            or sha256_file(ozon_path) != hashes['ozon']):
-        raise ExportError('SHA-256 исходных файлов изменился после обработки!')
+    if wb_path is not None:
+        verify_ouput_only_target(wb_path, tmp_wb, 'wb',
+                                 mapping.MAPPING['wb']['cost_col'],
+                                 updates['wb'])
+    if ozon_path is not None:
+        verify_ouput_only_target(ozon_path, tmp_oz, 'ozon',
+                                 mapping.MAPPING['ozon']['cost_col'],
+                                 updates['ozon'])
+    for p, key_name in ((wb_path, 'wb'), (ozon_path, 'ozon')):
+        if p is not None and sha256_file(p) != hashes[key_name]:
+            raise ExportError(
+                f'SHA-256 исходного файла {p.name} изменился после обработки!')
 
     # История: одна транзакция run+snapshots
     run_id = None
@@ -829,8 +854,10 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
         # ОБЯЗАТЕЛЬНО удаляем уже созданные временные XLSX.
         existing = runs.get_run_by_key(con, key)
         if existing is not None and existing['status'] == 'done':
-            tmp_wb.unlink(missing_ok=True)
-            tmp_oz.unlink(missing_ok=True)
+            if tmp_wb is not None:
+                tmp_wb.unlink(missing_ok=True)
+            if tmp_oz is not None:
+                tmp_oz.unlink(missing_ok=True)
             report = RunReport(
                 calc_date=d, run_id=existing['id'],
                 status='draft' if drafts else 'ok',
@@ -888,7 +915,11 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
     name_wb = f'WB_Себестоимость_{period}{suffix}.xlsx'
     name_oz = f'OZON_Себестоимость_{period}{suffix}.xlsx'
 
-    pairs = [('wb', tmp_wb, name_wb), ('ozon', tmp_oz, name_oz)]
+    pairs = []
+    if tmp_wb is not None:
+        pairs.append(('wb', tmp_wb, name_wb))
+    if tmp_oz is not None:
+        pairs.append(('ozon', tmp_oz, name_oz))
     finals: dict[str, Path] = {}
     published: list[Path] = []
     try:
@@ -906,22 +937,27 @@ def run_exports(*, con, calc_date, wb_path, ozon_path, out_dir,
         for p_ in published:
             p_.unlink(missing_ok=True)           # наши недописанные новые файлы
         for t in (tmp_wb, tmp_oz):
-            t.unlink(missing_ok=True)
+            if t is not None:
+                t.unlink(missing_ok=True)
         if run_id is not None and con is not None:
             with con:
                 runs.fail_run(con, run_id, error=f'публикация: {e}')
         raise ExportError(f'Публикация файлов не удалась: {e}') from e
-    final_wb, final_oz = finals['wb'], finals['ozon']
+    final_wb = finals.get('wb')
+    final_oz = finals.get('ozon')
 
     if run_id is not None and con is not None:
         with con:
-            runs.finish_run(con, run_id, status='done',
-                            wb_file=str(final_wb), ozon_file=str(final_oz))
+            runs.finish_run(
+                con, run_id, status='done',
+                wb_file=str(final_wb) if final_wb is not None else None,
+                ozon_file=str(final_oz) if final_oz is not None else None)
 
     report = RunReport(
         calc_date=d, run_id=run_id,
         status='draft' if drafts else 'ok',
-        wb_path=str(final_wb), ozon_path=str(final_oz),
+        wb_path=str(final_wb) if final_wb is not None else None,
+        ozon_path=str(final_oz) if final_oz is not None else None,
         report_path=None, rows=_sorted_outcomes(outcomes),
         summary=summary, hashes=hashes, drafts=drafts)
     return _write_report_final(report, out_dir, d, stamp)

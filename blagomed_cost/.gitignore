@@ -1,6 +1,9 @@
 # Секреты и локальная конфигурация
 config.ini
 .env
+# Код приложения config.py не является секретом (корневой .gitignore
+# игнорирует файлы с таким именем в других проектах).
+!app/web/config.py
 
 # Файлы-память старого бота (в git не попадают, см. README legacy)
 legacy/wb_catalog.json
@@ -29,9 +32,12 @@ backup/
 
 # Входные отчёты MPSPACE и результаты расчёта
 input/*.xlsx
-output/*.xlsx
+output/
+logs/
+uploads/
+data/
+*.pid
 # Диагностика 1С (tools/onec_diag.py) — в git не попадает
-output/*.txt
 
 # Временные результаты анализа xlsx (tools/inspect_xlsx.py, tools/peek_xlsx.py)
 *.inspect.txt
