@@ -5,8 +5,11 @@
   Как это работает:
     1) Этот компьютер кладёт запрос в АГЕНТЫ\cezar\pairing\out\request-<ХОСТ>.json.
        В запросе только ПУБЛИЧНЫЙ ключ. Приватный ключ не покидает компьютер никогда.
-    2) Домашний компьютер (или человек) добавляет публичный ключ в
-       /root/.ssh/authorized_keys на VPS — один раз, вручную.
+    2) Машина с уже авторизованным административным каналом (домашний ПК)
+       выполняет cezar-authorize.ps1: добавляет публичный ключ в
+       /home/cezar/.ssh/authorized_keys и, ТОЛЬКО после успешной проверки,
+       формирует ответ. Этот скрипт сам вызывает authorize для pending-запроса
+       другой машины, если задан канал: $env:AGENTS_ADMIN_SSH = <ssh-алиас>.
     3) Ответ кладётся в АГЕНТЫ\cezar\pairing\in\response-<ХОСТ>.json:
          { "pairing_id": "...", "host": "SKLAD", "status": "approved", ... }
     4) Этот скрипт (задача планировщика) видит ответ, проверяет SSH-доступ,
@@ -42,6 +45,34 @@ $inDir  = Join-Path $PairRoot 'in'
 $outDir = Join-Path $PairRoot 'out'
 if (-not (Test-Path -LiteralPath $inDir))  { New-Item -ItemType Directory -Force -Path $inDir  | Out-Null }
 if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
+
+# 0. Обратное направление того же протокола: pending-запросы других машин.
+#    Обрабатывает только машина, у которой явно задан авторизованный канал.
+$adminHost = $env:AGENTS_ADMIN_SSH
+$pending = Get-ChildItem -LiteralPath $outDir -File -Filter 'request-*.json' -ErrorAction SilentlyContinue
+foreach ($rf in $pending) {
+  $rq = $null
+  try { $rq = Get-Content -LiteralPath $rf.FullName -Raw -Encoding UTF8 | ConvertFrom-Json } catch { continue }
+  $reqHost = [string]$rq.machine.hostname
+  if (-not $reqHost -or $reqHost -eq $hostName) { continue }
+  $respFile = Join-Path $inDir ("response-{0}.json" -f $reqHost)
+  if (Test-Path -LiteralPath $respFile) { continue }
+
+  if (-not $adminHost) {
+    Write-Log ("pending-запрос от {0}: канал не задан (AGENTS_ADMIN_SSH) — ответ не формируется" -f $reqHost) 'WARN'
+    continue
+  }
+
+  $auth = Join-Path (Split-Path -Parent $PSCommandPath) 'cezar-authorize.ps1'
+  if (-not (Test-Path -LiteralPath $auth)) { $auth = Join-Path $AgentSync 'cezar-authorize.ps1' }
+  if (-not (Test-Path -LiteralPath $auth)) { Write-Log "нет cezar-authorize.ps1 ($auth)" 'ERROR'; continue }
+
+  Write-Log ("pending-запрос от {0}: привязка ключа через канал '{1}'" -f $reqHost, $adminHost)
+  $p = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $auth,
+    '-AdminHost', $adminHost, '-PairRoot', $PairRoot, '-RequesterHost', $reqHost)
+  Write-Log ("cezar-authorize: exit={0}, ответ появился={1}" -f $p.ExitCode, (Test-Path -LiteralPath $respFile))
+}
 
 $responses = Get-ChildItem -LiteralPath $inDir -File -Filter '*.json' -ErrorAction SilentlyContinue
 if (-not $responses) { exit 0 }
