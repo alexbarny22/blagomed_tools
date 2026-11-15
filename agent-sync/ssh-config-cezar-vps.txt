@@ -1,0 +1,30 @@
+# SSH-профиль склада (несекретно: только пути и отпечатки).
+# Фактический файл: %USERPROFILE%\.ssh\config
+# Резервная копия прежней версии: %USERPROFILE%\.ssh\config.bak-<дата>
+
+Host cezar-vps
+    HostName 46.8.203.58
+    User cezar
+    Port 22
+    IdentityFile C:/Users/SSSR/.ssh/ai-agent-vps-2026_ed25519
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes
+    HostKeyAlias 46.8.203.58
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+
+# Закреплённый host key (проверен 15.11.2026):
+#   ssh-ed25519 SHA256:n56umM73A1u7HujwziR8BUP6f5FRFcfVR/dTrFF1Qqw
+#   ssh-rsa     SHA256:oMP1moRHqrBpPCYz5pAx6SMItNtvtQOi034IvtL1+Gk
+#   ecdsa       SHA256:LmAOpf/xP9Q4qdUmkmgOqmRvPhG9ZMQtfTAVrmn4AfY
+# Пользовательских секретов в профиле нет; приватный ключ лежит отдельно
+# и в репозиторий не попадает.
+
+Host ai-agent-vps
+    HostName 46.8.203.58
+    User root
+    Port 22
+    IdentityFile C:/Users/SSSR/.ssh/ai-agent-vps-2026_ed25519
+    IdentitiesOnly yes
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
