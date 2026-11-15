@@ -1,0 +1,2 @@
+# bash-скрипты должны попадать на VPS с LF, иначе /bin/bash ломается на CR.
+*.sh text eol=lf
