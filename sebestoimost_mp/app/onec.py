@@ -567,7 +567,7 @@ def _status_from_error(e: OnecError) -> ItemStatus:
     if '401' in msg or '401' in getattr(e, 'code', '') or \
             'auth' in msg.lower() or 'авторизац' in msg.lower():
         return ItemStatus.AUTH_ERROR
-    if 'timeout' in msg.lower() or 'таймаут' в msg.lower() \
+    if 'timeout' in msg.lower() or 'таймаут' in msg.lower() \
             or 'убит' in msg.lower():
         return ItemStatus.TIMEOUT
     return ItemStatus.CONNECT_ERROR
