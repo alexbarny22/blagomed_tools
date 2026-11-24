@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>БЛАГОМЕД — Себестоимость МП</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: Arial, sans-serif; background: #f5f5f5; color: #333; }
+header {
+    background: #555; color: #fff; padding: 10px 20px;
+    display: flex; align-items: center; justify-content: space-between;
+}
+header h1 { font-size: 1.4em; }
+nav a {
+    color: #fff; text-decoration: none; margin-left: 15px; font-size: 0.9em;
+}
+nav a:hover { text-decoration: underline; }
+main { padding: 20px; max-width: 900px; margin: 0 auto; }
+.flash { padding: 10px; margin: 10px 0; border-radius: 4px; }
+.flash-ok { background: #e6f4e6; color: #256b25; border: 1px solid #9ed39e; }
+.flash-err { background: #fbe6e6; color: #8a2222; border: 1px solid #e0a3a3; }
+</style>
+</head>
+<body>
+<header>
+    <h1>БЛАГОМЕД — Себестоимость МП</h1>
+    <nav>
+        <a href="/">Расчёт</a>
+        <a href="#">Товары</a>
+        <a href="#">Расходы</a>
+        <a href="#">Проблемные</a>
+        <a href="#">История</a>
+    </nav>
+</header>
+<main>
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+    <div class="flash flash-{{ category }}">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

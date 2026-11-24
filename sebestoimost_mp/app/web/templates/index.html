@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Расчёт себестоимости</h2>
+<form method="post" enctype="multipart/form-data" action="#">
+    <fieldset style="margin-top:15px; border:1px solid #ccc; padding:15px;">
+        <legend>Загрузка файлов Wildberries и Ozon</legend>
+        <div style="margin-bottom:10px;">
+            <label>Wildberries (.xlsx):</label>
+            <input type="file" name="wb_file" accept=".xlsx">
+        </div>
+        <div style="margin-bottom:10px;">
+            <label>Ozon (.xlsx):</label>
+            <input type="file" name="ozon_file" accept=".xlsx">
+        </div>
+        <div style="margin-bottom:10px;">
+            <label>Дата расчёта:</label>
+            <input type="date" name="calc_date" value="{{ today }}">
+        </div>
+        <button type="submit" disabled style="background:#aaa; color:#fff; border:none; padding:8px 20px; border-radius:4px; cursor:not-allowed;">Рассчитать</button>
+        <p style="font-size:0.85em; color:#777; margin-top:10px;">
+            * Загрузка и расчёт станут доступны в следующей версии.
+        </p>
+    </fieldset>
+</form>
+{% endblock %}

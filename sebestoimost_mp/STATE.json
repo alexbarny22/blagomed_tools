@@ -5,13 +5,14 @@
   "branch": "feature/sebestoimost-mp-v3",
   "developer": "polza:deepseek/deepseek-v4-flash",
   "controller": "kimi",
-  "current_stage": 1,
+  "current_stage": 2,
   "stages": {
-    "0": {
+    "0": {"status": "PASS", "commit": "a8b8dff7414b33df00d963042bcbb8b4b8db238a"},
+    "1": {
       "status": "PASS",
       "commit": "pending",
-      "decision": {"stage": 0, "status": "PASS", "blocking_issues": [], "next_stage": 1},
-      "notes": "План зафиксирован в PLAN.md. Оба эталонных XLSX проверены контролёром: структура совпадает с ТЗ п.2. Лишних функций в плане нет."
+      "decision": {"stage": 1, "status": "PASS", "blocking_issues": [], "next_stage": 2},
+      "notes": "Сервер стартует (waitress, 127.0.0.1:8085), GET / -> 200, /health -> ok, SQLite создаётся и не перезаписывается (pytest 4/4). Неблокирующее: close_db зарегистрировать teardown на этапе 2."
     }
   }
 }
