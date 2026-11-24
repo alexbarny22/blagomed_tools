@@ -5,7 +5,7 @@
   "branch": "feature/sebestoimost-mp-v3",
   "developer": "polza:deepseek-v4-flash + glm-5.3-flash + deepseek-v4.1-flash-1017",
   "controller": "kimi",
-  "current_stage": 6,
+  "current_stage": 8,
   "stages": {
     "0": {
       "status": "PASS",
@@ -46,6 +46,16 @@
       "status": "PASS",
       "commit": "единый коммит этапа 5 (см. git log: 'stage 5: полный UI')",
       "notes": "pytest 47/47 (39 старых + 8 новых test_web_pages.py). UI: поиск товаров (Python-side, SQLite LOWER только ASCII), страницы /problems и /history, возврат на исходную страницу (next), оригинальные имена файлов в uploads, кнопки скачивания, последние загрузки на главной. Найден и исправлен баг: secure_filename кириллического имени терял .xlsx -> openpyxl падал, upload молча не работал; добавлено принудительное расширение."
+    },
+    "6": {
+      "status": "PASS",
+      "commit": "коммит этапов 6-7 (см. git log)",
+      "notes": "INSTALL/START/STOP.cmd: cp866+CRLF, chcp 866, пути в кавычках, venv, config.ini и БД не перезаписываются. pytest 54/54 (+7 test_installer.py)."
+    },
+    "7": {
+      "status": "BLOCK",
+      "commit": "коммит этапов 6-7 (см. git log)",
+      "notes": "E2E_CHECKLIST.md (12 шагов) готов. Живой прогон — только на Windows-машине владельца с боевой 1С; песочница проверить не может. Снятие BLOCK — прогон владельцем."
     }
   }
 }
