@@ -8,6 +8,11 @@ from app.db import init_db
 def main():
     try:
         root = Path(__file__).parent.resolve()
+        try:
+            from updater import auto_update
+            auto_update(root)
+        except Exception as e:
+            print(f"[ОБНОВЛЕНИЕ] пропущено: {e}")
         db_path = root / 'data' / 'sebestoimost.db'
         init_db(str(db_path))
         app = create_app(root)
