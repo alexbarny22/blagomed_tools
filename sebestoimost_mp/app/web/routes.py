@@ -129,6 +129,13 @@ def _last_setting_value(db, key):
     return row['value'] if row else None
 
 
+def _redirect_back(default='web.products'):
+    """Редирект после формы: скрытое поле next из белого списка, иначе default."""
+    target = (request.form.get('next') or '').strip()
+    allowed = {'products': 'web.products', 'problems': 'web.problems'}
+    return redirect(url_for(allowed.get(target, default)))
+
+
 # ----------------------------------------------------------------- routes ---
 
 @web_bp.route('/')
@@ -136,7 +143,9 @@ def index():
     db = get_db()
     today = _today()
     last_run = _row_dict(calc_run.get_last_run(db))
-    return render_template('index.html', today=today, last_run=last_run)
+    last_uploads = {mp: _last_upload(db, mp) for mp in MARKETPLACES}
+    return render_template('index.html', today=today, last_run=last_run,
+                           last_uploads=last_uploads)
 
 
 @web_bp.route('/health')
@@ -162,6 +171,8 @@ def upload():
         try:
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             safe_name = f"{marketplace}_{timestamp}_{secure_filename(file_obj.filename)}"
+            if not safe_name.lower().endswith('.xlsx'):
+                safe_name += '.xlsx'
             stored_path = os.path.join(current_app.config['UPLOAD_DIR'], safe_name)
             file_obj.save(stored_path)
             spec = excel_io.TEMPLATES[marketplace]
@@ -177,7 +188,7 @@ def upload():
                     new_products += cur.rowcount
             db.execute(
                 "INSERT INTO uploads (marketplace, filename, stored_path, uploaded_at) VALUES (?, ?, ?, ?)",
-                (marketplace, safe_name, stored_path, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                (marketplace, file_obj.filename, stored_path, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
             )
             db.commit()
             results.append(f"{marketplace.upper()}: загружено {len(items)} строк, новых товаров {new_products}")
@@ -313,6 +324,7 @@ def download(marketplace):
 
 @web_bp.route('/products')
 def products():
+    q = (request.args.get('q') or '').strip()
     db = get_db()
     rows = db.execute(
         "SELECT p.id AS id, "
@@ -329,18 +341,26 @@ def products():
         "ORDER BY p.article_supplier"
     ).fetchall()
     product_list = [_row_dict(row) for row in rows]
-    return render_template('products.html', products=product_list)
+    if q:
+        # Регистронезависимый поиск, включая кириллицу (LOWER в SQLite — ASCII).
+        needle = q.lower()
+        product_list = [
+            p for p in product_list
+            if needle in (p['article_supplier'] or '').lower()
+            or needle in (p['name'] or '').lower()
+        ]
+    return render_template('products.html', products=product_list, q=q)
 
 
 @web_bp.route('/products/<int:pid>/price', methods=['POST'])
 def product_price(pid):
     price = _parse_non_negative_decimal(request.form.get('price', ''), 'цена')
     if price is None:
-        return redirect(url_for('web.products'))
+        return _redirect_back()
 
     valid_from = _parse_date_or_today(request.form.get('valid_from', ''))
     if valid_from is None:
-        return redirect(url_for('web.products'))
+        return _redirect_back()
 
     db = get_db()
     db.execute(
@@ -353,7 +373,7 @@ def product_price(pid):
     )
     db.commit()
     flash('Ручная цена сохранена', 'ok')
-    return redirect(url_for('web.products'))
+    return _redirect_back()
 
 
 @web_bp.route('/products/<int:pid>/toggle_manual', methods=['POST'])
@@ -364,18 +384,18 @@ def product_toggle_manual(pid):
         (pid,),
     )
     db.commit()
-    return redirect(url_for('web.products'))
+    return _redirect_back()
 
 
 @web_bp.route('/products/<int:pid>/weight', methods=['POST'])
 def product_weight(pid):
     weight_g = _parse_int(request.form.get('weight_g', ''), 'вес ППУ, г', low=0, high=10000)
     if weight_g is None:
-        return redirect(url_for('web.products'))
+        return _redirect_back()
 
     valid_from = _parse_date_or_today(request.form.get('valid_from', ''))
     if valid_from is None:
-        return redirect(url_for('web.products'))
+        return _redirect_back()
 
     db = get_db()
     db.execute(
@@ -384,7 +404,29 @@ def product_weight(pid):
     )
     db.commit()
     flash('Вес ППУ сохранён', 'ok')
-    return redirect(url_for('web.products'))
+    return _redirect_back()
+
+
+@web_bp.route('/problems')
+def problems():
+    db = get_db()
+    run = _row_dict(calc_run.get_last_run(db))
+    if run is None:
+        return render_template('problems.html', run=None, problems=[])
+    rows = calc_run.get_run_problems(db, run['id'])
+    problem_list = [_row_dict(row) for row in rows]
+    return render_template('problems.html', run=run, problems=problem_list)
+
+
+@web_bp.route('/history')
+def history():
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, calc_date, created_at, total, ok, problems "
+        "FROM runs ORDER BY id DESC LIMIT 50"
+    ).fetchall()
+    run_list = [_row_dict(row) for row in rows]
+    return render_template('history.html', runs=run_list)
 
 
 @web_bp.route('/expenses')
