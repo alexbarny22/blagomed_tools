@@ -1,25 +1,37 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>Расчёт себестоимости</h2>
-<form method="post" enctype="multipart/form-data" action="#">
-    <fieldset style="margin-top:15px; border:1px solid #ccc; padding:15px;">
-        <legend>Загрузка файлов Wildberries и Ozon</legend>
-        <div style="margin-bottom:10px;">
-            <label>Wildberries (.xlsx):</label>
-            <input type="file" name="wb_file" accept=".xlsx">
-        </div>
-        <div style="margin-bottom:10px;">
-            <label>Ozon (.xlsx):</label>
-            <input type="file" name="ozon_file" accept=".xlsx">
-        </div>
-        <div style="margin-bottom:10px;">
-            <label>Дата расчёта:</label>
-            <input type="date" name="calc_date" value="{{ today }}">
-        </div>
-        <button type="submit" disabled style="background:#aaa; color:#fff; border:none; padding:8px 20px; border-radius:4px; cursor:not-allowed;">Рассчитать</button>
-        <p style="font-size:0.85em; color:#777; margin-top:10px;">
-            * Загрузка и расчёт станут доступны в следующей версии.
-        </p>
-    </fieldset>
+<style>
+  fieldset {
+    border: 1px solid #888;
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+  label {
+    display: block;
+    margin: 0.5rem 0 0.2rem;
+  }
+</style>
+
+<h1>Расчёт себестоимости</h1>
+
+<form action="/upload" method="post" enctype="multipart/form-data">
+  <fieldset>
+    <legend>Файлы</legend>
+
+    <label for="wb_file">Wildberries (.xlsx)</label>
+    <input id="wb_file" type="file" name="wb_file" accept=".xlsx">
+
+    <label for="ozon_file">Ozon (.xlsx)</label>
+    <input id="ozon_file" type="file" name="ozon_file" accept=".xlsx">
+
+    <label for="calc_date">Дата расчёта</label>
+    <input id="calc_date" type="date" name="calc_date" value="{{ today }}">
+
+    <button type="submit">Загрузить файлы</button>
+  </fieldset>
 </form>
+
+<h2>Скачать заполненные файлы</h2>
+<p><a href="/download/wb">Скачать WB</a></p>
+<p><a href="/download/ozon">Скачать Ozon</a></p>
 {% endblock %}

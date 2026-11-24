@@ -3,16 +3,17 @@
   "tz_version": "3.0 FINAL",
   "repo": "alexbarny22/blagomed_tools",
   "branch": "feature/sebestoimost-mp-v3",
-  "developer": "polza:deepseek/deepseek-v4-flash",
+  "developer": "polza:deepseek-v4-flash + glm-5.3-flash + deepseek-v4.1-flash-1017",
   "controller": "kimi",
-  "current_stage": 2,
+  "current_stage": 3,
   "stages": {
     "0": {"status": "PASS", "commit": "a8b8dff7414b33df00d963042bcbb8b4b8db238a"},
-    "1": {
+    "1": {"status": "PASS", "commit": "120115de0f82236bd7bd7a3503d9cf9364e0202e"},
+    "2": {
       "status": "PASS",
       "commit": "pending",
-      "decision": {"stage": 1, "status": "PASS", "blocking_issues": [], "next_stage": 2},
-      "notes": "Сервер стартует (waitress, 127.0.0.1:8085), GET / -> 200, /health -> ok, SQLite создаётся и не перезаписывается (pytest 4/4). Неблокирующее: close_db зарегистрировать teardown на этапе 2."
+      "decision": {"stage": 2, "status": "PASS", "blocking_issues": [], "next_stage": 3},
+      "notes": "pytest 12/12. Проверка на реальных эталонах: WB — изменена ровно E3; Ozon — D4 и D19; полный diff без посторонних ячеек; оригиналы байт-в-байт неизменны. Неблокирующее: secure_filename съедает кириллицу в имени файла — исправить на этапе 5."
     }
   }
 }
