@@ -7,6 +7,7 @@ def create_app(root: Path = None) -> Flask:
     if root is None:
         root = Path(__file__).parent.parent.resolve()
     app = Flask(__name__)
+    app.config['ROOT'] = str(root)
     app.config['DB_PATH'] = str(root / 'data' / 'sebestoimost.db')
     app.config['UPLOAD_DIR'] = str(root / 'data' / 'uploads')
     app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
