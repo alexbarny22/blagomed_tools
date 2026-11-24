@@ -185,14 +185,19 @@ def test_download_route(app, client, make_wb):
     conn.commit()
     conn.close()
 
+    # сначала расчёт, потом скачивание (этап 3: download берёт последний прогон)
+    resp = client.post("/calc", data={"calc_date": "2026-06-01"})
+    assert resp.status_code == 302
+
     resp = client.get("/download/wb")
     assert resp.status_code == 200
 
     wb = load_workbook(io.BytesIO(resp.data))
     ws = wb.active
-    assert ws["E3"].value == 1500
+    # floor(1500 * 1.15) = 1725, floor(2000 * 1.15) = 2300
+    assert ws["E3"].value == 1725
     assert ws["E4"].value is None
-    assert ws["E5"].value == 2000
+    assert ws["E5"].value == 2300
 
 
 def test_empty_items_skipped(tmp_path):
