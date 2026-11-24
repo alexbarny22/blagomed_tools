@@ -18,6 +18,7 @@ from werkzeug.utils import secure_filename
 import app.calc_run as calc_run
 import app.db as db_module
 import app.excel_io as excel_io
+import app.price_source as price_source
 
 web_bp = Blueprint('web', __name__, template_folder='templates')
 
@@ -218,9 +219,33 @@ def calc():
         flash('Сначала загрузите файлы WB/Ozon', 'err')
         return redirect(url_for('web.index'))
 
+    # Цены 1С для товаров с manual_price=0 (только чтение, этап 4)
+    prices = None
+    price_errors = None
+    external = [_row_dict(r) for r in db.execute(
+        "SELECT id, article_supplier, name, onec_guid "
+        "FROM products WHERE manual_price = 0").fetchall()]
+    if external:
+        pm = None
+        try:
+            pm = price_source.load_params(current_app.config['ROOT'])
+        except Exception as e:
+            price_errors = {p['id']: f'1С: ошибка config.ini — {e}'
+                            for p in external}
+            flash(f'Ошибка config.ini: {e}', 'err')
+        if pm is None and price_errors is None:
+            flash('1С не настроена (нет config.ini) — внешние цены не получены',
+                  'err')
+            price_errors = {p['id']: '1С не настроена: нет config.ini'
+                            for p in external}
+        elif pm is not None:
+            prices, price_errors = price_source.fetch_prices(
+                external, pm[0], pm[1])
+
     try:
         run_id = calc_run.run_calculation(
-            db, calc_date=calc_date, marketplaces=marketplaces
+            db, calc_date=calc_date, marketplaces=marketplaces,
+            prices=prices, price_errors=price_errors,
         )
     except Exception as e:
         flash(f'Ошибка расчёта: {str(e)}', 'err')
