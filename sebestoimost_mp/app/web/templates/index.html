@@ -15,6 +15,21 @@
             <button type="submit">Загрузить файлы</button>
         </p>
     </form>
+    <h2>Загруженные файлы</h2>
+    <p>
+        {% if last_uploads['wb'] %}
+        WB: {{ last_uploads['wb'].filename }} ({{ last_uploads['wb'].uploaded_at }})
+        {% else %}
+        WB: не загружен
+        {% endif %}
+    </p>
+    <p>
+        {% if last_uploads['ozon'] %}
+        Ozon: {{ last_uploads['ozon'].filename }} ({{ last_uploads['ozon'].uploaded_at }})
+        {% else %}
+        Ozon: не загружен
+        {% endif %}
+    </p>
 </section>
 
 <section>
@@ -62,9 +77,8 @@
 <section>
     <h2>Скачать заполненные файлы</h2>
     <p>
-        <a href="{{ url_for('web.download', marketplace='wb') }}">Скачать WB</a>
-        &nbsp;|&nbsp;
-        <a href="{{ url_for('web.download', marketplace='ozon') }}">Скачать Ozon</a>
+        <a class="btn" href="{{ url_for('web.download', marketplace='wb') }}">Скачать WB</a>
+        <a class="btn" href="{{ url_for('web.download', marketplace='ozon') }}">Скачать Ozon</a>
     </p>
 </section>
 {% endblock %}

@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Проблемные позиции</h1>
+
+{% if run is none %}
+<p>Расчёт ещё не выполнялся</p>
+{% else %}
+    {% if problems %}
+    <p>Прогон №{{ run.id }} от {{ run.created_at }}</p>
+    <table>
+        <thead>
+            <tr>
+                <th>МП</th>
+                <th>Строка</th>
+                <th>Артикул МП</th>
+                <th>Артикул поставщика</th>
+                <th>Причина</th>
+                <th>Исправление</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in problems %}
+            <tr>
+                <td>{{ 'WB' if p.marketplace == 'wb' else 'Ozon' }}</td>
+                <td>{{ p.row_num }}</td>
+                <td>{{ p.article_mp }}</td>
+                <td>{{ p.article_supplier }}</td>
+                <td>{{ p.message }}</td>
+                <td>
+                    {% if p.product_id is not none %}
+                    <form class="inline" method="post" action="{{ url_for('web.product_price', pid=p.product_id) }}">
+                        <input type="text" name="price" size="8" placeholder="цена">
+                        <input type="date" name="valid_from">
+                        <input type="hidden" name="next" value="problems">
+                        <button type="submit">Задать цену</button>
+                    </form>
+                    {% else %}
+                    —
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <p>После исправления выполните расчёт заново на странице „Расчёт“.</p>
+    {% else %}
+    <p>Проблемных позиций нет</p>
+    <p>Прогон №{{ run.id }} от {{ run.created_at }}</p>
+    {% endif %}
+{% endif %}
+{% endblock %}
