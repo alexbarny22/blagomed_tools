@@ -51,3 +51,9 @@ def test_stop_kills_run_py():
     _, text = _read('STOP.cmd')
     assert 'run\\.py' in text or 'run.py' in text
     assert 'Stop-Process' in text
+
+
+def test_requirements_include_pywin32_for_windows():
+    text = (ROOT / 'requirements.txt').read_text(encoding='utf-8')
+    assert 'pywin32' in text, 'COM-worker требует pywin32 (win32com)'
+    assert 'sys_platform' in text, 'pywin32 должен быть с маркером win32, иначе ломает Linux'
