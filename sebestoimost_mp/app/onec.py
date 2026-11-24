@@ -49,6 +49,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
@@ -190,6 +191,27 @@ def _same_object(a: _Cand, b: _Cand) -> bool:
             and _guid_eq(a.guid, b.guid)
             and normalize_name(a.name) == normalize_name(b.name)
             and (a.sku or '') == (b.sku or ''))
+
+
+def _latest_price_candidate(cands):
+    """Кандидат со строго самой свежей price_date.
+
+    Учитываются только кандидаты с заданной и разбираемой price_date.
+    Возвращает None, если дат нет или максимум делят несколько кандидатов.
+    """
+    dated = []
+    for c in cands:
+        if not c.price_date:
+            continue
+        try:
+            dated.append((date.fromisoformat(c.price_date), c))
+        except (TypeError, ValueError):
+            continue
+    if not dated:
+        return None
+    newest = max(d for d, _ in dated)
+    top = [c for d, c in dated if d == newest]
+    return top[0] if len(top) == 1 else None
 
 
 def _uniq_candidates(got: list[_Cand]) -> list[_Cand]:
@@ -371,6 +393,13 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
                                     strict_source=True)
                 if by_name:
                     got = by_name
+            # Дубли артикула: различаем по актуальной цене —
+            # работает та, что установлена позже (уникальный максимум price_date).
+            latest = _latest_price_candidate(got)
+            if latest is not None:
+                return _to_item(latest, source, 'sku+latest_price',
+                                expected_price_type, expected_supplier,
+                                strict_source=True)
             diff = _characteristics_diff(got)
             return OnecItem(
                 sku_1c=req.sku_1c, name_1c=req.name_1c, source=source,
