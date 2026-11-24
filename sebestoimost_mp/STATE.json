@@ -5,15 +5,20 @@
   "branch": "feature/sebestoimost-mp-v3",
   "developer": "polza:deepseek-v4-flash + glm-5.3-flash + deepseek-v4.1-flash-1017",
   "controller": "kimi",
-  "current_stage": 3,
+  "current_stage": 4,
   "stages": {
     "0": {"status": "PASS", "commit": "a8b8dff7414b33df00d963042bcbb8b4b8db238a"},
     "1": {"status": "PASS", "commit": "120115de0f82236bd7bd7a3503d9cf9364e0202e"},
     "2": {
       "status": "PASS",
-      "commit": "pending",
-      "decision": {"stage": 2, "status": "PASS", "blocking_issues": [], "next_stage": 3},
-      "notes": "pytest 12/12. Проверка на реальных эталонах: WB — изменена ровно E3; Ozon — D4 и D19; полный diff без посторонних ячеек; оригиналы байт-в-байт неизменны. Неблокирующее: secure_filename съедает кириллицу в имени файла — исправить на этапе 5."
+      "commit": "984d230",
+      "notes": "pytest 12/12. Реальные эталоны: WB — только E3; Ozon — D4 и D19; оригиналы неизменны. Неблокирующее: secure_filename и кириллица — этап 5."
+    },
+    "3": {
+      "status": "PASS",
+      "commit": "57edc0f35022d704d9bc29e6228a10702bee42ba",
+      "decision": {"stage": 3, "status": "PASS", "blocking_issues": [], "next_stage": 4},
+      "notes": "pytest 31/31. Контрольный пример 1300 ₽, ППУ 405, наценка 15%, расходы по датам, история не переписывается. E2E на реальных файлах: 232951 (9999 ₽, 200 г) → 11592 в WB!E3 и Ozon!D19, остальное не тронуто. /download — из последнего прогона."
     }
   }
 }
