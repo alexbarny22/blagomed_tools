@@ -321,7 +321,8 @@ def calc_product(con: sqlite3.Connection, *, product_id: int,
     """
     d = _as_date(calc_date)
     row = con.execute(
-        'SELECT id, manual_price FROM products WHERE id = ?', (product_id,)
+        'SELECT id, manual_price, margin_pct, ppu_rub_per_kg, extras_rub '
+        'FROM products WHERE id = ?', (product_id,)
     ).fetchone()
     if row is None:
         raise ProductNotFound(
@@ -347,12 +348,23 @@ def calc_product(con: sqlite3.Connection, *, product_id: int,
         used_price = _require_dec(price, f'Закупочная цена товара {product_id}')
         price_source = '1c'
 
+    # Персональные параметры товара перекрывают глобальные (NULL = дефолт)
+    ppu_rate = (row['ppu_rub_per_kg'] if row['ppu_rub_per_kg'] is not None
+                else settings['ppu_rub_per_kg'])
+    margin_pct = (row['margin_pct'] if row['margin_pct'] is not None
+                  else settings['margin_pct'])
+    if row['extras_rub'] is not None:
+        # extras_rub товара ЗАМЕНЯЕТ сумму допов из extras
+        extra_items = [('override', row['extras_rub'])]
+    else:
+        extra_items = get_extras(con, product_id, d)
+
     return compute_cost(
         price=used_price,
         weight_g=get_ppu_weight(con, product_id, d),
-        ppu_rate=settings['ppu_rub_per_kg'],
-        extra_items=get_extras(con, product_id, d),
-        margin_pct=settings['margin_pct'],
+        ppu_rate=ppu_rate,
+        extra_items=extra_items,
+        margin_pct=margin_pct,
         product_id=product_id,
         price_source=price_source,
     )

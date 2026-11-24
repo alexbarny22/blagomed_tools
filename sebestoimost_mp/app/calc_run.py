@@ -11,72 +11,73 @@ from app.calc import CalcError, calc_product
 
 _CREATED_AT_FMT = "%Y-%m-%d %H:%M:%S"
 
+# Явный список колонок run_items (16 = 14 прежних + prev_cost + jump)
+_RUN_ITEM_COLUMNS = (
+    "run_id", "marketplace", "row_num", "article_mp", "article_supplier",
+    "product_id", "price", "price_source", "ppu_rub", "extras_rub",
+    "margin_pct", "cost", "status", "message", "prev_cost", "jump",
+)
 
-def _insert_run_item(
-    con: sqlite3.Connection,
-    *,
-    run_id: int,
-    marketplace: str,
-    row_num: int | None,
-    article_mp: str | None,
-    article_supplier: str | None,
-    product_id: int | None,
-    price: str | None,
-    price_source: str | None,
-    ppu_rub: str | None,
-    extras_rub: str | None,
-    margin_pct: str | None,
-    cost: int | None,
-    status: str,
-    message: str,
-) -> None:
+_INSERT_RUN_ITEM_SQL = (
+    "INSERT INTO run_items (" + ", ".join(_RUN_ITEM_COLUMNS) + ") "
+    "VALUES (" + ", ".join(["?"] * len(_RUN_ITEM_COLUMNS)) + ")"
+)
+
+
+def _to_str(value: Any) -> str | None:
+    """Приводит значение CalcResult к TEXT (None остаётся None)."""
+    if value is None:
+        return None
+    return value if isinstance(value, str) else str(value)
+
+
+def _insert_run_item(con, run_id, marketplace, row_num, article_mp, article_supplier,
+                     product_id=None, price=None, price_source=None, ppu_rub=None,
+                     extras_rub=None, margin_pct=None, cost=None, status="problem",
+                     message="", prev_cost=None, jump=0):
     """Вставляет одну позицию прогона в run_items."""
-    con.execute(
-        """
-        INSERT INTO run_items (
-            run_id, marketplace, row_num, article_mp, article_supplier,
-            product_id, price, price_source, ppu_rub, extras_rub,
-            margin_pct, cost, status, message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            run_id,
-            marketplace,
-            row_num,
-            article_mp,
-            article_supplier,
-            product_id,
-            price,
-            price_source,
-            ppu_rub,
-            extras_rub,
-            margin_pct,
-            cost,
-            status,
-            message,
-        ),
-    )
+    con.execute(_INSERT_RUN_ITEM_SQL, (
+        run_id, marketplace, row_num, article_mp, article_supplier,
+        product_id, price, price_source, ppu_rub, extras_rub,
+        margin_pct, cost, status, message, prev_cost, jump,
+    ))
 
 
-def run_calculation(
-    con: sqlite3.Connection,
-    *,
-    calc_date: str,
-    marketplaces: dict[str, list[dict[str, Any]]],
-    prices: dict[int, Any] | None = None,
-    price_errors: dict[int, str] | None = None,
-) -> int:
-    """Выполняет прогон расчёта по маркетплейсам и сохраняет результаты.
+def _prev_costs_map(con, run_id: int) -> dict[int, int]:
+    """{product_id: cost} из самого свежего прогона с run_id < текущего.
 
-    Для каждой позиции ищет товар по article_supplier и вызывает
-    calc_product. prices — {product_id: закупочная цена из 1С} для товаров
-    с manual_price=0; если цены нет, передаётся None и calc_product сам
-    бросает PriceRequired. price_errors — {product_id: текст проблемы}:
-    для таких товаров calc_product не вызывается, позиция сразу уходит
-    в 'problem' с этим сообщением. Возвращает id созданного прогона.
+    Один запрос на весь прогон (любой marketplace).
     """
-    created_at = datetime.now().strftime(_CREATED_AT_FMT)
+    rows = con.execute(
+        """
+        SELECT ri.product_id AS product_id, ri.cost AS cost
+        FROM run_items ri
+        WHERE ri.status = 'ok'
+          AND ri.cost IS NOT NULL
+          AND ri.product_id IS NOT NULL
+          AND ri.run_id = (
+              SELECT MAX(ri2.run_id)
+              FROM run_items ri2
+              WHERE ri2.product_id = ri.product_id
+                AND ri2.status = 'ok'
+                AND ri2.run_id < ?
+          )
+        """,
+        (run_id,),
+    ).fetchall()
+    return {row["product_id"]: row["cost"] for row in rows}
 
+
+def run_calculation(con, calc_date, marketplaces, prices=None, price_errors=None):
+    """Прогон расчёта. Возвращает id созданного прогона.
+
+    Товары с is_active = 0 пропускаются полностью (без run_items и total).
+    Для status='ok' пишутся prev_cost и jump (скачок >20% к прошлому прогону).
+    """
+    prices = prices if prices is not None else {}
+    price_errors = price_errors if price_errors is not None else {}
+
+    created_at = datetime.now().strftime(_CREATED_AT_FMT)
     total = 0
     ok_count = 0
     problem_count = 0
@@ -88,82 +89,99 @@ def run_calculation(
         )
         run_id = int(cur.lastrowid)
 
+        # Предыдущие себестоимости — одним запросом на весь прогон
+        prev_costs = _prev_costs_map(con, run_id)
+
+        # Состояние «поставляется» по всем товарам
+        active = {
+            row["id"]: row["is_active"]
+            for row in con.execute("SELECT id, is_active FROM products").fetchall()
+        }
+
         for marketplace, items in marketplaces.items():
             for item in items or []:
                 row_num = item.get("row")
                 article_mp = item.get("article_mp")
                 article_supplier = item.get("article_supplier")
 
-                product_id: int | None = None
-                price: str | None = None
-                price_source: str | None = None
-                ppu_rub: str | None = None
-                extras_rub: str | None = None
-                margin_pct: str | None = None
-                cost: int | None = None
-                message = ""
-
-                if article_supplier is None:
-                    product_row = None
-                else:
+                product_row = None
+                if article_supplier:
                     product_row = con.execute(
                         "SELECT id FROM products WHERE article_supplier = ?",
                         (article_supplier,),
                     ).fetchone()
+                # Эталоны Ozon без артикула поставщика — мэтчинг по артикулу МП
+                if product_row is None and article_mp:
+                    mp_col = ('article_ozon' if str(marketplace).startswith('ozon')
+                              else 'article_wb')
+                    product_row = con.execute(
+                        f"SELECT id FROM products WHERE {mp_col} = ?",
+                        (article_mp,),
+                    ).fetchone()
 
                 if product_row is None:
-                    status = "problem"
-                    problem_count += 1
-                    message = (
-                        "Товар не найден в справочнике "
-                        f"(article_supplier={article_supplier})"
+                    _insert_run_item(
+                        con, run_id, marketplace, row_num, article_mp, article_supplier,
+                        status="problem",
+                        message=f"Товар не найден в справочнике (article_supplier={article_supplier})",
                     )
-                else:
-                    product_id = int(product_row["id"])
-                    error_message = (price_errors or {}).get(product_id)
-                    if error_message:
-                        status = "problem"
-                        problem_count += 1
-                        message = error_message
-                    else:
-                        try:
-                            res = calc_product(
-                                con, product_id=product_id,
-                                price=(prices or {}).get(product_id),
-                                calc_date=calc_date,
-                            )
-                        except CalcError as exc:
-                            status = "problem"
-                            problem_count += 1
-                            message = str(exc)
-                        else:
-                            status = "ok"
-                            ok_count += 1
-                            price = str(res.price)
-                            price_source = str(res.price_source)
-                            ppu_rub = str(res.ppu_rub)
-                            extras_rub = str(res.extras_rub)
-                            margin_pct = str(res.margin_pct)
-                            cost = res.cost
+                    total += 1
+                    problem_count += 1
+                    continue
+
+                product_id = int(product_row["id"])
+
+                # Не поставляется -> ни строки run_items, ни учёта в total
+                if not active.get(product_id, 1):
+                    continue
+
+                error_message = price_errors.get(product_id)
+                if error_message:
+                    _insert_run_item(
+                        con, run_id, marketplace, row_num, article_mp, article_supplier,
+                        product_id=product_id, status="problem", message=str(error_message),
+                    )
+                    total += 1
+                    problem_count += 1
+                    continue
+
+                try:
+                    res = calc_product(
+                        con, product_id=product_id,
+                        price=prices.get(product_id),
+                        calc_date=calc_date,
+                    )
+                except CalcError as exc:
+                    _insert_run_item(
+                        con, run_id, marketplace, row_num, article_mp, article_supplier,
+                        product_id=product_id, status="problem", message=str(exc),
+                    )
+                    total += 1
+                    problem_count += 1
+                    continue
+
+                cost = int(res.cost)
+                prev_cost = prev_costs.get(product_id)
+                jump = 0
+                if prev_cost is not None and abs(cost - prev_cost) > 0.2 * prev_cost:
+                    jump = 1
 
                 _insert_run_item(
-                    con,
-                    run_id=run_id,
-                    marketplace=marketplace,
-                    row_num=row_num,
-                    article_mp=article_mp,
-                    article_supplier=article_supplier,
+                    con, run_id, marketplace, row_num, article_mp, article_supplier,
                     product_id=product_id,
-                    price=price,
-                    price_source=price_source,
-                    ppu_rub=ppu_rub,
-                    extras_rub=extras_rub,
-                    margin_pct=margin_pct,
+                    price=_to_str(res.price),
+                    price_source=str(res.price_source),
+                    ppu_rub=_to_str(res.ppu_rub),
+                    extras_rub=_to_str(res.extras_rub),
+                    margin_pct=_to_str(res.margin_pct),
                     cost=cost,
-                    status=status,
-                    message=message,
+                    status="ok",
+                    message="",
+                    prev_cost=prev_cost,
+                    jump=jump,
                 )
                 total += 1
+                ok_count += 1
 
         con.execute(
             "UPDATE runs SET total = ?, ok = ?, problems = ? WHERE id = ?",
@@ -219,3 +237,60 @@ def get_run_problems(
         """,
         (run_id,),
     ).fetchall()
+
+
+def get_price_history(con: sqlite3.Connection, product_id: int) -> list[sqlite3.Row]:
+    """История (calc_date, price, cost, marketplace) по всем прогонам, новые сверху."""
+    return con.execute(
+        """
+        SELECT r.calc_date    AS calc_date,
+               ri.price       AS price,
+               ri.cost        AS cost,
+               ri.marketplace AS marketplace
+        FROM run_items ri
+        JOIN runs r ON r.id = ri.run_id
+        WHERE ri.product_id = ?
+        ORDER BY ri.run_id DESC, ri.id DESC
+        """,
+        (product_id,),
+    ).fetchall()
+
+
+def get_last_costs_map(con: sqlite3.Connection) -> dict[int, tuple]:
+    """{product_id: (cost, prev_cost, jump)} по данным последнего прогона."""
+    rows = con.execute(
+        """
+        SELECT ri.product_id AS product_id,
+               ri.cost       AS cost,
+               ri.prev_cost  AS prev_cost,
+               ri.jump       AS jump
+        FROM run_items ri
+        WHERE ri.run_id = (SELECT MAX(id) FROM runs)
+          AND ri.product_id IS NOT NULL
+        ORDER BY ri.id
+        """
+    ).fetchall()
+
+    result: dict[int, tuple] = {}
+    for row in rows:
+        result.setdefault(row["product_id"], (
+            row["cost"],
+            row["prev_cost"],
+            row["jump"] if row["jump"] is not None else 0,
+        ))
+    return result
+
+
+def get_no_price_count(con: sqlite3.Connection, run_id: int | None = None) -> int:
+    """Число distinct товаров со status='problem'; по умолчанию — последний прогон."""
+    if run_id is None:
+        row = con.execute("SELECT MAX(id) FROM runs").fetchone()
+        run_id = row[0] if row is not None else None
+    if run_id is None:
+        return 0
+    row = con.execute(
+        "SELECT COUNT(DISTINCT product_id) FROM run_items "
+        "WHERE run_id = ? AND status = 'problem' AND product_id IS NOT NULL",
+        (run_id,),
+    ).fetchone()
+    return int(row[0] or 0)
