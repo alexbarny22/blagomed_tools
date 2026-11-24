@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Расходы и настройки</h1>
+
+<section>
+    <h2>Текущие настройки</h2>
+    <p>ППУ ₽/кг: {{ ppu_rub_per_kg or '—' }}</p>
+    <p>Наценка %: {{ margin_pct or '—' }}</p>
+</section>
+
+<section>
+    <h2>Изменить настройку</h2>
+    <form method="post" action="{{ url_for('web.expense_setting') }}">
+        <p>
+            <select name="key">
+                <option value="ppu_rub_per_kg">ППУ, ₽/кг</option>
+                <option value="margin_pct">Наценка, %</option>
+            </select>
+            <input type="text" name="value" placeholder="значение">
+            <input type="date" name="valid_from">
+            <button type="submit">Сохранить настройку</button>
+        </p>
+        <p class="hint">Настройка действует с указанной даты. История не переписывается: прежние значения остаются в силе для более ранних дат.</p>
+    </form>
+</section>
+
+<section>
+    <h2>Виды расходов</h2>
+    <form method="post" action="{{ url_for('web.expense_kind') }}">
+        <p>
+            <input type="text" name="name" placeholder="Новый вид расхода">
+            <button type="submit">Добавить вид</button>
+        </p>
+    </form>
+    {% if extra_kinds %}
+    <ul>
+        {% for k in extra_kinds %}
+        <li>{{ k.name }}</li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="hint">Виды расходов ещё не добавлены.</p>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Дополнительный расход по товару</h2>
+    <form method="post" action="{{ url_for('web.expense_extra') }}">
+        <p>
+            <select name="product_id">
+                {% for p in products %}
+                <option value="{{ p.id }}">{{ p.article_supplier }}</option>
+                {% endfor %}
+            </select>
+            <select name="kind_id">
+                {% for k in extra_kinds %}
+                <option value="{{ k.id }}">{{ k.name }}</option>
+                {% endfor %}
+            </select>
+        </p>
+        <p>
+            <input type="text" name="rub" placeholder="сумма ₽">
+            <label>с <input type="date" name="valid_from"></label>
+            <label>по <input type="date" name="valid_to"></label>
+            <button type="submit">Добавить расход</button>
+        </p>
+        <p class="hint">Новая запись той же статьи заменяет предыдущую с даты начала; чтобы закрыть расход — добавьте запись с датой окончания.</p>
+    </form>
+</section>
+{% endblock %}

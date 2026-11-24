@@ -16,19 +16,32 @@ nav a {
     color: #fff; text-decoration: none; margin-left: 15px; font-size: 0.9em;
 }
 nav a:hover { text-decoration: underline; }
-main { padding: 20px; max-width: 900px; margin: 0 auto; }
+main { padding: 20px; max-width: 1100px; margin: 0 auto; }
 .flash { padding: 10px; margin: 10px 0; border-radius: 4px; }
 .flash-ok { background: #e6f4e6; color: #256b25; border: 1px solid #9ed39e; }
 .flash-err { background: #fbe6e6; color: #8a2222; border: 1px solid #e0a3a3; }
+
+table { border-collapse: collapse; width: 100%; margin: 10px 0; background: #fff; }
+th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; font-size: 0.9em; }
+th { background: #eee; }
+
+input, select, button { padding: 4px 6px; font-size: 0.9em; }
+button { cursor: pointer; }
+form.inline { display: inline-block; margin: 0 4px 4px 0; }
+
+h1 { font-size: 1.3em; margin-bottom: 12px; }
+h2 { font-size: 1.1em; margin: 16px 0 8px; }
+section { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 12px; margin-bottom: 16px; }
+.hint { color: #777; font-size: 0.8em; margin-top: 6px; }
 </style>
 </head>
 <body>
 <header>
     <h1>БЛАГОМЕД — Себестоимость МП</h1>
     <nav>
-        <a href="/">Расчёт</a>
-        <a href="#">Товары</a>
-        <a href="#">Расходы</a>
+        <a href="{{ url_for('web.index') }}">Расчёт</a>
+        <a href="{{ url_for('web.products') }}">Товары</a>
+        <a href="{{ url_for('web.expenses') }}">Расходы</a>
         <a href="#">Проблемные</a>
         <a href="#">История</a>
     </nav>

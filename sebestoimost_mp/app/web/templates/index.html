@@ -1,37 +1,70 @@
 {% extends "base.html" %}
 {% block content %}
-<style>
-  fieldset {
-    border: 1px solid #888;
-    padding: 1rem;
-    margin-bottom: 1rem;
-  }
-  label {
-    display: block;
-    margin: 0.5rem 0 0.2rem;
-  }
-</style>
-
 <h1>Расчёт себестоимости</h1>
 
-<form action="/upload" method="post" enctype="multipart/form-data">
-  <fieldset>
-    <legend>Файлы</legend>
+<section>
+    <h2>Загрузка файлов WB/Ozon</h2>
+    <form method="post" action="{{ url_for('web.upload') }}" enctype="multipart/form-data">
+        <p>
+            <label>Файл WB: <input type="file" name="wb_file" accept=".xlsx"></label>
+        </p>
+        <p>
+            <label>Файл Ozon: <input type="file" name="ozon_file" accept=".xlsx"></label>
+        </p>
+        <p>
+            <button type="submit">Загрузить файлы</button>
+        </p>
+    </form>
+</section>
 
-    <label for="wb_file">Wildberries (.xlsx)</label>
-    <input id="wb_file" type="file" name="wb_file" accept=".xlsx">
+<section>
+    <h2>Расчёт</h2>
+    <form method="post" action="{{ url_for('web.calc') }}">
+        <p>
+            <label>Дата расчёта:
+                <input type="date" name="calc_date" value="{{ today }}">
+            </label>
+            <button type="submit">Рассчитать</button>
+        </p>
+    </form>
+</section>
 
-    <label for="ozon_file">Ozon (.xlsx)</label>
-    <input id="ozon_file" type="file" name="ozon_file" accept=".xlsx">
+<section>
+    <h2>Последний расчёт</h2>
+    {% if last_run %}
+    <table>
+        <thead>
+            <tr>
+                <th>Прогон</th>
+                <th>Дата расчёта</th>
+                <th>Выполнен</th>
+                <th>Всего</th>
+                <th>Рассчитано</th>
+                <th>Проблем</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>№{{ last_run.id }}</td>
+                <td>{{ last_run.calc_date }}</td>
+                <td>{{ last_run.created_at }}</td>
+                <td>{{ last_run.total }}</td>
+                <td>{{ last_run.ok }}</td>
+                <td>{{ last_run.problems }}</td>
+            </tr>
+        </tbody>
+    </table>
+    {% else %}
+    <p>Расчёт ещё не выполнялся</p>
+    {% endif %}
+</section>
 
-    <label for="calc_date">Дата расчёта</label>
-    <input id="calc_date" type="date" name="calc_date" value="{{ today }}">
-
-    <button type="submit">Загрузить файлы</button>
-  </fieldset>
-</form>
-
-<h2>Скачать заполненные файлы</h2>
-<p><a href="/download/wb">Скачать WB</a></p>
-<p><a href="/download/ozon">Скачать Ozon</a></p>
+<section>
+    <h2>Скачать заполненные файлы</h2>
+    <p>
+        <a href="{{ url_for('web.download', marketplace='wb') }}">Скачать WB</a>
+        &nbsp;|&nbsp;
+        <a href="{{ url_for('web.download', marketplace='ozon') }}">Скачать Ozon</a>
+    </p>
+</section>
 {% endblock %}
