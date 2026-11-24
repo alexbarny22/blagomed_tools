@@ -63,11 +63,17 @@ def run_calculation(
     *,
     calc_date: str,
     marketplaces: dict[str, list[dict[str, Any]]],
+    prices: dict[int, Any] | None = None,
+    price_errors: dict[int, str] | None = None,
 ) -> int:
     """Выполняет прогон расчёта по маркетплейсам и сохраняет результаты.
 
     Для каждой позиции ищет товар по article_supplier и вызывает
-    calc_product без внешней цены. Возвращает id созданного прогона.
+    calc_product. prices — {product_id: закупочная цена из 1С} для товаров
+    с manual_price=0; если цены нет, передаётся None и calc_product сам
+    бросает PriceRequired. price_errors — {product_id: текст проблемы}:
+    для таких товаров calc_product не вызывается, позиция сразу уходит
+    в 'problem' с этим сообщением. Возвращает id созданного прогона.
     """
     created_at = datetime.now().strftime(_CREATED_AT_FMT)
 
@@ -114,23 +120,31 @@ def run_calculation(
                     )
                 else:
                     product_id = int(product_row["id"])
-                    try:
-                        res = calc_product(
-                            con, product_id=product_id, calc_date=calc_date
-                        )
-                    except CalcError as exc:
+                    error_message = (price_errors or {}).get(product_id)
+                    if error_message:
                         status = "problem"
                         problem_count += 1
-                        message = str(exc)
+                        message = error_message
                     else:
-                        status = "ok"
-                        ok_count += 1
-                        price = str(res.price)
-                        price_source = str(res.price_source)
-                        ppu_rub = str(res.ppu_rub)
-                        extras_rub = str(res.extras_rub)
-                        margin_pct = str(res.margin_pct)
-                        cost = res.cost
+                        try:
+                            res = calc_product(
+                                con, product_id=product_id,
+                                price=(prices or {}).get(product_id),
+                                calc_date=calc_date,
+                            )
+                        except CalcError as exc:
+                            status = "problem"
+                            problem_count += 1
+                            message = str(exc)
+                        else:
+                            status = "ok"
+                            ok_count += 1
+                            price = str(res.price)
+                            price_source = str(res.price_source)
+                            ppu_rub = str(res.ppu_rub)
+                            extras_rub = str(res.extras_rub)
+                            margin_pct = str(res.margin_pct)
+                            cost = res.cost
 
                 _insert_run_item(
                     con,
