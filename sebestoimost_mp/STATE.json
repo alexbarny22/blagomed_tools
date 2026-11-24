@@ -56,6 +56,11 @@
       "status": "BLOCK",
       "commit": "коммит этапов 6-7 (см. git log)",
       "notes": "E2E_CHECKLIST.md (12 шагов) готов. Живой прогон — только на Windows-машине владельца с боевой 1С; песочница проверить не может. Снятие BLOCK — прогон владельцем."
+    },
+    "8": {
+      "status": "PASS",
+      "commit": "см. git log",
+      "notes": "PR #23 (draft): https://github.com/alexbarny22/blagomed_tools/pull/23. Мердж только с разрешения владельца."
     }
   }
 }
