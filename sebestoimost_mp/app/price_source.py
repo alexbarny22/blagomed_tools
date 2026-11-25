@@ -52,18 +52,20 @@ def fetch_prices(
     params: onec.Params,
     mode: str,
     source_factory: Callable[[onec.Params], Any] | None = None,
-) -> tuple[dict[int, Decimal], dict[int, str]]:
-    """Получить закупочные цены из 1С.
+) -> tuple[dict[int, Decimal], dict[int, str], dict[int, str]]:
+    """Получить закупочные цены и наименования из 1С.
 
     products: отобранные товары (dict с ключами id, article_supplier, name,
         onec_guid) — как правило external-товары с manual_price=0.
-    Возвращает (prices, errors): prices — {product_id: Decimal},
-    errors — {product_id: текст проблемы}. Исключения 1С наружу не утекают:
-    любая ошибка источника превращается в сообщения проблем по всем товарам.
+    Возвращает (prices, errors, names): prices — {product_id: Decimal},
+    errors — {product_id: текст проблемы}, names — {product_id: name_1c}
+    для всех товаров с непустым наименованием 1С (независимо от статуса
+    цены). Исключения 1С наружу не утекают: любая ошибка источника
+    превращается в сообщения проблем по всем товарам.
     """
     products = list(products)
     if not products:
-        return {}, {}
+        return {}, {}, {}
 
     factory = source_factory or _default_source_factory(mode)
 
@@ -80,15 +82,18 @@ def fetch_prices(
         items = onec.fetch_from_source(factory(params), requests)
     except Exception as exc:  # 1С недоступна — не выпускаем исключение наружу
         message = f"1С недоступна: {exc}"
-        return {}, {int(p["id"]): message for p in products}
+        return {}, {int(p["id"]): message for p in products}, {}
 
     prices: dict[int, Decimal] = {}
     errors: dict[int, str] = {}
+    names: dict[int, str] = {}
     for product, item in zip(products, items):
         pid = int(product["id"])
+        if item.name_1c:
+            names[pid] = item.name_1c
         if item.status == onec.ItemStatus.OK and item.price is not None:
             prices[pid] = Decimal(str(item.price))
         else:
             errors[pid] = f"1С: {item.status.value} — {item.detail or 'без деталей'}"
 
-    return prices, errors
+    return prices, errors, names

@@ -7,37 +7,52 @@
     структуры: поддерживаются «Вайлдберриз», «Ozon — цены» и «Ozon — финансы».</p>
 
 {% for block in blocks %}
-<section>
+<section class="tmpl-block">
     <h2>{{ block.label }}</h2>
-    <p>
-        Профиль: лист «{{ block.profile.sheet }}», заголовок строки
-        {{ block.profile.header_row }}, данные с {{ block.profile.data_row }},
-        артикул МП {{ block.profile.col_article_mp }},
-        артикул поставщика {{ block.profile.col_article_supplier or '—' }},
-        запись себестоимости {{ block.profile.col_cost_write }}.
-    </p>
-    <p>
-        {% if block.upload %}
-        Последняя загрузка: {{ block.upload.filename }} от {{ block.upload.uploaded_at }},
-        позиций {{ block.items_count }}.
-        {% else %}
-        Файл ещё не загружался.
-        {% endif %}
-    </p>
-    <form method="post" action="{{ url_for('web.templates_upload') }}" enctype="multipart/form-data">
-        <input type="hidden" name="profile_key" value="{{ block.key }}">
-        <input type="hidden" name="next" value="templates">
-        <input type="file" name="file" accept=".xlsx" required>
-        <button type="submit">Загрузить и распознать</button>
-    </form>
-    <p>
-        {% if block.key == 'wb' %}
-        <a class="btn" href="{{ url_for('web.mp_page', marketplace='wb') }}">Открыть эталон WB</a>
-        {% else %}
-        <a class="btn" href="{{ url_for('web.mp_page', marketplace='ozon') }}">Открыть эталон Ozon</a>
-        {% endif %}
-        <a class="btn" href="{{ url_for('web.download', key=block.key) }}">Скачать результат</a>
-    </p>
+    <p class="tmpl-lead">{% if block.key == 'wb' %}Сюда загружай эталон себестоимости Вайлдберриз{% elif block.key == 'ozon_prices' %}Сюда загружай эталон цен Озон{% else %}Сюда загружай финансовый эталон Озон{% endif %}</p>
+
+    <details class="tmpl-details">
+        <summary>Технические детали</summary>
+        <p>Профиль: лист «{{ block.profile.sheet }}», заголовок строки
+            {{ block.profile.header_row }}, данные с {{ block.profile.data_row }},
+            артикул МП {{ block.profile.col_article_mp }},
+            артикул поставщика {{ block.profile.col_article_supplier or '—' }},
+            запись себестоимости {{ block.profile.col_cost_write }}.</p>
+    </details>
+
+    <div class="tmpl-step">
+        <h3>1. Загрузить новый эталон</h3>
+        <p class="tmpl-file">
+            {% if block.upload %}
+            Текущий файл: {{ block.upload.filename }} от {{ block.upload.uploaded_at }},
+            позиций {{ block.items_count }}.
+            {% else %}
+            Файл ещё не загружался.
+            {% endif %}
+        </p>
+        <form class="form-row" method="post" action="{{ url_for('web.templates_upload') }}" enctype="multipart/form-data">
+            <input type="hidden" name="profile_key" value="{{ block.key }}">
+            <input type="hidden" name="next" value="templates">
+            <input type="file" name="file" accept=".xlsx" required>
+            <button type="submit">Загрузить и распознать</button>
+        </form>
+    </div>
+
+    {% if block.upload %}
+    <div class="tmpl-step">
+        <h3>2. Получить результат</h3>
+        <p class="hint">Распознано позиций: {{ block.items_count }}.</p>
+        <div class="actions">
+            {% if block.key == 'wb' %}
+            <a class="btn" href="{{ url_for('web.mp_page', marketplace='wb') }}">Посмотреть, что распознано</a>
+            <a class="btn btn-line" href="{{ url_for('web.download', key=block.key) }}">Скачать заполненный WB</a>
+            {% else %}
+            <a class="btn" href="{{ url_for('web.mp_page', marketplace='ozon') }}">Посмотреть, что распознано</a>
+            <a class="btn btn-line" href="{{ url_for('web.download', key=block.key) }}">Скачать заполненный Ozon</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
 </section>
 {% endfor %}
 {% endblock %}

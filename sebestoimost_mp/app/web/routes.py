@@ -459,7 +459,15 @@ def _collect_prices(db, calc_date):
         message = '1С не настроена: нет config.ini'
         return {}, {int(p['id']): message for p in products}
     params, mode = info
-    return price_source.fetch_prices(products, params, mode)
+    prices, errors, names = price_source.fetch_prices(products, params, mode)
+    for pid, name in names.items():
+        db.execute(
+            "UPDATE products SET name = ? WHERE id = ? "
+            "AND (name IS NULL OR name = '')",
+            (name, pid),
+        )
+    db.commit()
+    return prices, errors
 
 
 @web_bp.before_app_request

@@ -31,8 +31,9 @@ def _product(pid, article, name="Товар", guid=None):
     return {"id": pid, "article_supplier": article, "name": name, "onec_guid": guid}
 
 
-def _item(status, price=None, detail="", sku=None):
-    return onec.OnecItem(sku_1c=sku, price=price, status=status, detail=detail)
+def _item(status, price=None, detail="", sku=None, name=None):
+    return onec.OnecItem(sku_1c=sku, price=price, status=status,
+                         detail=detail, name_1c=name)
 
 
 def _connect(app):
@@ -61,23 +62,25 @@ def _insert_manual_price(con, pid, price):
 def test_fetch_prices_ok():
     products = [_product(1, "ART-1"), _product(2, "ART-2")]
     items = [
-        _item(onec.ItemStatus.OK, price=Decimal("1000"), sku="ART-1"),
+        _item(onec.ItemStatus.OK, price=Decimal("1000"), sku="ART-1",
+              name="Товар А"),
         _item(onec.ItemStatus.NOT_FOUND, detail="не найден", sku="ART-2"),
     ]
-    prices, errors = fetch_prices(
+    prices, errors, names = fetch_prices(
         products, None, "com",
         source_factory=lambda params: FakeSource(params, items=items),
     )
     assert prices == {1: Decimal("1000")}
     assert set(errors) == {2}
     assert errors[2].startswith("1С: NOT_FOUND")
+    assert names == {1: "Товар А"}
 
 
 def test_fetch_prices_connection_error():
     """OnecError из источника → fetch_from_source нормализует в CONNECT_ERROR
     на каждый товар (ошибка подключения ≠ отсутствие цены)."""
     products = [_product(1, "ART-1"), _product(2, "ART-2")]
-    prices, errors = fetch_prices(
+    prices, errors, names = fetch_prices(
         products, None, "com",
         source_factory=lambda params: FakeSource(
             params, exc=onec.OnecError("COM: connect failed")),
@@ -91,7 +94,7 @@ def test_fetch_prices_unexpected_error():
     """Не-OnecError (сбой уровня кода) → все товары «1С недоступна»,
     исключение наружу не утекает."""
     products = [_product(1, "ART-1"), _product(2, "ART-2")]
-    prices, errors = fetch_prices(
+    prices, errors, names = fetch_prices(
         products, None, "com",
         source_factory=lambda params: FakeSource(
             params, exc=RuntimeError("unexpected boom")),
@@ -99,6 +102,25 @@ def test_fetch_prices_unexpected_error():
     assert prices == {}
     assert set(errors) == {1, 2}
     assert all("1С недоступна" in text for text in errors.values())
+    assert names == {}
+
+
+def test_fetch_prices_names_regardless_of_status():
+    """Наименование 1С возвращается и для товаров без цены (ошибка статуса)."""
+    products = [_product(1, "ART-1"), _product(2, "ART-2")]
+    items = [
+        _item(onec.ItemStatus.OK, price=Decimal("700"), sku="ART-1",
+              name="Товар А"),
+        _item(onec.ItemStatus.NOT_FOUND, detail="не найден", sku="ART-2",
+              name="Товар Б"),
+    ]
+    prices, errors, names = fetch_prices(
+        products, None, "com",
+        source_factory=lambda params: FakeSource(params, items=items),
+    )
+    assert prices == {1: Decimal("700")}
+    assert set(errors) == {2}
+    assert names == {1: "Товар А", 2: "Товар Б"}
 
 
 def test_fetch_prices_needs_confirm_not_used():
@@ -106,12 +128,13 @@ def test_fetch_prices_needs_confirm_not_used():
     products = [_product(1, "ART-1")]
     items = [_item(onec.ItemStatus.NEEDS_CONFIRM,
                    price=Decimal("500"), detail="источник не точный", sku="ART-1")]
-    prices, errors = fetch_prices(
+    prices, errors, names = fetch_prices(
         products, None, "com",
         source_factory=lambda params: FakeSource(params, items=items),
     )
     assert prices == {}
     assert "NEEDS_CONFIRM" in errors[1]
+    assert names == {}
 
 
 def test_run_calculation_with_prices(app):

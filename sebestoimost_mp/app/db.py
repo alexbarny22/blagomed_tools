@@ -150,7 +150,7 @@ def _create_schema(conn):
     conn.execute('INSERT INTO settings (key, value, valid_from) VALUES (?, ?, ?)',
                  ('margin_pct', '15', '2026-01-01'))
     _seed_template_profiles(conn)
-    conn.execute('PRAGMA user_version = 2')
+    conn.execute('PRAGMA user_version = 3')
 
 
 def _migrate_v1_to_v2(conn):
@@ -170,8 +170,18 @@ def _migrate_v1_to_v2(conn):
     conn.execute('PRAGMA user_version = 2')
 
 
+def _migrate_v2_to_v3(conn):
+    """v2 -> v3: старые загрузки эталона Ozon ('ozon') переименовываются
+    в 'ozon_prices', как их ищет код v3."""
+    conn.execute(
+        "UPDATE uploads SET marketplace = 'ozon_prices' "
+        "WHERE marketplace = 'ozon'"
+    )
+    conn.execute('PRAGMA user_version = 3')
+
+
 def init_db(db_path: str):
-    """Инициализирует БД, если файла нет. Если есть — мигрирует до v2.
+    """Инициализирует БД, если файла нет. Если есть — мигрирует до v3.
 
     Существующие данные не перезаписываются.
     """
@@ -187,12 +197,16 @@ def init_db(db_path: str):
             conn.close()
         return
 
-    # Файл есть: миграция только если версия схемы < 2
+    # Файл есть: миграция только если версия схемы < 3
     conn = connect(db_path)
     try:
         version = conn.execute('PRAGMA user_version').fetchone()[0]
         if version < 2:
             _migrate_v1_to_v2(conn)
+            conn.commit()
+            version = conn.execute('PRAGMA user_version').fetchone()[0]
+        if version < 3:
+            _migrate_v2_to_v3(conn)
             conn.commit()
     finally:
         conn.close()
