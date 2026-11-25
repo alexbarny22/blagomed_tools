@@ -15,6 +15,19 @@ def main():
             print(f"[ОБНОВЛЕНИЕ] пропущено: {e}")
         db_path = root / 'data' / 'sebestoimost.db'
         init_db(str(db_path))
+        # Одноразовое перечитывание сохранённых эталонов после миграции v4
+        # (профили Ozon стали читать артикул поставщика — пересвязать товары).
+        try:
+            import sqlite3 as _sqlite3
+            from app.products_sync import resync_templates_if_needed
+            _conn = _sqlite3.connect(str(db_path))
+            try:
+                resync_templates_if_needed(
+                    _conn, log=lambda m: print(f'[ЭТАЛОНЫ] {m}'))
+            finally:
+                _conn.close()
+        except Exception as e:
+            print(f'[ЭТАЛОНЫ] перечитывание пропущено: {e}')
         app = create_app(root)
         print(f"[INFO] База данных: {db_path}")
         print("[INFO] Запуск сервера на http://127.0.0.1:8085")

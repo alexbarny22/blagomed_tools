@@ -29,6 +29,7 @@ from werkzeug.utils import secure_filename
 import app.calc_run as calc_run
 import app.db as db_module
 import app.excel_io as excel_io
+import app.products_sync as products_sync
 import app.price_source as price_source
 
 web_bp = Blueprint('web', __name__, template_folder='templates')
@@ -340,33 +341,12 @@ def _insert_upload(db, key, filename, stored_path):
 
 
 def _sync_products_from_items(db, key, items):
-    """Справочник products: новые артикулы + артикулы МП для мэтчинга.
+    """Справочник products: см. app.products_sync (общая логика).
 
     Если в эталоне нет колонки артикула поставщика (частый случай Ozon),
     товар заводится по артикулу МП — иначе позиция не с чем сопоставить.
     """
-    column = _mp_column(key)
-    created = 0
-    for item in items or []:
-        article_mp = (item.get('article_mp') or '').strip()
-        supplier = (item.get('article_supplier') or '').strip() or article_mp
-        if not supplier:
-            continue
-        cur = db.execute(
-            "INSERT OR IGNORE INTO products (article_supplier, created_at) "
-            "VALUES (?, ?)",
-            (supplier, _today()),
-        )
-        created += cur.rowcount or 0
-        # Если артикул МП совпал с артикулом поставщика (в файле себестоимостей
-        # Ozon SKU нет), артикул МП писать некуда — иначе он затрёт SKU.
-        if article_mp and article_mp != supplier:
-            db.execute(
-                f"UPDATE products SET {column} = ? WHERE article_supplier = ?",
-                (article_mp, supplier),
-            )
-    db.commit()
-    return created
+    return products_sync.sync_products_from_items(db, key, items)
 
 
 def _last_run_prices(db):
