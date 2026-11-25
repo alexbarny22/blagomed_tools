@@ -48,6 +48,7 @@
                 <th>ИТОГО</th>
                 <th>Было</th>
                 <th>Поставляется</th>
+                <th></th>
             </tr>
         </thead>
         <tbody>
@@ -61,7 +62,7 @@
                 <td>{{ p.name or '—' }}</td>
                 <td>{{ '✓' if 'wb' in p.mp_keys else '—' }}</td>
                 <td>{{ '✓' if 'ozon' in p.mp_keys else '—' }}</td>
-                <td>{{ p.last_price or '—' }}</td>
+                <td>{{ p.last_price or p.last_run_price or '—' }}</td>
                 <td>{{ p.last_weight or '—' }}</td>
                 <td><input form="ov{{ p.id }}" type="text" name="ppu_rub_per_kg" size="4"
                            value="{{ p.ppu_rub_per_kg if p.ppu_rub_per_kg is not none else '' }}" placeholder="—"></td>
@@ -74,13 +75,15 @@
                     {% if p.jump and p.cost is not none and p.prev_cost is not none %}
                     <strong class="up">{{ '%+.2f'|format(p.cost - p.prev_cost) }}</strong>
                     {% endif %}
-                    <button form="ov{{ p.id }}" type="submit" class="btn-line">ОК</button>
                 </td>
                 <td>{{ p.prev_cost if p.prev_cost is not none else '—' }}</td>
                 <td>
                     <button form="tog{{ p.id }}" type="submit" class="{{ 'btn-line' if not p.is_active else '' }}">
                         {{ 'да' if p.is_active else 'нет' }}
                     </button>
+                </td>
+                <td class="save-cell">
+                    <button form="ov{{ p.id }}" type="submit" class="btn-line btn-save">Сохранить</button>
                 </td>
             </tr>
             {% endfor %}

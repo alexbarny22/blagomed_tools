@@ -312,10 +312,10 @@ def _ambiguous_from_guid(req: OnecRequest, got: list[_Cand],
                f' (цены {", ".join(sorted({str(c.price) for c in uniq}))})')
 
 
-def resolve_candidates(req: OnecRequest, cands: list[_Cand],
-                       source: str,
-                       expected_price_type: str | None = None,
-                       expected_supplier: str | None = None) -> OnecItem:
+def _resolve_candidates(req: OnecRequest, cands: list[_Cand],
+                        source: str,
+                        expected_price_type: str | None = None,
+                        expected_supplier: str | None = None) -> OnecItem:
     """Выбирает кандидата. Артикул — основной рабочий идентификатор.
 
     Правила (подтверждены владельцем):
@@ -437,6 +437,55 @@ def resolve_candidates(req: OnecRequest, cands: list[_Cand],
         sku_1c=req.sku_1c, name_1c=req.name_1c,
         source=source, status=ItemStatus.NOT_FOUND,
         detail='кандидаты в 1С не найдены')
+
+
+def _same_name(cands: list[_Cand]) -> str | None:
+    """Единственное наименование среди кандидатов.
+
+    Возвращает написание первого кандидата, если все наименования совпадают
+    после нормализации, иначе None (разные наименования — выбирать нельзя).
+    """
+    names = [(c.name or '').strip() for c in cands if (c.name or '').strip()]
+    if not names or len({normalize_name(n) for n in names}) != 1:
+        return None
+    return names[0]
+
+
+def _fill_name_from_candidates(req: OnecRequest, item: OnecItem,
+                               cands: list[_Cand]) -> OnecItem:
+    """Наименование 1С для позиций без цены (карточка есть, цены нет).
+
+    В ветках NOT_FOUND/AMBIGUOUS в name_1c лежит лишь наименование из запроса
+    (наименование товара на МП), а не из 1С. Поэтому при неразрешённой цене
+    подставляем фактическое наименование карточек 1С — только когда оно у всех
+    кандидатов одинаковое. При разных наименованиях оставляем как было:
+    «одно из» подставлять нельзя.
+    """
+    if item.status not in (ItemStatus.NOT_FOUND, ItemStatus.AMBIGUOUS):
+        return item
+    got: list[_Cand] = []
+    if req.sku_1c:
+        got = _uniq_candidates(_by_sku(req.sku_1c, cands))
+    if not got and req.guid_1c:
+        got = _uniq_candidates(_by_guid(req.guid_1c, cands))
+    name = _same_name(got)
+    if name:
+        item.name_1c = name
+    return item
+
+
+def resolve_candidates(req: OnecRequest, cands: list[_Cand],
+                       source: str,
+                       expected_price_type: str | None = None,
+                       expected_supplier: str | None = None) -> OnecItem:
+    """Выбор кандидата (правила — в _resolve_candidates) + наименование 1С.
+
+    Наименование заполняется и при отсутствии цены: products.name бэкфиллится
+    в _collect_prices независимо от статуса цены.
+    """
+    item = _resolve_candidates(req, cands, source, expected_price_type,
+                               expected_supplier)
+    return _fill_name_from_candidates(req, item, cands)
 
 
 def merge_odata_guid(com: OnecItem, oda: OnecItem) -> OnecItem:

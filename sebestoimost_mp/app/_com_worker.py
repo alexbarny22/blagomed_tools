@@ -326,10 +326,43 @@ def main() -> int:
         except Exception as e:
             sys.stderr.write(f'добор недоступен: {_com_err_text(e)[:120]}\n')
 
+    without_price = [a for a in missing
+                     if a not in {r[0] for r in fallback_rows}]
     notes = {}
-    for a in articles:
-        if a not in found and a not in {r[0] for r in fallback_rows}:
-            notes[a] = 'цены нет ни в одном из регистров цен'
+    for a in without_price:
+        notes[a] = 'цены нет ни в одном из регистров цен'
+
+    # 3) Карточки без цены: позиция есть в справочнике, но записей в регистрах
+    #    цен нет. Отдаём ТОЛЬКО наименование (price=None) — приложение заполнит
+    #    products.name; цену не выдумываем.
+    name_cards = []
+    if without_price:
+        name_query = (
+            'ВЫБРАТЬ\n'
+            '    Ном.Артикул КАК Артикул,\n'
+            '    Ном.Наименование КАК Наименование,\n'
+            '    Ном.Ссылка КАК Ссылка\n'
+            'ИЗ\n'
+            '    Справочник.Номенклатура КАК Ном\n'
+            f'ГДЕ\n    {where_arts}\n'
+            '    И НЕ Ном.ПометкаУдаления\n')
+        try:
+            qn = v8.NewObject('Query')
+            qn.Text = name_query
+            if articles:
+                qn.SetParameter('Артикулы', arr)
+            if refs is not None:
+                qn.SetParameter('Ссылки', refs_)
+            seln = qn.Execute().Select()
+            while seln.Next():
+                art = str(seln.Артикул).strip() if seln.Артикул else ''
+                nm = str(seln.Наименование).strip() if seln.Наименование else ''
+                if art and nm:
+                    name_cards.append((art, nm, _guid_of(v8, seln.Ссылка)))
+        except Exception as e:
+            sys.stderr.write(f'карточки без цены: '
+                             f'{_com_err_text(e)[:150]}\n')
+        sys.stderr.write(f'карточек без цены: {len(name_cards)}\n')
 
     # История цен — прямое чтение записей регистра поставщиков (срез
     # виртуальной таблицы с датой на боевой базе зависает — тяжёлый запрос
@@ -388,6 +421,17 @@ def main() -> int:
             'supplier': None,
             'register': 'ЦеныНоменклатуры',
             'source_status': 'fallback_register',
+            'deletion_mark': False,
+        })
+    wanted_names = set(without_price)
+    for art, name, guid in name_cards:
+        if art not in wanted_names:
+            continue
+        candidates.append({
+            'sku': art, 'name': name, 'guid': guid or None,
+            'price': None, 'price_date': None,
+            'price_type': None, 'supplier': None,
+            'register': None, 'source_status': None,
             'deletion_mark': False,
         })
 
