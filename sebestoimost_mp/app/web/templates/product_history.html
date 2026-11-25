@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>{{ product.article_supplier }} — {{ product.name or 'без названия' }}</h2>
+
+<section>
+    <h2>Карточка товара</h2>
+    <p>
+        Артикул WB: {{ product.article_wb or '—' }};
+        артикул Ozon: {{ product.article_ozon or '—' }};
+        источник цены: {{ 'ручная' if product.manual_price == 1 else 'из 1С' }};
+        поставляется: {{ 'да' if product.is_active else 'нет' }}.
+    </p>
+    <p class="hint">
+        Переопределения: наценка {{ product.margin_pct or '—' }} %,
+        ППУ {{ product.ppu_rub_per_kg or '—' }} ₽/кг,
+        допы {{ product.extras_rub or '—' }} ₽.
+        Пустое значение = глобальная настройка.
+    </p>
+    <form class="inline" method="post" action="{{ url_for('web.product_override', product_id=product.id) }}">
+        <input type="hidden" name="next" value="product_history">
+        <input type="hidden" name="product_id" value="{{ product.id }}">
+        {% for field, label in override_fields %}
+        <label>{{ label }}: <input type="text" name="{{ field }}" size="8"></label>
+        {% endfor %}
+        <button type="submit">Сохранить переопределения</button>
+    </form>
+    <form class="inline" method="post" action="{{ url_for('web.product_toggle_active', product_id=product.id) }}">
+        <input type="hidden" name="next" value="product_history">
+        <input type="hidden" name="product_id" value="{{ product.id }}">
+        <button type="submit">Поставляется: переключить</button>
+    </form>
+    <p><a href="{{ url_for('web.assortment') }}">← к ассортименту</a></p>
+</section>
+
+<section>
+    <h2>Ручные цены</h2>
+    {% if prices %}
+    <table>
+        <thead><tr><th>Цена</th><th>Действует с</th></tr></thead>
+        <tbody>
+            {% for row in prices %}
+            <tr><td>{{ row.price }}</td><td>{{ row.valid_from }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="hint">Ручных цен нет — цена берётся из 1С.</p>
+    {% endif %}
+    <form method="post" action="{{ url_for('web.product_price', pid=product.id) }}">
+        <input type="hidden" name="next" value="product_history">
+        <input type="hidden" name="product_id" value="{{ product.id }}">
+        <input type="text" name="price" size="8" placeholder="цена">
+        <input type="date" name="valid_from">
+        <button type="submit">Добавить ручную цену</button>
+    </form>
+</section>
+
+<section>
+    <h2>Вес ППУ</h2>
+    {% if weights %}
+    <table>
+        <thead><tr><th>Вес, г</th><th>Действует с</th></tr></thead>
+        <tbody>
+            {% for row in weights %}
+            <tr><td>{{ row.weight_g }}</td><td>{{ row.valid_from }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="hint">Вес не задан — ППУ не начисляется.</p>
+    {% endif %}
+    <form method="post" action="{{ url_for('web.product_weight', pid=product.id) }}">
+        <input type="hidden" name="next" value="product_history">
+        <input type="hidden" name="product_id" value="{{ product.id }}">
+        <input type="text" name="weight_g" size="5" placeholder="вес">
+        <input type="date" name="valid_from">
+        <button type="submit">Добавить вес</button>
+    </form>
+</section>
+
+<section>
+    <h2>Дополнительные расходы</h2>
+    {% if extras %}
+    <table>
+        <thead><tr><th>Статья</th><th>Сумма</th><th>С</th><th>По</th></tr></thead>
+        <tbody>
+            {% for row in extras %}
+            <tr><td>{{ row.kind }}</td><td>{{ row.rub }}</td>
+                <td>{{ row.valid_from }}</td><td>{{ row.valid_to or '—' }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="hint">Дополнительных расходов нет.</p>
+    {% endif %}
+    <p><a href="{{ url_for('web.expenses') }}">Добавить расход на странице «Расходы»</a></p>
+</section>
+
+<section>
+    <h2>История расчётов</h2>
+    {% if history %}
+    <table>
+        <thead><tr><th>Дата расчёта</th><th>МП</th><th>Цена</th><th>Себестоимость</th></tr></thead>
+        <tbody>
+            {% for row in history %}
+            <tr>
+                <td>{{ row.calc_date }}</td>
+                <td>{{ row.marketplace }}</td>
+                <td>{{ row.price or '—' }}</td>
+                <td>{{ row.cost if row.cost is not none else '—' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="hint">Товар ещё не участвовал в расчётах.</p>
+    {% endif %}
+</section>
+{% endblock %}

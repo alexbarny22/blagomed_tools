@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block content %}
+{% set mp_label = 'Вайлдберриз' if marketplace == 'wb' else 'Ozon' %}
+<h2>Эталон {{ mp_label }}</h2>
+
+<section>
+    <p class="hint">
+        Профили: {{ profile_keys|join(', ') }}. Без цены 1С: {{ no_price_count }}.
+        {% if marketplace == 'ozon' %}Позиции объединены из «цены» и «финансы».{% endif %}
+        Наценка, ППУ и допы задаются в карточке товара (ссылка в колонке «Товар»).
+    </p>
+    <div class="actions">
+        {% if only_no_price %}
+        <a class="btn btn-line" href="{{ url_for('web.mp_page', marketplace=marketplace) }}">Показать все позиции</a>
+        {% else %}
+        <a class="btn btn-line" href="{{ url_for('web.mp_page', marketplace=marketplace, no_price=1) }}">Только без цены 1С</a>
+        {% endif %}
+        <a class="btn btn-line" href="{{ url_for('web.templates_page') }}">Шаблоны</a>
+    </div>
+</section>
+
+{% if rows %}
+<form method="post" action="{{ url_for('web.assortment_bulk') }}">
+<input type="hidden" name="next" value="{{ 'mp_wb' if marketplace == 'wb' else 'mp_ozon' }}">
+<section>
+    <table>
+        <thead>
+            <tr>
+                <th><input type="checkbox" id="selall" title="выделить все"></th>
+                <th>Строка</th>
+                <th>Артикул МП</th>
+                <th>Артикул поставщика</th>
+                <th>Товар</th>
+                <th>Закупка</th>
+                <th>Себестоимость</th>
+                <th>Было</th>
+                <th>Поставляется</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr class="{{ 'jump' if row.jump else ('bad' if row.no_price else '') }}">
+                <td>
+                    {% if row.product_id is not none %}
+                    <input type="checkbox" name="ids" value="{{ row.product_id }}" class="row-check">
+                    {% endif %}
+                </td>
+                <td>{{ row.row }}</td>
+                <td>{{ row.article_mp }}</td>
+                <td>{{ row.article_supplier or '—' }}</td>
+                <td>
+                    {% if row.product_id is not none %}
+                    <a href="{{ url_for('web.product_history', pid=row.product_id) }}">{{ row.name or 'без названия' }}</a>
+                    {% else %}
+                    не сопоставлен
+                    {% endif %}
+                    {% if not row.is_active %}<em>(не поставляется)</em>{% endif %}
+                </td>
+                <td>{{ row.price or '—' }}</td>
+                <td>
+                    {{ row.cost if row.cost is not none else '—' }}
+                    {% if row.jump and row.cost is not none and row.prev_cost is not none %}
+                    <strong class="up">{{ '%+.2f'|format(row.cost - row.prev_cost) }}</strong>
+                    {% endif %}
+                </td>
+                <td>{{ row.prev_cost if row.prev_cost is not none else '—' }}</td>
+                <td>
+                    {% if row.product_id is not none %}
+                    <button form="tog{{ row.product_id }}" type="submit" class="btn-line">
+                        {{ 'да' if row.is_active else 'нет' }}
+                    </button>
+                    {% else %}—{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="actions">
+        <label>Действие
+            <select name="action">
+                <option value="activate">Поставляется</option>
+                <option value="deactivate">Не поставляется</option>
+                <option value="margin_pct">Наценка, %</option>
+                <option value="ppu_rub_per_kg">ППУ, ₽/кг</option>
+                <option value="extras_rub">Допы, ₽</option>
+            </select>
+        </label>
+        <input type="text" name="value" size="8" placeholder="значение">
+        <button type="submit">Применить к выбранным</button>
+    </div>
+</section>
+</form>
+
+{% set seen_toggle = [] %}
+{% for row in rows %}
+{% if row.product_id is not none and row.product_id not in seen_toggle %}
+{% set _ = seen_toggle.append(row.product_id) %}
+<form id="tog{{ row.product_id }}" method="post"
+      action="{{ url_for('web.product_toggle_active', product_id=row.product_id) }}">
+    <input type="hidden" name="next" value="{{ 'mp_wb' if marketplace == 'wb' else 'mp_ozon' }}">
+</form>
+{% endif %}
+{% endfor %}
+
+<script>
+document.getElementById('selall').addEventListener('change', function (e) {
+    var boxes = document.querySelectorAll('input.row-check');
+    for (var i = 0; i < boxes.length; i++) { boxes[i].checked = e.target.checked; }
+});
+</script>
+{% else %}
+<section>
+    <p>Эталон ещё не загружен — загрузите файл на странице
+        <a href="{{ url_for('web.templates_page') }}">Шаблоны</a>.</p>
+</section>
+{% endif %}
+{% endblock %}

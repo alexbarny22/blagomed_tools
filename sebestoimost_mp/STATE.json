@@ -1,0 +1,66 @@
+{
+  "project": "sebestoimost-mp",
+  "tz_version": "3.0 FINAL",
+  "repo": "alexbarny22/blagomed_tools",
+  "branch": "feature/sebestoimost-mp-v3",
+  "developer": "polza:deepseek-v4-flash + glm-5.3-flash + deepseek-v4.1-flash-1017",
+  "controller": "kimi",
+  "current_stage": 8,
+  "stages": {
+    "0": {
+      "status": "PASS",
+      "commit": "a8b8dff7414b33df00d963042bcbb8b4b8db238a"
+    },
+    "1": {
+      "status": "PASS",
+      "commit": "120115de0f82236bd7bd7a3503d9cf9364e0202e"
+    },
+    "2": {
+      "status": "PASS",
+      "commit": "984d230",
+      "notes": "pytest 12/12. Реальные эталоны: WB — только E3; Ozon — D4 и D19; оригиналы неизменны. Неблокирующее: secure_filename и кириллица — этап 5."
+    },
+    "3": {
+      "status": "PASS",
+      "commit": "57edc0f35022d704d9bc29e6228a10702bee42ba",
+      "decision": {
+        "stage": 3,
+        "status": "PASS",
+        "blocking_issues": [],
+        "next_stage": 4
+      },
+      "notes": "pytest 31/31. Контрольный пример 1300 ₽, ППУ 405, наценка 15%, расходы по датам, история не переписывается. E2E на реальных файлах: 232951 (9999 ₽, 200 г) → 11592 в WB!E3 и Ozon!D19, остальное не тронуто. /download — из последнего прогона."
+    },
+    "4": {
+      "status": "PASS",
+      "commit": "dc7ddb67aac87a39aa0e08cfaeeb4193492f939f",
+      "decision": {
+        "stage": 4,
+        "status": "PASS",
+        "blocking_issues": [],
+        "next_stage": 5
+      },
+      "notes": "pytest 39/39. 1С только чтение: вендоренные onec.py/_com_worker.py (COM-подпроцесс с реальными таймаутами, OData только справочник), price_source, /calc с graceful degradation. CONNECT_ERROR ≠ NOT_FOUND; NEEDS_CONFIRM/AMBIGUOUS цена не используется; без config.ini и при недоступной 1С приложение живо, ручные товары считаются. Живая приёмка боевой 1С — этап 7."
+    },
+    "5": {
+      "status": "PASS",
+      "commit": "единый коммит этапа 5 (см. git log: 'stage 5: полный UI')",
+      "notes": "pytest 47/47 (39 старых + 8 новых test_web_pages.py). UI: поиск товаров (Python-side, SQLite LOWER только ASCII), страницы /problems и /history, возврат на исходную страницу (next), оригинальные имена файлов в uploads, кнопки скачивания, последние загрузки на главной. Найден и исправлен баг: secure_filename кириллического имени терял .xlsx -> openpyxl падал, upload молча не работал; добавлено принудительное расширение."
+    },
+    "6": {
+      "status": "PASS",
+      "commit": "коммит этапов 6-7 (см. git log)",
+      "notes": "INSTALL/START/STOP.cmd: cp866+CRLF, chcp 866, пути в кавычках, venv, config.ini и БД не перезаписываются. pytest 54/54 (+7 test_installer.py)."
+    },
+    "7": {
+      "status": "BLOCK",
+      "commit": "коммит этапов 6-7 (см. git log)",
+      "notes": "E2E_CHECKLIST.md (12 шагов) готов. Живой прогон — только на Windows-машине владельца с боевой 1С; песочница проверить не может. Снятие BLOCK — прогон владельцем."
+    },
+    "8": {
+      "status": "PASS",
+      "commit": "см. git log",
+      "notes": "PR #23 (draft): https://github.com/alexbarny22/blagomed_tools/pull/23. Мердж только с разрешения владельца."
+    }
+  }
+}

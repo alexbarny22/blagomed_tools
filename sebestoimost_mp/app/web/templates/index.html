@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Пульт</h2>
+
+<div class="tiles">
+    <div class="tile {{ 'ok' if onec.ok else 'err' }}">
+        <div class="lbl">1С УТ 11.5</div>
+        <div class="num small">{{ 'Подключено' if onec.ok else 'Нет связи' }}</div>
+        <div class="sub">{{ onec.text }}{% if onec.at %} • пинг {{ onec.at }}{% endif %}</div>
+        <form class="inline" method="post" action="{{ url_for('web.refresh') }}">
+            <button class="btn-line" type="submit">Обновить</button>
+        </form>
+    </div>
+
+    <a class="tile accent" href="{{ url_for('web.assortment') }}">
+        <div class="lbl">Ассортимент</div>
+        <div class="num">{{ products_total }}</div>
+        <div class="sub">WB: {{ wb_matched }} • Ozon: {{ ozon_matched }}</div>
+    </a>
+
+    <a class="tile accent" href="{{ url_for('web.mp_page', marketplace='wb') }}">
+        <div class="lbl">Эталон WB</div>
+        <div class="num">{{ counts.get('wb', 0) }}</div>
+        <div class="sub">
+            {% if uploads.get('wb') %}
+                {{ uploads['wb'].filename }}<br>{{ uploads['wb'].uploaded_at }}
+            {% else %}не загружен{% endif %}
+        </div>
+    </a>
+
+    <a class="tile accent" href="{{ url_for('web.mp_page', marketplace='ozon') }}">
+        <div class="lbl">Эталон Ozon</div>
+        <div class="num">{{ counts.get('ozon_prices', 0) + counts.get('ozon_finance', 0) }}</div>
+        <div class="sub">
+            цены: {{ counts.get('ozon_prices', 0) }} • финансы: {{ counts.get('ozon_finance', 0) }}
+        </div>
+    </a>
+
+    <a class="tile {{ 'err' if no_price_count else 'ok' }}" href="{{ url_for('web.problems') }}">
+        <div class="lbl">Без цены 1С</div>
+        <div class="num">{{ no_price_count }}</div>
+        <div class="sub">{% if no_price_count %}открыть список{% else %}все позиции с ценой{% endif %}</div>
+    </a>
+</div>
+
+<section>
+    <h2>Расчёт себестоимости</h2>
+    <form method="post" action="{{ url_for('web.calc') }}">
+        <div class="form-row">
+            <label>Дата расчёта
+                <input type="date" name="calc_date" value="{{ today }}">
+            </label>
+            <button type="submit">Рассчитать</button>
+            <button type="submit" name="then" value="download">Рассчитать и скачать все</button>
+        </div>
+    </form>
+    <p class="hint">
+        {% if last_run %}
+            Последний прогон №{{ last_run.id }}: {{ last_run.calc_date }},
+            всего {{ last_run.total }}, рассчитано {{ last_run.ok }},
+            проблем {{ last_run.problems }}.
+        {% else %}
+            Расчёт ещё не выполнялся.
+        {% endif %}
+    </p>
+</section>
+
+<section>
+    <h2>Файлы для маркетплейсов</h2>
+    <p class="hint">Заполненные эталоны по последнему прогону.</p>
+    <div class="actions">
+        <a class="btn" href="{{ url_for('web.download', key='wb') }}">Скачать WB</a>
+        <a class="btn" href="{{ url_for('web.download', key='ozon_prices') }}">Скачать Ozon цены</a>
+        <a class="btn" href="{{ url_for('web.download', key='ozon_finance') }}">Скачать Ozon финанс</a>
+        <a class="btn btn-line" href="{{ url_for('web.download_all') }}">Скачать все (ZIP)</a>
+    </div>
+</section>
+
+<section>
+    <h2>Эталоны</h2>
+    <table>
+        <thead>
+            <tr><th>Профиль</th><th>Файл</th><th>Загружен</th><th>Позиций</th></tr>
+        </thead>
+        <tbody>
+            {% for key, label in profile_labels.items() %}
+            <tr>
+                <td>{{ label }}</td>
+                <td>{% if uploads.get(key) %}{{ uploads[key].filename }}{% else %}не загружен{% endif %}</td>
+                <td>{% if uploads.get(key) %}{{ uploads[key].uploaded_at }}{% else %}—{% endif %}</td>
+                <td>{{ counts.get(key, 0) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <p class="hint">Загрузка файлов и автодетект профиля — на странице
+        <a href="{{ url_for('web.templates_page') }}">Шаблоны</a>.</p>
+</section>
+{% endblock %}

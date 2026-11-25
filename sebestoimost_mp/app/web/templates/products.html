@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Товары</h1>
+
+<form method="get" action="{{ url_for('web.products') }}">
+    <input type="text" name="q" value="{{ q }}">
+    <button type="submit">Найти</button>
+    {% if q %}
+    <a href="{{ url_for('web.products') }}">Сбросить</a>
+    {% endif %}
+</form>
+
+{% if products %}
+<table>
+    <thead>
+        <tr><th>Артикул поставщика</th><th>Название</th><th>Режим цены</th><th>Ручная цена</th><th>Вес ППУ, г</th><th>Действия</th></tr>
+    </thead>
+    <tbody>
+        {% for p in products %}
+        <tr>
+            <td>{{ p.article_supplier }}</td>
+            <td>{{ p.name }}</td>
+            <td>{{ 'Ручная' if p.manual_price == 1 else 'Из 1С' }}</td>
+            <td>{{ p.last_price if p.last_price is not none else '—' }}</td>
+            <td>{{ p.last_weight if p.last_weight is not none else '—' }}</td>
+            <td>
+                <form class="inline" method="post" action="{{ url_for('web.product_price', pid=p.id) }}">
+                    <input type="text" name="price" size="8" placeholder="цена">
+                    <input type="date" name="valid_from">
+                    <button type="submit">Цена</button>
+                </form>
+                <form class="inline" method="post" action="{{ url_for('web.product_weight', pid=p.id) }}">
+                    <input type="text" name="weight_g" size="5" placeholder="вес">
+                    <input type="date" name="valid_from">
+                    <button type="submit">Вес</button>
+                </form>
+                <form class="inline" method="post" action="{{ url_for('web.product_toggle_manual', pid=p.id) }}">
+                    <button type="submit">Ручная/1С</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% elif q %}
+<p>По запросу "{{ q }}" ничего не найдено</p>
+{% else %}
+<p>Товары появятся после загрузки файлов WB/Ozon</p>
+{% endif %}
+{% endblock %}
