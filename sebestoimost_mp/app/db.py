@@ -67,10 +67,12 @@ TEMPLATE_PROFILES_DDL = """CREATE TABLE IF NOT EXISTS template_profiles (
 # (marketplace, name, sheet, header_row, data_row,
 #  col_article_mp, col_article_supplier, col_cost_write)
 # sheet для 'wb' — шаблон имени листа, {YYYY-MM} подставляется на дату расчёта
+# Ozon: A = «Артикул» (артикул ПОСТАВЩИКА), B = «SKU» (артикул Ozon).
+# В файле себестоимостей Ozon SKU нет — единственный ключ артикул поставщика.
 TEMPLATE_PROFILES_SEEDS = (
     ('wb', 'wb', 'Себестоимость за {YYYY-MM}', 2, 3, 'A', 'B', 'E'),
-    ('ozon', 'prices', 'Товары и цены', 2, 5, 'A', None, 'BD'),
-    ('ozon', 'finance', 'Sheet1', 1, 2, 'A', None, 'B'),
+    ('ozon', 'prices', 'Товары и цены', 2, 5, 'B', 'A', 'BD'),
+    ('ozon', 'finance', 'Sheet1', 1, 2, 'A', 'A', 'B'),
 )
 
 
@@ -97,7 +99,7 @@ def _seed_template_profiles(conn):
 
 
 def _create_schema(conn):
-    """Полная схема v2 (для нового файла БД)."""
+    """Полная схема для нового файла БД (актуальная версия — v4)."""
     conn.execute("""CREATE TABLE products (
         id INTEGER PRIMARY KEY,
         article_supplier TEXT UNIQUE NOT NULL,
@@ -150,7 +152,7 @@ def _create_schema(conn):
     conn.execute('INSERT INTO settings (key, value, valid_from) VALUES (?, ?, ?)',
                  ('margin_pct', '15', '2026-01-01'))
     _seed_template_profiles(conn)
-    conn.execute('PRAGMA user_version = 3')
+    conn.execute('PRAGMA user_version = 4')
 
 
 def _migrate_v1_to_v2(conn):
@@ -180,8 +182,39 @@ def _migrate_v2_to_v3(conn):
     conn.execute('PRAGMA user_version = 3')
 
 
+def _migrate_v3_to_v4(conn):
+    """v3 -> v4: профили Ozon читают артикул поставщика + чистка сирот.
+
+    В реальных файлах Ozon «Артикул» (колонка A «Товаров и цен») — артикул
+    ПОСТАВЩИКА, «SKU» (колонка B) — артикул Ozon. Профиль v3 читал только
+    SKU, поэтому товары заводились по артикулу Ozon и не мэтчились с 1С.
+    """
+    conn.execute(
+        "UPDATE template_profiles SET col_article_mp = 'B', "
+        "col_article_supplier = 'A' "
+        "WHERE marketplace = 'ozon' AND name = 'prices'"
+    )
+    # В файле себестоимостей Ozon SKU нет: единственный ключ — артикул
+    # поставщика, поэтому он же остаётся «артикулом МП» (дублирование
+    # допустимо: мэтчинг идёт по поставщику в первую очередь).
+    conn.execute(
+        "UPDATE template_profiles SET col_article_mp = 'A', "
+        "col_article_supplier = 'A' "
+        "WHERE marketplace = 'ozon' AND name = 'finance'"
+    )
+    # Сироты — товары, заведённые по SKU Ozon (9-10 знаков) вместо артикула
+    # поставщика. LENGTH-фильтр обязателен: артикулы поставщика (5-6 знаков),
+    # заведённые из файла себестоимостей, не удаляем.
+    conn.execute(
+        "DELETE FROM products WHERE article_ozon IS NOT NULL "
+        "AND article_ozon <> '' AND article_supplier = article_ozon "
+        "AND LENGTH(article_supplier) > 7"
+    )
+    conn.execute('PRAGMA user_version = 4')
+
+
 def init_db(db_path: str):
-    """Инициализирует БД, если файла нет. Если есть — мигрирует до v3.
+    """Инициализирует БД, если файла нет. Если есть — мигрирует до v4.
 
     Существующие данные не перезаписываются.
     """
@@ -197,7 +230,7 @@ def init_db(db_path: str):
             conn.close()
         return
 
-    # Файл есть: миграция только если версия схемы < 3
+    # Файл есть: миграции цепочкой v1 -> v2 -> v3 -> v4
     conn = connect(db_path)
     try:
         version = conn.execute('PRAGMA user_version').fetchone()[0]
@@ -207,6 +240,10 @@ def init_db(db_path: str):
             version = conn.execute('PRAGMA user_version').fetchone()[0]
         if version < 3:
             _migrate_v2_to_v3(conn)
+            conn.commit()
+            version = conn.execute('PRAGMA user_version').fetchone()[0]
+        if version < 4:
+            _migrate_v3_to_v4(conn)
             conn.commit()
     finally:
         conn.close()

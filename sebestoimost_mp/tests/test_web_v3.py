@@ -69,7 +69,8 @@ def test_mp_page_unknown_marketplace_redirects(client):
     assert resp.headers['Location'].endswith('/')
 
 
-def test_templates_upload_ozon_matches_by_article_mp(app, client, tmp_path):
+def test_templates_upload_ozon_without_sku_uses_article_as_supplier(app, client, tmp_path):
+    """Файл Ozon без колонки SKU: «Артикул» — единственный ключ (поставщика)."""
     path = _make_ozon(tmp_path / 'ozon.xlsx')
     resp = _upload(client, '/templates/upload', 'file', path, 'ozon.xlsx',
                    profile_key='ozon_prices')
@@ -88,11 +89,82 @@ def test_templates_upload_ozon_matches_by_article_mp(app, client, tmp_path):
         con.close()
 
     assert uploads == 1
-    assert rows == [('555001', '555001'), ('555002', '555002')]
+    # артикул МП писать неоткуда: колонка та же, что у поставщика
+    assert rows == [('555001', None), ('555002', None)]
 
     resp = client.get('/mp/ozon')
     assert resp.status_code == 200
     assert '555001' in resp.get_data(as_text=True)
+
+
+def _make_ozon_prices_v4(path):
+    """Реальный «Шаблон для обновления цен»: A=Артикул, B=SKU, BD=себестоимость."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Товары и цены'
+    ws['A2'] = 'Артикул'
+    ws['B2'] = 'SKU'
+    ws['C2'] = 'Название товара'
+    ws['BD2'] = 'Новая себестоимость'
+    ws['A5'] = 232922
+    ws['B5'] = 761235340
+    ws['C5'] = 'Крем детский'
+    ws['A6'] = 232923
+    ws['B6'] = 761235341
+    ws['C6'] = 'Масло сливочное'
+    wb.save(path)
+    return path
+
+
+def _make_ozon_finance_v4(path):
+    """«Шаблон файла себестоимостей»: A=Артикул (поставщика), B=Себестоимость."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Sheet1'
+    ws['A1'] = 'Артикул'
+    ws['B1'] = 'Себестоимость'
+    ws['A2'] = 232922
+    ws['B2'] = 500
+    ws['A3'] = 232923
+    ws['B3'] = 700
+    wb.save(path)
+    return path
+
+
+def test_ozon_upload_reads_supplier_article_and_merges_rows(app, client, tmp_path):
+    """Ozon: SKU -> артикул МП, A -> артикул поставщика; строки товара слиты."""
+    prices = _make_ozon_prices_v4(tmp_path / 'prices.xlsx')
+    finance = _make_ozon_finance_v4(tmp_path / 'finance.xlsx')
+
+    resp = _upload(client, '/templates/upload', 'file', prices, 'prices.xlsx',
+                   profile_key='ozon_prices')
+    assert resp.status_code == 302
+    resp = _upload(client, '/templates/upload', 'file', finance, 'finance.xlsx',
+                   profile_key='ozon_finance')
+    assert resp.status_code == 302
+
+    con = _connect(app)
+    try:
+        products = con.execute(
+            'SELECT article_supplier, article_ozon FROM products '
+            'ORDER BY article_supplier'
+        ).fetchall()
+        profile = con.execute(
+            "SELECT col_article_mp, col_article_supplier FROM template_profiles "
+            "WHERE marketplace = 'ozon' AND name = 'prices'"
+        ).fetchone()
+    finally:
+        con.close()
+
+    assert profile == ('B', 'A')
+    # товары заведены по артикулу поставщика, SKU сохранён как артикул Ozon
+    assert products == [('232922', '761235340'), ('232923', '761235341')]
+
+    html = client.get('/mp/ozon').get_data(as_text=True)
+    # один товар — одна строка, хотя он есть и в «ценах», и в «финансах»
+    assert html.count('761235340') == 1
+    assert html.count('761235341') == 1
+    assert html.count('232922') >= 1
 
 
 def test_download_aliases(app, client, tmp_path):

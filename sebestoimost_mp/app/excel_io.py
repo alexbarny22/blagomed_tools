@@ -481,6 +481,15 @@ def detect_profile(path):
 
         result["header_row"] = header_row
 
+        # --- первый проход: есть ли колонка с заголовком ровно 'SKU' ---
+        # В файлах Ozon A = «Артикул» (поставщика), B = «SKU» (артикул Ozon).
+        sku_col = None
+        for c in range(1, max_col + 1):
+            text = _to_str(ws.cell(row=header_row, column=c).value).strip().lower()
+            if text == "sku":
+                sku_col = get_column_letter(c)
+                break
+
         # --- определение колонок в строке заголовков ---
         col_article_mp = None
         col_article_supplier = None
@@ -494,15 +503,24 @@ def detect_profile(path):
             text = raw.lower()
             letter = get_column_letter(c)
 
+            # 'SKU' — артикул Ozon, он и есть артикул маркетплейса
+            if sku_col is not None and letter == sku_col:
+                col_article_mp = letter
+                continue
+
             # Артикул поставщика проверяем раньше основного артикула
             if "поставщик" in text:
                 if col_article_supplier is None:
                     col_article_supplier = letter
                 continue
 
-            # Основной артикул маркетплейса
-            if (text == "артикул" or text.startswith("артикул")) and col_article_mp is None:
-                col_article_mp = letter
+            # 'Артикул': при наличии 'SKU' это артикул поставщика, иначе — МП
+            if text.startswith("артикул"):
+                if sku_col is not None:
+                    if col_article_supplier is None:
+                        col_article_supplier = letter
+                elif col_article_mp is None:
+                    col_article_mp = letter
 
             # Себестоимость: 'Новая себестоимость' имеет приоритет
             if "новая себестоимость" in text:
@@ -518,7 +536,7 @@ def detect_profile(path):
 
         if col_article_mp is None:
             warnings.append(
-                f"В строке заголовков {header_row} не найдена колонка 'Артикул'"
+                f"В строке заголовков {header_row} не найдена колонка 'Артикул' / 'SKU'"
             )
         if col_cost_write is None:
             warnings.append(

@@ -237,13 +237,13 @@ _PROFILE_DEFAULTS = {
     },
     'ozon_prices': {
         'marketplace': 'ozon', 'name': 'prices', 'sheet': 'Товары и цены',
-        'header_row': 2, 'data_row': 5, 'col_article_mp': 'A',
-        'col_article_supplier': None, 'col_cost_write': 'BD',
+        'header_row': 2, 'data_row': 5, 'col_article_mp': 'B',
+        'col_article_supplier': 'A', 'col_cost_write': 'BD',
     },
     'ozon_finance': {
         'marketplace': 'ozon', 'name': 'finance', 'sheet': 'Sheet1',
         'header_row': 1, 'data_row': 2, 'col_article_mp': 'A',
-        'col_article_supplier': None, 'col_cost_write': 'B',
+        'col_article_supplier': 'A', 'col_cost_write': 'B',
     },
 }
 
@@ -358,7 +358,9 @@ def _sync_products_from_items(db, key, items):
             (supplier, _today()),
         )
         created += cur.rowcount or 0
-        if article_mp:
+        # Если артикул МП совпал с артикулом поставщика (в файле себестоимостей
+        # Ozon SKU нет), артикул МП писать некуда — иначе он затрёт SKU.
+        if article_mp and article_mp != supplier:
             db.execute(
                 f"UPDATE products SET {column} = ? WHERE article_supplier = ?",
                 (article_mp, supplier),
@@ -924,7 +926,7 @@ def mp_page(marketplace):
     prices = _last_run_prices(db)
     column = MP_ARTICLE_COLUMNS[marketplace]
 
-    rows, seen = [], set()
+    rows, seen, seen_products = [], set(), set()
     for key in _MP_KEYS[marketplace]:
         upload = _last_upload(db, key)
         if upload is None:
@@ -953,6 +955,12 @@ def mp_page(marketplace):
                     (article_mp,)).fetchone())
 
             product_id = int(product['id']) if product else None
+            # Один товар встречается и в «ценах», и в «финансах» — показываем
+            # его одной строкой (артикул МП + артикул поставщика вместе).
+            if product_id is not None:
+                if product_id in seen_products:
+                    continue
+                seen_products.add(product_id)
             if only_no_price and product_id is not None and product_id not in problems:
                 continue
             cost, prev_cost, jump = costs.get(product_id, (None, None, 0))

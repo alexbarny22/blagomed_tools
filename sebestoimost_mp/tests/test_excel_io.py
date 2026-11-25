@@ -7,7 +7,8 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from app.db import init_db, connect
-from app.excel_io import TEMPLATES, read_items, write_costs
+from app.excel_io import (TEMPLATES, Profile, detect_profile, read_items,
+                          read_items_profile, write_costs)
 
 
 def _connect(app):
@@ -216,3 +217,92 @@ def test_empty_items_skipped(tmp_path):
     items = read_items(path, TEMPLATES["wb"])
     assert len(items) == 1
     assert items[0]["article_supplier"] == "SUP002"
+
+
+# ------------------------------------------------------- автодетект Ozon ---
+
+def _make_ozon_prices(path):
+    """Реальный «Шаблон для обновления цен» Ozon: A=Артикул, B=SKU, BD=себестоимость."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Товары и цены"
+    ws["A2"] = "Артикул"
+    ws["B2"] = "SKU"
+    ws["C2"] = "Название товара"
+    ws["BD2"] = "Новая себестоимость"
+    ws["A5"] = 232922
+    ws["B5"] = 761235340
+    ws["C5"] = "Крем детский"
+    ws["A6"] = 232923
+    ws["B6"] = 761235341
+    ws["C6"] = "Масло сливочное"
+    wb.save(path)
+    return path
+
+
+def test_detect_profile_ozon_sku(tmp_path):
+    """Заголовки [«Артикул», «SKU», «Название товара»]: SKU -> артикул МП."""
+    path = _make_ozon_prices(tmp_path / "ozon_prices.xlsx")
+    result = detect_profile(path)
+
+    assert result["sheet"] == "Товары и цены"
+    assert result["header_row"] == 2
+    assert result["col_article_mp"] == "B"
+    assert result["col_article_supplier"] == "A"
+    assert result["col_cost_write"] == "BD"
+    assert result["data_row"] == 5
+    assert result["warnings"] == []
+
+
+def test_detect_profile_without_sku_keeps_article_as_mp(tmp_path):
+    """Без колонки SKU поведение прежнее: «Артикул» -> артикул МП."""
+    path = tmp_path / "ozon_finance.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "Артикул"
+    ws["B1"] = "Себестоимость"
+    ws["A2"] = 232922
+    ws["B2"] = 500
+    wb.save(path)
+
+    result = detect_profile(path)
+    assert result["col_article_mp"] == "A"
+    assert result["col_article_supplier"] is None
+    assert result["col_cost_write"] == "B"
+    assert result["header_row"] == 1
+    assert result["data_row"] == 2
+
+
+def test_detect_profile_supplier_header_has_priority(tmp_path):
+    """Заголовок со словом «поставщик» важнее правила SKU."""
+    path = tmp_path / "ozon_prices_supplier.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Товары и цены"
+    ws["A2"] = "Артикул поставщика"
+    ws["B2"] = "SKU"
+    ws["C2"] = "Новая себестоимость"
+    ws["A5"] = 232922
+    ws["B5"] = 761235340
+    wb.save(path)
+
+    result = detect_profile(path)
+    assert result["col_article_mp"] == "B"
+    assert result["col_article_supplier"] == "A"
+    assert result["col_cost_write"] == "C"
+
+
+def test_read_items_ozon_prices_profile(tmp_path):
+    """Профиль prices (mp=B, supplier=A): поставщик читается из колонки A."""
+    path = _make_ozon_prices(tmp_path / "ozon_prices.xlsx")
+    profile = Profile(marketplace="ozon", name="prices", sheet="Товары и цены",
+                      header_row=2, data_row=5, col_article_mp="B",
+                      col_article_supplier="A", col_cost_write="BD")
+
+    items = read_items_profile(path, profile)
+    assert items == [
+        {"row": 5, "article_mp": "761235340", "article_supplier": "232922"},
+        {"row": 6, "article_mp": "761235341", "article_supplier": "232923"},
+    ]
+
