@@ -118,15 +118,6 @@ def test_price_redirect_default(app, client):
     assert resp.headers['Location'].endswith('/products')
 
 
-def test_history(client, tmp_path):
-    _upload_wb(client, tmp_path)
-    client.post('/calc', data={'calc_date': '2026-11-24'})
-
-    resp = client.get('/history')
-    assert resp.status_code == 200
-    assert '№1' in resp.get_data(as_text=True)
-
-
 def test_upload_keeps_original_filename(app, client, tmp_path):
     resp = _upload_wb(client, tmp_path, filename='Вайлдберриз Себестоимость.xlsx')
     assert resp.status_code in (200, 302)

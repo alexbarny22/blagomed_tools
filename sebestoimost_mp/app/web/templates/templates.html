@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Шаблоны эталонов</h2>
+
+<p class="hint">Профиль (лист, строка заголовка, колонки) определяется автоматически
+    при загрузке. Если файл не распознан — загрузите его ещё раз после проверки
+    структуры: поддерживаются «Вайлдберриз», «Ozon — цены» и «Ozon — финансы».</p>
+
+{% for block in blocks %}
+<section>
+    <h2>{{ block.label }}</h2>
+    <p>
+        Профиль: лист «{{ block.profile.sheet }}», заголовок строки
+        {{ block.profile.header_row }}, данные с {{ block.profile.data_row }},
+        артикул МП {{ block.profile.col_article_mp }},
+        артикул поставщика {{ block.profile.col_article_supplier or '—' }},
+        запись себестоимости {{ block.profile.col_cost_write }}.
+    </p>
+    <p>
+        {% if block.upload %}
+        Последняя загрузка: {{ block.upload.filename }} от {{ block.upload.uploaded_at }},
+        позиций {{ block.items_count }}.
+        {% else %}
+        Файл ещё не загружался.
+        {% endif %}
+    </p>
+    <form method="post" action="{{ url_for('web.templates_upload') }}" enctype="multipart/form-data">
+        <input type="hidden" name="profile_key" value="{{ block.key }}">
+        <input type="hidden" name="next" value="templates">
+        <input type="file" name="file" accept=".xlsx" required>
+        <button type="submit">Загрузить и распознать</button>
+    </form>
+    <p>
+        {% if block.key == 'wb' %}
+        <a class="btn" href="{{ url_for('web.mp_page', marketplace='wb') }}">Открыть эталон WB</a>
+        {% else %}
+        <a class="btn" href="{{ url_for('web.mp_page', marketplace='ozon') }}">Открыть эталон Ozon</a>
+        {% endif %}
+        <a class="btn" href="{{ url_for('web.download', key=block.key) }}">Скачать результат</a>
+    </p>
+</section>
+{% endfor %}
+{% endblock %}
